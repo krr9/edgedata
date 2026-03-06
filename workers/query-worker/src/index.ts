@@ -252,6 +252,34 @@ interface SavedSearchRow {
   updated_at?: string | null;
 }
 
+interface ScheduledSearchRow {
+  id: string;
+  name: string;
+  ppl: string;
+  time_window_minutes: number;
+  schedule_cron: string;
+  enabled: number;
+  actions_json: string;
+  max_results: number;
+  created_by?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+interface ScheduledSearchResultRow {
+  id: string;
+  scheduled_search_id: string;
+  run_at: string;
+  time_from: string;
+  time_to: string;
+  status: string;
+  result_count: number;
+  results_json: string;
+  stats_json: string;
+  error_message?: string | null;
+  created_at: string;
+}
+
 interface AlertRow {
   id: string;
   name: string;
@@ -397,12 +425,20 @@ const ROLE_PERMISSION_DEFAULTS: Record<string, string[]> = {
   admin: [
     'search.read',
     'dashboard.read',
+    'dashboard.write',
+    'dashboard.delete',
     'saved_search.read',
     'saved_search.write',
     'saved_search.delete',
+    'scheduled_search.read',
+    'scheduled_search.write',
+    'scheduled_search.delete',
     'alert.read',
     'alert.write',
     'alert.delete',
+    'lookup.read',
+    'lookup.write',
+    'lookup.delete',
     'user.read',
     'user.invite',
     'user.disable',
@@ -413,12 +449,17 @@ const ROLE_PERMISSION_DEFAULTS: Record<string, string[]> = {
   analyst: [
     'search.read',
     'dashboard.read',
+    'dashboard.write',
     'saved_search.read',
     'saved_search.write',
     'saved_search.delete',
-    'alert.read'
+    'scheduled_search.read',
+    'scheduled_search.write',
+    'alert.read',
+    'lookup.read',
+    'lookup.write'
   ],
-  viewer: ['search.read', 'dashboard.read', 'saved_search.read']
+  viewer: ['search.read', 'dashboard.read', 'saved_search.read', 'scheduled_search.read', 'lookup.read']
 };
 
 let rbacInitPromise: Promise<void> | null = null;
@@ -3047,6 +3088,117 @@ async function handleSavedSearches(
   return textResponse('Method not allowed', 405, requestCorsHeaders);
 }
 
+async function handleScheduledSearches(
+  request: Request,
+  env: Env,
+  pathname: string,
+  auth: AuthContext,
+  requestCorsHeaders: Record<string, string>
+): Promise<Response> {
+  const principal = auth.email || auth.principal;
+  const isAdmin = auth.role === 'admin' || auth.role === 'superadmin';
+
+  if (request.method === 'GET' && pathname === '/scheduled-searches') {
+    assertPermission(auth, 'scheduled_search.read');
+    const rows = isAdmin
+      ? await env.DB.prepare(
+          'SELECT * FROM scheduled_searches ORDER BY created_at DESC LIMIT 100'
+        ).all<ScheduledSearchRow>()
+      : await env.DB.prepare(
+          'SELECT * FROM scheduled_searches WHERE created_by = ? OR created_by IS NULL ORDER BY created_at DESC LIMIT 100'
+        ).bind(principal).all<ScheduledSearchRow>();
+    return jsonResponse(rows.results || [], 200, requestCorsHeaders);
+  }
+
+  if (request.method === 'POST' && pathname === '/scheduled-searches') {
+    assertPermission(auth, 'scheduled_search.write');
+    const body = await request.json() as Record<string, unknown>;
+    const name = String(body.name || '').trim();
+    const ppl = String(body.ppl || '').trim();
+    if (!name || !ppl) {
+      return jsonResponse({ error: 'name and ppl are required' }, 400, requestCorsHeaders);
+    }
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const timeWindowMinutes = Math.max(1, Math.min(10080, Number(body.time_window_minutes) || 60));
+    const scheduleCron = String(body.schedule_cron || '0 * * * *').trim();
+    const enabled = body.enabled === 0 || body.enabled === false ? 0 : 1;
+    const actionsJson = JSON.stringify(Array.isArray(body.actions) ? body.actions : []);
+    const maxResults = Math.max(1, Math.min(5000, Number(body.max_results) || 500));
+
+    await env.DB.prepare(
+      `INSERT INTO scheduled_searches (id, name, ppl, time_window_minutes, schedule_cron, enabled, actions_json, max_results, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(id, name, ppl, timeWindowMinutes, scheduleCron, enabled, actionsJson, maxResults, principal, now, now).run();
+
+    return jsonResponse({ id, name, ppl, time_window_minutes: timeWindowMinutes, schedule_cron: scheduleCron, enabled, max_results: maxResults, created_by: principal, created_at: now }, 201, requestCorsHeaders);
+  }
+
+  const idMatch = pathname.match(/^\/scheduled-searches\/([^/]+)/);
+  if (!idMatch) return textResponse('Not found', 404, requestCorsHeaders);
+  const id = idMatch[1];
+
+  if (request.method === 'GET' && pathname.endsWith('/results')) {
+    assertPermission(auth, 'scheduled_search.read');
+    const rows = await env.DB.prepare(
+      'SELECT * FROM scheduled_search_results WHERE scheduled_search_id = ? ORDER BY run_at DESC LIMIT 50'
+    ).bind(id).all<ScheduledSearchResultRow>();
+    return jsonResponse(rows.results || [], 200, requestCorsHeaders);
+  }
+
+  if (request.method === 'POST' && pathname.endsWith('/run')) {
+    assertPermission(auth, 'scheduled_search.write');
+    const search = await env.DB.prepare('SELECT * FROM scheduled_searches WHERE id = ?')
+      .bind(id).first<ScheduledSearchRow>();
+    if (!search) return jsonResponse({ error: 'Not found' }, 404, requestCorsHeaders);
+    if (!isAdmin && search.created_by && search.created_by !== principal) {
+      throw new Error('Forbidden');
+    }
+    return jsonResponse({ message: 'Scheduled search queued for execution', id }, 202, requestCorsHeaders);
+  }
+
+  if (request.method === 'PUT') {
+    assertPermission(auth, 'scheduled_search.write');
+    const existing = await env.DB.prepare('SELECT id, created_by FROM scheduled_searches WHERE id = ?')
+      .bind(id).first<{ id: string; created_by?: string | null }>();
+    if (!existing) return jsonResponse({ error: 'Not found' }, 404, requestCorsHeaders);
+    if (!isAdmin && existing.created_by && existing.created_by !== principal) {
+      throw new Error('Forbidden');
+    }
+    const body = await request.json() as Record<string, unknown>;
+    const now = new Date().toISOString();
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    if (body.name !== undefined) { updates.push('name = ?'); values.push(String(body.name).trim()); }
+    if (body.ppl !== undefined) { updates.push('ppl = ?'); values.push(String(body.ppl).trim()); }
+    if (body.time_window_minutes !== undefined) { updates.push('time_window_minutes = ?'); values.push(Math.max(1, Math.min(10080, Number(body.time_window_minutes) || 60))); }
+    if (body.schedule_cron !== undefined) { updates.push('schedule_cron = ?'); values.push(String(body.schedule_cron).trim()); }
+    if (body.enabled !== undefined) { updates.push('enabled = ?'); values.push(body.enabled ? 1 : 0); }
+    if (body.actions !== undefined) { updates.push('actions_json = ?'); values.push(JSON.stringify(Array.isArray(body.actions) ? body.actions : [])); }
+    if (body.max_results !== undefined) { updates.push('max_results = ?'); values.push(Math.max(1, Math.min(5000, Number(body.max_results) || 500))); }
+    updates.push('updated_at = ?');
+    values.push(now);
+    values.push(id);
+    await env.DB.prepare(`UPDATE scheduled_searches SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    return jsonResponse({ id, updated_at: now }, 200, requestCorsHeaders);
+  }
+
+  if (request.method === 'DELETE') {
+    assertPermission(auth, 'scheduled_search.delete');
+    const existing = await env.DB.prepare('SELECT id, created_by FROM scheduled_searches WHERE id = ?')
+      .bind(id).first<{ id: string; created_by?: string | null }>();
+    if (!existing) return new Response(null, { status: 204, headers: requestCorsHeaders });
+    if (!isAdmin && existing.created_by && existing.created_by !== principal) {
+      throw new Error('Forbidden');
+    }
+    await env.DB.prepare('DELETE FROM scheduled_search_results WHERE scheduled_search_id = ?').bind(id).run();
+    await env.DB.prepare('DELETE FROM scheduled_searches WHERE id = ?').bind(id).run();
+    return new Response(null, { status: 204, headers: requestCorsHeaders });
+  }
+
+  return textResponse('Method not allowed', 405, requestCorsHeaders);
+}
+
 async function getUserRoleIds(env: Env, userId: string): Promise<string[]> {
   const rows = await env.DB.prepare(
     'SELECT role_id FROM user_roles WHERE user_id = ?'
@@ -3659,6 +3811,15 @@ export default {
     if (url.pathname.startsWith('/saved-searches')) {
       try {
         return await handleSavedSearches(request, env, url.pathname, auth, requestCorsHeaders);
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders, 500);
+      }
+    }
+
+    if (url.pathname.startsWith('/scheduled-searches')) {
+      try {
+        return await handleScheduledSearches(request, env, url.pathname, auth, requestCorsHeaders);
       } catch (error) {
         await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
         return errorResponse(error, requestCorsHeaders, 500);

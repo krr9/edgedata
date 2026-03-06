@@ -14,6 +14,7 @@ export interface Env {
   ALERT_RUN_SECRET?: string;
   SLACK_WEBHOOK_URL?: string;
   WEBHOOK_URL?: string;
+  QUERY_WORKER_URL?: string;
 }
 
 interface AccessJwtHeader {
@@ -661,6 +662,166 @@ async function runAlertEvaluation(env: Env): Promise<{ evaluated: number; failed
   return { evaluated, failed };
 }
 
+interface ScheduledSearch {
+  id: string;
+  name: string;
+  ppl: string;
+  time_window_minutes: number;
+  schedule_cron: string;
+  enabled: number;
+  actions_json: string;
+  max_results: number;
+  created_by?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+interface ScheduledSearchAction {
+  type: 'summary' | 'slack' | 'webhook';
+  retain_days?: number;
+  webhook_url?: string;
+  url?: string;
+  method?: string;
+  template?: string;
+}
+
+function cronMatchesNow(cron: string, now: Date): boolean {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length < 5) return false;
+  const [minPart, hourPart, , , ] = parts;
+  const minute = now.getUTCMinutes();
+  const hour = now.getUTCHours();
+
+  const matchesPart = (part: string, value: number): boolean => {
+    if (part === '*') return true;
+    if (part.includes('/')) {
+      const [, step] = part.split('/');
+      return value % (parseInt(step, 10) || 1) === 0;
+    }
+    if (part.includes(',')) {
+      return part.split(',').some(p => parseInt(p, 10) === value);
+    }
+    return parseInt(part, 10) === value;
+  };
+
+  return matchesPart(minPart, minute) && matchesPart(hourPart, hour);
+}
+
+async function processScheduledSearch(search: ScheduledSearch, env: Env): Promise<void> {
+  const now = new Date();
+  const timeTo = now.toISOString();
+  const timeFrom = new Date(now.getTime() - search.time_window_minutes * 60 * 1000).toISOString();
+  const resultId = crypto.randomUUID();
+  const actions = safeJsonParse<ScheduledSearchAction[]>(search.actions_json, []);
+
+  let results: Record<string, unknown>[] = [];
+  let status = 'success';
+  let errorMessage: string | null = null;
+
+  try {
+    if (env.QUERY_WORKER_URL) {
+      const response = await fetch(`${env.QUERY_WORKER_URL}/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Internal-Caller': 'alert-worker' },
+        body: JSON.stringify({
+          ppl: search.ppl,
+          from: timeFrom,
+          to: timeTo,
+          limit: search.max_results
+        })
+      });
+      if (response.ok) {
+        const body = await response.json() as { results?: Record<string, unknown>[]; events?: Record<string, unknown>[] };
+        results = (body.results || body.events || []).slice(0, search.max_results);
+      } else {
+        throw new Error(`Query worker returned ${response.status}`);
+      }
+    }
+  } catch (err) {
+    status = 'error';
+    errorMessage = String(err);
+  }
+
+  const resultCount = results.length;
+  const statsJson = JSON.stringify({ duration_ms: Date.now() - now.getTime(), scanned: resultCount });
+
+  await env.DB.prepare(
+    `INSERT INTO scheduled_search_results (id, scheduled_search_id, run_at, time_from, time_to, status, result_count, results_json, stats_json, error_message, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    resultId, search.id, timeTo, timeFrom, timeTo, status, resultCount,
+    JSON.stringify(results.slice(0, 100)),
+    statsJson, errorMessage, timeTo
+  ).run();
+
+  for (const action of actions) {
+    try {
+      if (action.type === 'slack' && action.webhook_url) {
+        const text = (action.template || 'Scheduled search "{{name}}" found {{result_count}} results')
+          .replace(/\{\{name\}\}/g, search.name)
+          .replace(/\{\{result_count\}\}/g, String(resultCount));
+        await fetch(action.webhook_url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text })
+        });
+      } else if (action.type === 'webhook' && action.url) {
+        await fetch(action.url, {
+          method: action.method || 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            scheduled_search_id: search.id,
+            name: search.name,
+            run_at: timeTo,
+            result_count: resultCount,
+            results: results.slice(0, 10)
+          })
+        });
+      }
+    } catch {
+      // action dispatch is best-effort
+    }
+  }
+
+  const retainDays = actions.find(a => a.retain_days)?.retain_days || 30;
+  const cutoff = new Date(now.getTime() - retainDays * 86400000).toISOString();
+  await env.DB.prepare(
+    'DELETE FROM scheduled_search_results WHERE scheduled_search_id = ? AND created_at < ?'
+  ).bind(search.id, cutoff).run();
+}
+
+async function runScheduledSearches(env: Env): Promise<{ ran: number; failed: number }> {
+  const now = new Date();
+  const rows = await env.DB.prepare('SELECT * FROM scheduled_searches WHERE enabled = 1').all<ScheduledSearch>();
+  const searches = rows.results || [];
+
+  let ran = 0;
+  let failed = 0;
+
+  for (const search of searches) {
+    if (!cronMatchesNow(search.schedule_cron, now)) continue;
+
+    const lastRun = await env.DB.prepare(
+      'SELECT run_at FROM scheduled_search_results WHERE scheduled_search_id = ? ORDER BY run_at DESC LIMIT 1'
+    ).bind(search.id).first<{ run_at: string }>();
+
+    if (lastRun) {
+      const lastMs = new Date(lastRun.run_at).getTime();
+      if (now.getTime() - lastMs < 55000) continue;
+    }
+
+    try {
+      await processScheduledSearch(search, env);
+      ran += 1;
+    } catch (error) {
+      failed += 1;
+      console.error(`Scheduled search ${search.id} failed`, error);
+    }
+  }
+
+  return { ran, failed };
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -691,8 +852,19 @@ export default {
   },
 
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runAlertEvaluation(env).then((result) => {
-      console.log(`alerts evaluated=${result.evaluated} failed=${result.failed}`);
-    }));
+    ctx.waitUntil(
+      Promise.all([
+        runAlertEvaluation(env).then((result) => {
+          console.log(`alerts evaluated=${result.evaluated} failed=${result.failed}`);
+        }),
+        runScheduledSearches(env).then((result) => {
+          if (result.ran > 0 || result.failed > 0) {
+            console.log(`scheduled_searches ran=${result.ran} failed=${result.failed}`);
+          }
+        }).catch((err) => {
+          console.error('scheduled search cycle failed', err);
+        })
+      ])
+    );
   }
 };

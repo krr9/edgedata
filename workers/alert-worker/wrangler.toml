@@ -30,3 +30,4 @@ ACCESS_JWKS_URL = ""
 # Replace with your real Access/IdP admin group name(s).
 ACCESS_ADMIN_GROUPS = "edgedata-admins"
 ACCESS_ADMIN_EMAILS = "example-team@gmail.com"
+QUERY_WORKER_URL = ""

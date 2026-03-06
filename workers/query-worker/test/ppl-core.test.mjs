@@ -121,14 +121,29 @@ test('dedup parses multiple fields', () => {
   assert.deepStrictEqual(stage.fields, ['service', 'host']);
 });
 
+test('eval parses simple arithmetic', () => {
+  const result = parsePplPipeline('search * | eval duration_sec=duration_ms/1000');
+  const stage = result.stages[1];
+  assert.strictEqual(stage.command, 'eval');
+  assert.strictEqual(stage.field, 'duration_sec');
+  assert.strictEqual(stage.expression, 'duration_ms/1000');
+});
+
+test('eval parses if expression', () => {
+  const result = parsePplPipeline('search * | eval is_error=if(status>=500, "yes", "no")');
+  const stage = result.stages[1];
+  assert.strictEqual(stage.field, 'is_error');
+  assert.ok(stage.expression.includes('if('));
+});
+
 test('timechart rejects invalid span', () => {
   assert.throws(() => parsePplPipeline('search * | timechart span=abc count()'), /Invalid timechart span/);
 });
 
 test('parsePplPipeline rejects unsupported commands', () => {
   assert.throws(
-    () => parsePplPipeline('search timeout | eval foo=bar'),
-    /Unsupported PPL command: eval/
+    () => parsePplPipeline('search timeout | transaction trace_id'),
+    /Unsupported PPL command: transaction/
   );
 });
 

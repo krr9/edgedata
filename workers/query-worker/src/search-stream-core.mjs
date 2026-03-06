@@ -1,3 +1,5 @@
+import { evaluateExpression } from './eval-engine.mjs';
+
 function asNumber(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim()) {
@@ -99,6 +101,13 @@ function computeAggregation(fn, field, rows) {
   if (fn === 'latest') return values.length ? values.sort().reverse()[0] : null;
 
   return null;
+}
+
+export function executeEvalPipeline(events, stage) {
+  return events.map(event => ({
+    ...event,
+    [stage.field]: evaluateExpression(stage.expression, event)
+  }));
 }
 
 export function executeDedupPipeline(events, stage) {

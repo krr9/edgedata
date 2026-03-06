@@ -1,4 +1,4 @@
-const COMMANDS = new Set(['search', 'where', 'fields', 'sort', 'head', 'stats', 'timechart', 'top', 'rare', 'dedup']);
+const COMMANDS = new Set(['search', 'where', 'fields', 'sort', 'head', 'stats', 'timechart', 'top', 'rare', 'dedup', 'eval']);
 
 const FIELD_ALIASES = {
   '@timestamp': 'ts',
@@ -223,6 +223,15 @@ function parseStatsClause(body) {
   return { fn: aggregations[0].fn, as: aggregations[0].as, by, aggregations };
 }
 
+function parseEvalClause(body) {
+  const eqPos = body.indexOf('=');
+  if (eqPos < 1) throw new Error('eval requires: <field>=<expression>');
+  const field = normalizeField(body.slice(0, eqPos).trim());
+  const expression = body.slice(eqPos + 1).trim();
+  if (!field || !expression) throw new Error('eval requires: <field>=<expression>');
+  return { field, expression };
+}
+
 function parseDedupClause(body) {
   const fields = parseFieldsClause(body);
   if (fields.length === 0) throw new Error('dedup requires at least one field');
@@ -326,6 +335,10 @@ export function parsePplPipeline(input) {
     }
     if (firstToken === 'timechart') {
       stages.push({ command: 'timechart', ...parseTimechartClause(body) });
+      continue;
+    }
+    if (firstToken === 'eval') {
+      stages.push({ command: 'eval', ...parseEvalClause(body) });
       continue;
     }
     if (firstToken === 'dedup') {

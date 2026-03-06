@@ -9,7 +9,8 @@ import {
   executeTimechartPipeline,
   executeTopPipeline,
   executeRarePipeline,
-  executeDedupPipeline
+  executeDedupPipeline,
+  executeEvalPipeline
 } from '../src/search-stream-core.mjs';
 
 test('isIncrementalStreamPipeline accepts search/where/head only', () => {
@@ -168,4 +169,26 @@ test('executeDedupPipeline removes duplicate trace_ids', () => {
   assert.strictEqual(result.length, 2);
   assert.strictEqual(result[0].event_id, '1');
   assert.strictEqual(result[1].event_id, '3');
+});
+
+test('executeEvalPipeline computes arithmetic', () => {
+  const events = [{ duration_ms: 1500 }];
+  const stage = { command: 'eval', field: 'duration_sec', expression: 'duration_ms/1000' };
+  const result = executeEvalPipeline(events, stage);
+  assert.strictEqual(result[0].duration_sec, 1.5);
+});
+
+test('executeEvalPipeline computes if expression', () => {
+  const events = [{ status: 503 }, { status: 200 }];
+  const stage = { command: 'eval', field: 'is_error', expression: 'if(status>=500, "yes", "no")' };
+  const result = executeEvalPipeline(events, stage);
+  assert.strictEqual(result[0].is_error, 'yes');
+  assert.strictEqual(result[1].is_error, 'no');
+});
+
+test('executeEvalPipeline computes string functions', () => {
+  const events = [{ message: 'Connection Refused' }];
+  const stage = { command: 'eval', field: 'msg_lower', expression: 'lower(message)' };
+  const result = executeEvalPipeline(events, stage);
+  assert.strictEqual(result[0].msg_lower, 'connection refused');
 });

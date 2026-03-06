@@ -1,0 +1,23 @@
+name = "synthetic-worker"
+main = "src/index.ts"
+compatibility_date = "2026-02-16"
+
+triggers = { crons = ["*/15 * * * *"] }
+
+[env.production]
+name = "synthetic-worker-prod"
+
+[[services]]
+binding = "INGEST_SERVICE"
+service = "ingest-worker"
+
+[vars]
+SYNTHETIC_ENABLED = "true"
+SYNTHETIC_BATCH_SIZE = "30"
+SYNTHETIC_PROFILE = "realistic"
+SYNTHETIC_INDEX = "default"
+SYNTHETIC_SERVICE = "edgedata-demo"
+SYNTHETIC_ENV = "demo"
+SYNTHETIC_HOST_PREFIX = "edgedata-cron"
+SYNTHETIC_REGION = "us"
+INGEST_URL = "https://ingest-worker.example.workers.dev/ingest"

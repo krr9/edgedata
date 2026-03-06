@@ -1,0 +1,32 @@
+name = "alert-worker"
+main = "src/index.ts"
+compatibility_date = "2026-02-16"
+
+triggers = { crons = ["* * * * *"] }
+
+[env.production]
+name = "alert-worker-prod"
+
+[[d1_databases]]
+binding = "DB"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_name = "edgedata-db"
+
+[[r2_buckets]]
+binding = "RAW_BUCKET"
+bucket_name = "edgedata-raw"
+
+[[analytics_engine_datasets]]
+binding = "WAE"
+dataset = "log_metrics"
+
+[vars]
+CF_ACCOUNT_ID = ""
+REQUIRE_ACCESS_JWT = "true"
+# Replace with your Cloudflare Access application AUD for this environment.
+ACCESS_AUD = "edgedata-alert-aud"
+ACCESS_ISSUER = "https://edgedata.cloudflareaccess.com"
+ACCESS_JWKS_URL = ""
+# Replace with your real Access/IdP admin group name(s).
+ACCESS_ADMIN_GROUPS = "edgedata-admins"
+ACCESS_ADMIN_EMAILS = "example-team@gmail.com"

@@ -1,0 +1,21 @@
+name = "ingest-worker"
+main = "src/index.ts"
+compatibility_date = "2026-02-16"
+
+[env.production]
+name = "ingest-worker-prod"
+
+[[r2_buckets]]
+binding = "RAW_BUCKET"
+bucket_name = "edgedata-raw"
+
+[[d1_databases]]
+binding = "DB"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[analytics_engine_datasets]]
+binding = "WAE"
+dataset = "log_metrics"
+
+[vars]
+INGEST_RATE_LIMIT_PER_MIN = "2400"

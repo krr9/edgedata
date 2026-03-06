@@ -1,0 +1,4 @@
+cloudflare_api_token = "replace-with-api-token"
+account_id           = "replace-with-account-id"
+raw_bucket_name      = "edgedata-raw"
+d1_database_name     = "edgedata-db"

@@ -1,0 +1,35 @@
+{
+  "name": "edgedata",
+  "version": "1.0.0",
+  "description": "Edge-Native Log Search & SIEM-lite (Cloudflare-Only)",
+  "scripts": {
+    "deploy:ingest": "cd workers/ingest-worker && wrangler deploy",
+    "deploy:query": "cd workers/query-worker && wrangler deploy",
+    "deploy:alert": "cd workers/alert-worker && wrangler deploy",
+    "deploy:synthetic": "cd workers/synthetic-worker && wrangler deploy",
+    "deploy:pages": "cd pages && npm run build && wrangler pages deploy dist --project-name edgedata-1fo",
+    "deploy:all": "npm run deploy:ingest && npm run deploy:query && npm run deploy:alert && npm run deploy:synthetic",
+    "dev:ingest": "cd workers/ingest-worker && wrangler dev",
+    "dev:query": "cd workers/query-worker && wrangler dev",
+    "dev:alert": "cd workers/alert-worker && wrangler dev",
+    "dev:synthetic": "cd workers/synthetic-worker && wrangler dev",
+    "dev:pages": "cd pages && npm run dev",
+    "demo:zeek": "node examples/zeek-demo.mjs",
+    "d1:create": "wrangler d1 create edgedata-db",
+    "d1:migrate": "wrangler d1 execute edgedata-db --file=./schema.sql",
+    "d1:migrate:authz": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/002_authz_ownership.sql",
+    "d1:migrate:users": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/003_auth_users.sql",
+    "d1:migrate:ratelimits": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/004_rate_limits.sql",
+    "d1:migrate:rbac": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/005_auth_rbac.sql",
+    "test:prd": "bash ./scripts/run-prd-smoke-tests.sh",
+    "test:unit": "node --test workers/query-worker/test/*.test.mjs workers/synthetic-worker/test/*.test.mjs workers/ingest-worker/test/*.test.mjs",
+    "test:load": "node ./scripts/load-test.mjs",
+    "test:access-config": "bash ./scripts/test-access-config.sh && bash ./scripts/check-access-config.sh",
+    "ops:reprocess": "node ./scripts/reprocess-raw.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260214.0",
+    "wrangler": "^4.65.0"
+  },
+  "private": true
+}

@@ -1,0 +1,7 @@
+name = "edgedata"
+compatibility_date = "2026-02-16"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "edgedata-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"

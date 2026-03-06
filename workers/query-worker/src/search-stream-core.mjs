@@ -56,6 +56,51 @@ export function resolvePipelineLimit(stages, fallback, max = 5000) {
   return Math.max(1, Math.min(limit, max));
 }
 
+export function executeStatsPipeline(events, stage) {
+  const groups = new Map();
+  const { aggregations, by } = stage;
+
+  for (const event of events) {
+    const key = by.map(f => String(event[f] ?? '')).join('\x00');
+    if (!groups.has(key)) {
+      const base = {};
+      for (const f of by) base[f] = event[f] ?? '';
+      groups.set(key, { base, rows: [] });
+    }
+    groups.get(key).rows.push(event);
+  }
+
+  const results = [];
+  for (const { base, rows } of groups.values()) {
+    const row = { ...base };
+    for (const agg of aggregations) {
+      row[agg.as] = computeAggregation(agg.fn, agg.field, rows);
+    }
+    results.push(row);
+  }
+  return results;
+}
+
+function computeAggregation(fn, field, rows) {
+  if (fn === 'count') return rows.length;
+
+  const values = rows.map(r => r[field]).filter(v => v !== undefined && v !== null);
+
+  if (fn === 'dc') return new Set(values.map(String)).size;
+  if (fn === 'values') return [...new Set(values.map(String))];
+
+  const nums = values.map(Number).filter(Number.isFinite);
+  if (fn === 'sum') return nums.reduce((a, b) => a + b, 0);
+  if (fn === 'avg') return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : 0;
+  if (fn === 'min') return nums.length ? Math.min(...nums) : null;
+  if (fn === 'max') return nums.length ? Math.max(...nums) : null;
+
+  if (fn === 'earliest') return values.length ? values.sort()[0] : null;
+  if (fn === 'latest') return values.length ? values.sort().reverse()[0] : null;
+
+  return null;
+}
+
 export function rowMatchesWhereStages(row, stages) {
   for (const stage of stages || []) {
     if (stage.command !== 'where') continue;

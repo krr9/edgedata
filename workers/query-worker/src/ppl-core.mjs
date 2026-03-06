@@ -187,17 +187,40 @@ function parseHeadClause(body) {
   return Math.min(5000, Math.trunc(count));
 }
 
+const STATS_FUNCTIONS = new Set(['count', 'sum', 'avg', 'min', 'max', 'dc', 'values', 'earliest', 'latest']);
+
 function parseStatsClause(body) {
-  const match = body.match(
-    /^count\s*\(\s*(?:\*|)\s*\)(?:\s+as\s+([a-zA-Z_][a-zA-Z0-9_]*))?\s+by\s+(.+)$/i
-  );
-  if (!match) {
-    throw new Error('stats currently supports: count() by <field>[, <field>...]');
+  const byMatch = body.match(/^(.+?)\s+by\s+(.+)$/i);
+  if (!byMatch) {
+    throw new Error('stats requires: <agg_fn>(<field>) [as <alias>] [<agg_fn>...] by <field>[, <field>...]');
   }
-  const as = (match[1] || 'count').trim();
-  const by = parseFieldsClause(match[2]);
+
+  const aggPart = byMatch[1].trim();
+  const by = parseFieldsClause(byMatch[2]);
   if (by.length === 0) throw new Error('stats requires at least one group-by field');
-  return { fn: 'count', as, by };
+
+  const aggRegex = /(\w+)\s*\(\s*(\*|[a-zA-Z_][a-zA-Z0-9_@.]*)?\s*\)(?:\s+as\s+([a-zA-Z_][a-zA-Z0-9_]*))?/gi;
+  const aggregations = [];
+  let match;
+
+  while ((match = aggRegex.exec(aggPart)) !== null) {
+    const fn = match[1].toLowerCase();
+    if (!STATS_FUNCTIONS.has(fn)) {
+      throw new Error(`Unsupported stats function: ${fn}`);
+    }
+    const field = (fn === 'count') ? null : normalizeField(match[2] || '');
+    if (fn !== 'count' && !field) {
+      throw new Error(`${fn}() requires a field argument`);
+    }
+    const as = match[3] || (fn === 'count' ? 'count' : `${fn}_${field}`);
+    aggregations.push({ fn, field, as });
+  }
+
+  if (aggregations.length === 0) {
+    throw new Error('stats requires at least one aggregation function');
+  }
+
+  return { fn: aggregations[0].fn, as: aggregations[0].as, by, aggregations };
 }
 
 export function parsePplPipeline(input) {

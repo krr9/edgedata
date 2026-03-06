@@ -27,6 +27,43 @@ test('parsePplPipeline parses stats count by fields', () => {
   assert.deepEqual(parsed.stages[2].by, ['service', 'env']);
 });
 
+test('stats parses sum aggregation', () => {
+  const result = parsePplPipeline('search * | stats sum(duration_ms) by service');
+  const stats = result.stages[1];
+  assert.strictEqual(stats.command, 'stats');
+  assert.deepStrictEqual(stats.aggregations, [
+    { fn: 'sum', field: 'duration_ms', as: 'sum_duration_ms' }
+  ]);
+  assert.deepStrictEqual(stats.by, ['service']);
+});
+
+test('stats parses multiple aggregations', () => {
+  const result = parsePplPipeline('search * | stats count() avg(duration_ms) max(status) by service, env');
+  const stats = result.stages[1];
+  assert.strictEqual(stats.aggregations.length, 3);
+  assert.strictEqual(stats.aggregations[0].fn, 'count');
+  assert.strictEqual(stats.aggregations[1].fn, 'avg');
+  assert.strictEqual(stats.aggregations[1].field, 'duration_ms');
+  assert.strictEqual(stats.aggregations[2].fn, 'max');
+  assert.deepStrictEqual(stats.by, ['service', 'env']);
+});
+
+test('stats parses dc aggregation', () => {
+  const result = parsePplPipeline('search * | stats dc(src_ip) by service');
+  const stats = result.stages[1];
+  assert.deepStrictEqual(stats.aggregations, [
+    { fn: 'dc', field: 'src_ip', as: 'dc_src_ip' }
+  ]);
+});
+
+test('stats parses with custom alias', () => {
+  const result = parsePplPipeline('search * | stats count() as total by service');
+  const stats = result.stages[1];
+  assert.deepStrictEqual(stats.aggregations, [
+    { fn: 'count', field: null, as: 'total' }
+  ]);
+});
+
 test('parsePplPipeline rejects unsupported commands', () => {
   assert.throws(
     () => parsePplPipeline('search timeout | eval foo=bar'),

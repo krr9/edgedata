@@ -1,4 +1,4 @@
-const COMMANDS = new Set(['search', 'where', 'fields', 'sort', 'head', 'stats', 'timechart', 'top', 'rare']);
+const COMMANDS = new Set(['search', 'where', 'fields', 'sort', 'head', 'stats', 'timechart', 'top', 'rare', 'dedup']);
 
 const FIELD_ALIASES = {
   '@timestamp': 'ts',
@@ -223,6 +223,12 @@ function parseStatsClause(body) {
   return { fn: aggregations[0].fn, as: aggregations[0].as, by, aggregations };
 }
 
+function parseDedupClause(body) {
+  const fields = parseFieldsClause(body);
+  if (fields.length === 0) throw new Error('dedup requires at least one field');
+  return { fields };
+}
+
 function parseTopRareClause(body) {
   const byMatch = body.match(/^(.+?)\s+by\s+(\S+)$/i);
   const mainPart = byMatch ? byMatch[1].trim() : body.trim();
@@ -320,6 +326,10 @@ export function parsePplPipeline(input) {
     }
     if (firstToken === 'timechart') {
       stages.push({ command: 'timechart', ...parseTimechartClause(body) });
+      continue;
+    }
+    if (firstToken === 'dedup') {
+      stages.push({ command: 'dedup', ...parseDedupClause(body) });
       continue;
     }
     if (firstToken === 'top') {

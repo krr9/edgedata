@@ -108,6 +108,19 @@ test('rare parses count and field', () => {
   assert.strictEqual(stage.field, 'src_ip');
 });
 
+test('dedup parses single field', () => {
+  const result = parsePplPipeline('search * | dedup trace_id');
+  const stage = result.stages[1];
+  assert.strictEqual(stage.command, 'dedup');
+  assert.deepStrictEqual(stage.fields, ['trace_id']);
+});
+
+test('dedup parses multiple fields', () => {
+  const result = parsePplPipeline('search * | dedup service, host');
+  const stage = result.stages[1];
+  assert.deepStrictEqual(stage.fields, ['service', 'host']);
+});
+
 test('timechart rejects invalid span', () => {
   assert.throws(() => parsePplPipeline('search * | timechart span=abc count()'), /Invalid timechart span/);
 });

@@ -101,6 +101,18 @@ function computeAggregation(fn, field, rows) {
   return null;
 }
 
+export function executeDedupPipeline(events, stage) {
+  const seen = new Set();
+  const results = [];
+  for (const event of events) {
+    const key = stage.fields.map(f => String(event[f] ?? '')).join('\x00');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    results.push(event);
+  }
+  return results;
+}
+
 export function executeTopPipeline(events, stage) {
   return executeFrequencyPipeline(events, stage, 'desc');
 }

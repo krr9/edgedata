@@ -8,7 +8,8 @@ import {
   executeStatsPipeline,
   executeTimechartPipeline,
   executeTopPipeline,
-  executeRarePipeline
+  executeRarePipeline,
+  executeDedupPipeline
 } from '../src/search-stream-core.mjs';
 
 test('isIncrementalStreamPipeline accepts search/where/head only', () => {
@@ -154,4 +155,17 @@ test('executeRarePipeline returns least frequent values', () => {
   assert.strictEqual(result.length, 2);
   assert.strictEqual(result[0].src_ip, '3.3.3.3');
   assert.strictEqual(result[0].count, 1);
+});
+
+test('executeDedupPipeline removes duplicate trace_ids', () => {
+  const events = [
+    { event_id: '1', trace_id: 'aaa', ts: '2026-03-05T10:01:00Z' },
+    { event_id: '2', trace_id: 'aaa', ts: '2026-03-05T10:02:00Z' },
+    { event_id: '3', trace_id: 'bbb', ts: '2026-03-05T10:03:00Z' },
+  ];
+  const stage = { command: 'dedup', fields: ['trace_id'] };
+  const result = executeDedupPipeline(events, stage);
+  assert.strictEqual(result.length, 2);
+  assert.strictEqual(result[0].event_id, '1');
+  assert.strictEqual(result[1].event_id, '3');
 });

@@ -11,7 +11,8 @@ import { parsePplPipeline } from './ppl-core.mjs';
 import {
   isIncrementalStreamPipeline,
   resolvePipelineLimit,
-  rowMatchesWhereStages
+  rowMatchesWhereStages,
+  applyPostPipeline
 } from './search-stream-core.mjs';
 import { resolveCorsOriginFromPatterns } from './cors-utils.mjs';
 import {
@@ -218,13 +219,24 @@ interface PplCondition {
   value: string | number | boolean;
 }
 
+interface StatsAggregation {
+  fn: string;
+  field: string | null;
+  as: string;
+}
+
 type PplStage =
   | { command: 'search'; expression: string; implicit?: boolean }
   | { command: 'where'; conditions: PplCondition[] }
   | { command: 'fields'; fields: string[] }
   | { command: 'sort'; keys: Array<{ field: string; direction: 'asc' | 'desc' }> }
   | { command: 'head'; count: number }
-  | { command: 'stats'; fn: 'count'; as: string; by: string[] };
+  | { command: 'stats'; fn: string; as: string; by: string[]; aggregations: StatsAggregation[] }
+  | { command: 'timechart'; span: string; spanMs: number; aggregations: StatsAggregation[]; by: string | null }
+  | { command: 'top'; count: number; field: string; by: string | null }
+  | { command: 'rare'; count: number; field: string; by: string | null }
+  | { command: 'dedup'; fields: string[] }
+  | { command: 'eval'; field: string; expression: string };
 
 interface PplPipeline {
   raw: string;
@@ -1930,8 +1942,10 @@ function applyPplStatsCount(
   return result;
 }
 
+const TABLE_COMMANDS = new Set(['stats', 'fields', 'timechart', 'top', 'rare']);
+
 function isPplTableQuery(stages: PplStage[]): boolean {
-  return stages.some((stage) => stage.command === 'stats' || stage.command === 'fields');
+  return stages.some((stage) => TABLE_COMMANDS.has(stage.command));
 }
 
 function buildSearchRequestFromPpl(request: PplSearchRequest, pipeline: PplPipeline): SearchRequest {
@@ -2020,8 +2034,22 @@ function applyPplPipelineStages(
       continue;
     }
     if (stage.command === 'stats') {
-      rows = applyPplStatsCount(rows, stage);
+      rows = applyPostPipeline(rows, [stage]) as Array<Record<string, unknown>>;
       resultType = 'table';
+      continue;
+    }
+    if (stage.command === 'timechart' || stage.command === 'top' || stage.command === 'rare') {
+      rows = applyPostPipeline(rows, [stage]) as Array<Record<string, unknown>>;
+      resultType = 'table';
+      continue;
+    }
+    if (stage.command === 'dedup') {
+      rows = applyPostPipeline(rows, [stage]) as Array<Record<string, unknown>>;
+      continue;
+    }
+    if (stage.command === 'eval') {
+      rows = applyPostPipeline(rows, [stage]) as Array<Record<string, unknown>>;
+      continue;
     }
   }
 

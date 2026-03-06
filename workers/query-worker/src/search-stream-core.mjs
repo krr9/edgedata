@@ -35,12 +35,44 @@ function rowMatchesCondition(row, condition) {
   return false;
 }
 
+const STREAMING_COMMANDS = new Set(['search', 'where', 'head', 'eval', 'dedup']);
+
 export function isIncrementalStreamPipeline(stages) {
-  return (stages || []).every((stage) => (
-    stage.command === 'search' ||
-    stage.command === 'where' ||
-    stage.command === 'head'
-  ));
+  return (stages || []).every(s => STREAMING_COMMANDS.has(s.command) || s.command === 'fields');
+}
+
+export function applyPostPipeline(events, stages) {
+  let result = events;
+  for (const stage of stages) {
+    if (stage.command === 'stats') result = executeStatsPipeline(result, stage);
+    else if (stage.command === 'timechart') result = executeTimechartPipeline(result, stage);
+    else if (stage.command === 'top') result = executeTopPipeline(result, stage);
+    else if (stage.command === 'rare') result = executeRarePipeline(result, stage);
+    else if (stage.command === 'dedup') result = executeDedupPipeline(result, stage);
+    else if (stage.command === 'eval') result = executeEvalPipeline(result, stage);
+    else if (stage.command === 'sort') result = applySortStage(result, stage);
+    else if (stage.command === 'fields' || stage.command === 'table') result = applyFieldsStage(result, stage);
+  }
+  return result;
+}
+
+function applySortStage(events, stage) {
+  return [...events].sort((a, b) => {
+    for (const { field, direction } of stage.keys) {
+      const cmp = compareUnknownValues(a[field], b[field]);
+      if (cmp !== 0) return direction === 'desc' ? -cmp : cmp;
+    }
+    return 0;
+  });
+}
+
+function applyFieldsStage(events, stage) {
+  const fields = stage.fields;
+  return events.map(e => {
+    const row = {};
+    for (const f of fields) { row[f] = e[f]; }
+    return row;
+  });
 }
 
 export function resolvePipelineLimit(stages, fallback, max = 5000) {

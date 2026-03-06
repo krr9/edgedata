@@ -21,6 +21,7 @@
     "d1:migrate:users": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/003_auth_users.sql",
     "d1:migrate:ratelimits": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/004_rate_limits.sql",
     "d1:migrate:rbac": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/005_auth_rbac.sql",
+    "d1:migrate:workflows": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/006_operational_workflows.sql",
     "test:prd": "bash ./scripts/run-prd-smoke-tests.sh",
     "test:unit": "node --test workers/query-worker/test/*.test.mjs workers/synthetic-worker/test/*.test.mjs workers/ingest-worker/test/*.test.mjs",
     "test:load": "node ./scripts/load-test.mjs",

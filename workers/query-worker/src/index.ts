@@ -19,6 +19,7 @@ import {
   buildStarterAlertPackDefinitions,
   extractStarterIdFromParamsJson
 } from './starter-alert-pack.mjs';
+import { seedStarterDashboards } from './starter-dashboards.mjs';
 import { validateQueryAccessJwtConfig } from '../../shared/access-config.mjs';
 
 export interface Env {
@@ -3236,6 +3237,7 @@ async function handleDashboards(
 
   if (request.method === 'GET' && pathname === '/dashboards') {
     assertPermission(auth, 'dashboard.read');
+    await seedStarterDashboards(env.DB).catch(() => undefined);
     const rows = await env.DB.prepare('SELECT * FROM dashboards ORDER BY is_default DESC, created_at DESC LIMIT 100').all<DashboardRow>();
     return jsonResponse(rows.results || [], 200, requestCorsHeaders);
   }

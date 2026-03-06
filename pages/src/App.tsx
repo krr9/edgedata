@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from './AuthContext';
 import { AuthScreen } from './AuthScreen';
 
-type ViewMode = 'search' | 'dashboard' | 'saved' | 'alerts' | 'admin';
+type ViewMode = 'search' | 'dashboard' | 'saved' | 'scheduled' | 'alerts' | 'admin';
 type SearchMode = 'structured' | 'token' | 'phrase';
 
 interface LogEvent {
@@ -80,6 +80,28 @@ interface SavedSearch {
   query: string;
   created_at: string;
   updated_at?: string;
+}
+
+interface ScheduledSearchItem {
+  id: string;
+  name: string;
+  ppl: string;
+  time_window_minutes: number;
+  schedule_cron: string;
+  enabled: number;
+  max_results: number;
+  created_by?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+interface ScheduledSearchResult {
+  id: string;
+  scheduled_search_id: string;
+  run_at: string;
+  status: string;
+  result_count: number;
+  error_message?: string | null;
 }
 
 interface AlertDefinition {
@@ -374,6 +396,16 @@ function App() {
   const [savedError, setSavedError] = useState<string | null>(null);
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
   const [saveName, setSaveName] = useState('');
+
+  const [scheduledSearches, setScheduledSearches] = useState<ScheduledSearchItem[]>([]);
+  const [scheduledLoading, setScheduledLoading] = useState(false);
+  const [scheduledError, setScheduledError] = useState<string | null>(null);
+  const [scheduledResults, setScheduledResults] = useState<Record<string, ScheduledSearchResult[]>>({});
+  const [showScheduleForm, setShowScheduleForm] = useState(false);
+  const [scheduleFormName, setScheduleFormName] = useState('');
+  const [scheduleFormPpl, setScheduleFormPpl] = useState('');
+  const [scheduleFormCron, setScheduleFormCron] = useState('0 * * * *');
+  const [scheduleFormWindow, setScheduleFormWindow] = useState(60);
 
   const [alertsLoading, setAlertsLoading] = useState(false);
   const [alertsError, setAlertsError] = useState<string | null>(null);
@@ -923,6 +955,84 @@ function App() {
     }
   }, [apiFetch, loadSavedSearches]);
 
+  const loadScheduledSearches = useCallback(async () => {
+    setScheduledLoading(true);
+    setScheduledError(null);
+    try {
+      const [response, body] = await apiFetch('/scheduled-searches');
+      if (!response.ok) throw new Error(typeof body === 'string' ? body : 'Failed to load scheduled searches');
+      setScheduledSearches(body as ScheduledSearchItem[]);
+    } catch (err) {
+      setScheduledError(String(err));
+    } finally {
+      setScheduledLoading(false);
+    }
+  }, [apiFetch]);
+
+  const createScheduledSearch = useCallback(async () => {
+    if (!scheduleFormName.trim() || !scheduleFormPpl.trim()) return;
+    try {
+      const [response, body] = await apiFetch('/scheduled-searches', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: scheduleFormName.trim(),
+          ppl: scheduleFormPpl.trim(),
+          schedule_cron: scheduleFormCron.trim(),
+          time_window_minutes: scheduleFormWindow
+        })
+      });
+      if (!response.ok) throw new Error(typeof body === 'string' ? body : 'Failed to create');
+      setShowScheduleForm(false);
+      setScheduleFormName('');
+      setScheduleFormPpl('');
+      await loadScheduledSearches();
+    } catch (err) {
+      setScheduledError(String(err));
+    }
+  }, [apiFetch, scheduleFormName, scheduleFormPpl, scheduleFormCron, scheduleFormWindow, loadScheduledSearches]);
+
+  const deleteScheduledSearch = useCallback(async (id: string) => {
+    try {
+      const [response, body] = await apiFetch(`/scheduled-searches/${id}`, { method: 'DELETE' });
+      if (!response.ok && response.status !== 204) throw new Error(typeof body === 'string' ? body : 'Failed to delete');
+      await loadScheduledSearches();
+    } catch (err) {
+      setScheduledError(String(err));
+    }
+  }, [apiFetch, loadScheduledSearches]);
+
+  const toggleScheduledSearch = useCallback(async (id: string, enabled: boolean) => {
+    try {
+      await apiFetch(`/scheduled-searches/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: enabled ? 1 : 0 })
+      });
+      await loadScheduledSearches();
+    } catch (err) {
+      setScheduledError(String(err));
+    }
+  }, [apiFetch, loadScheduledSearches]);
+
+  const loadScheduledResults = useCallback(async (id: string) => {
+    try {
+      const [response, body] = await apiFetch(`/scheduled-searches/${id}/results`);
+      if (response.ok) {
+        setScheduledResults(prev => ({ ...prev, [id]: body as ScheduledSearchResult[] }));
+      }
+    } catch {
+      // best-effort
+    }
+  }, [apiFetch]);
+
+  const scheduleCurrentSearch = useCallback(() => {
+    setScheduleFormPpl(query);
+    setScheduleFormName('');
+    setShowScheduleForm(true);
+    setView('scheduled');
+  }, [query]);
+
   const loadAlerts = useCallback(async () => {
     setAlertsLoading(true);
     setAlertsError(null);
@@ -1293,6 +1403,8 @@ function App() {
       void loadDashboard();
     } else if (view === 'saved') {
       void loadSavedSearches();
+    } else if (view === 'scheduled') {
+      void loadScheduledSearches();
     } else if (view === 'alerts') {
       void loadAlerts();
     } else if (view === 'admin') {
@@ -1302,7 +1414,7 @@ function App() {
         setView('search');
       }
     }
-  }, [view, canOpenAdmin, loadAdminData, loadDashboard, loadSavedSearches, loadAlerts]);
+  }, [view, canOpenAdmin, loadAdminData, loadDashboard, loadSavedSearches, loadScheduledSearches, loadAlerts]);
 
   useEffect(() => {
     if (!user || view !== 'search' || bootstrappedSearch) return;
@@ -1402,6 +1514,7 @@ function App() {
           <button className={view === 'dashboard' ? 'active' : ''} onClick={() => setView('dashboard')}>Dashboards</button>
           <button className={view === 'alerts' ? 'active' : ''} onClick={() => setView('alerts')}>Alerts</button>
           <button className={view === 'saved' ? 'active' : ''} onClick={() => setView('saved')}>Saved Searches</button>
+          <button className={view === 'scheduled' ? 'active' : ''} onClick={() => setView('scheduled')}>Scheduled</button>
           {canOpenAdmin && (
             <button className={view === 'admin' ? 'active' : ''} onClick={() => setView('admin')}>Admin</button>
           )}
@@ -1501,6 +1614,7 @@ function App() {
                   placeholder="Saved search name"
                 />
                 <button className="secondary" onClick={() => void saveCurrentSearch()}>Save Search</button>
+                {query.trim() && <button className="secondary" onClick={scheduleCurrentSearch}>Schedule</button>}
               </div>
             </div>
 
@@ -2118,6 +2232,74 @@ function App() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {view === 'scheduled' && (
+          <div className="saved-view">
+            {scheduledError && <div className="error-banner">{scheduledError}</div>}
+
+            <div className="saved-list card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <h3>Scheduled Searches</h3>
+                <button onClick={() => setShowScheduleForm(f => !f)}>{showScheduleForm ? 'Cancel' : '+ New'}</button>
+              </div>
+
+              {showScheduleForm && (
+                <div className="card" style={{ marginBottom: 16, padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <input type="text" value={scheduleFormName} onChange={e => setScheduleFormName(e.target.value)} placeholder="Search name" />
+                  <input type="text" value={scheduleFormPpl} onChange={e => setScheduleFormPpl(e.target.value)} placeholder="PPL query (e.g. search * | where level=&quot;error&quot; | stats count() by service)" />
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input type="text" value={scheduleFormCron} onChange={e => setScheduleFormCron(e.target.value)} placeholder="Cron (0 * * * *)" style={{ flex: 1 }} />
+                    <input type="number" value={scheduleFormWindow} onChange={e => setScheduleFormWindow(Number(e.target.value) || 60)} placeholder="Window (min)" style={{ width: 120 }} />
+                  </div>
+                  <button onClick={() => void createScheduledSearch()}>Create Scheduled Search</button>
+                </div>
+              )}
+
+              {scheduledLoading && <p className="empty-card">Loading...</p>}
+
+              {!scheduledLoading && scheduledSearches.length === 0 && <p className="empty-card">No scheduled searches yet.</p>}
+
+              {scheduledSearches.map(ss => (
+                <div key={ss.id} className="saved-row" style={{ flexDirection: 'column', gap: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    <div>
+                      <div className="saved-name">
+                        {ss.name}
+                        <span style={{ marginLeft: 8, fontSize: '0.75rem', opacity: 0.6 }}>
+                          {ss.enabled ? 'Enabled' : 'Disabled'} &middot; {ss.schedule_cron} &middot; {ss.time_window_minutes}m window
+                        </span>
+                      </div>
+                      <div className="saved-query">{ss.ppl}</div>
+                    </div>
+                    <div className="saved-actions">
+                      <button className="secondary" onClick={() => { toggleScheduledSearch(ss.id, !ss.enabled); }}>
+                        {ss.enabled ? 'Disable' : 'Enable'}
+                      </button>
+                      <button className="secondary" onClick={() => void loadScheduledResults(ss.id)}>Results</button>
+                      <button className="danger" onClick={() => void deleteScheduledSearch(ss.id)}>Delete</button>
+                    </div>
+                  </div>
+                  {scheduledResults[ss.id] && (
+                    <div style={{ fontSize: '0.8rem', marginTop: 4 }}>
+                      <strong>Recent runs:</strong>
+                      {scheduledResults[ss.id].length === 0 && <span style={{ marginLeft: 8, opacity: 0.6 }}>No runs yet</span>}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 }}>
+                        {scheduledResults[ss.id].slice(0, 5).map(r => (
+                          <div key={r.id} style={{ display: 'flex', gap: 12 }}>
+                            <span>{new Date(r.run_at).toLocaleString()}</span>
+                            <span style={{ color: r.status === 'success' ? '#22c55e' : '#ef4444' }}>{r.status}</span>
+                            <span>{r.result_count} results</span>
+                            {r.error_message && <span style={{ color: '#ef4444' }}>{r.error_message}</span>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
 

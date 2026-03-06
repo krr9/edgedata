@@ -391,6 +391,11 @@ function App() {
     throughput: [],
     top_hosts: []
   });
+  const [pplDashboards, setPplDashboards] = useState<Array<{ id: string; name: string; description?: string | null; is_default: number }>>([]);
+  const [selectedDashboardId, setSelectedDashboardId] = useState<string | null>(null);
+  const [dashboardPanels, setDashboardPanels] = useState<Array<{ id: string; title: string; ppl: string; viz_type: string; time_window_minutes: number; position: number }>>([]);
+  const [panelResults, setPanelResults] = useState<Record<string, DashboardRow[]>>({});
+  const [panelLoading, setPanelLoading] = useState<Record<string, boolean>>({});
 
   const [savedLoading, setSavedLoading] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
@@ -847,50 +852,54 @@ function App() {
     setDashboardLoading(true);
     setDashboardError(null);
 
-    const queries: Array<keyof DashboardData> = [
-      'error_rate_by_service',
-      'latency_p95_by_service',
-      'top_errors',
-      'throughput',
-      'top_hosts'
-    ];
-
     try {
-      const nextData: DashboardData = {
-        error_rate_by_service: [],
-        latency_p95_by_service: [],
-        top_errors: [],
-        throughput: [],
-        top_hosts: []
-      };
-
-      for (const queryName of queries) {
-        const response = await apiFetch('/dashboards/query', {
-          method: 'POST',
-          body: JSON.stringify({
-            query: queryName,
-            params: {
-              window_minutes: 60,
-              index: indexName.trim().toLowerCase() || undefined
-            }
-          })
-        });
-
-        const body = await response.json() as { error?: string; results?: DashboardRow[] };
-        if (!response.ok || body.error) {
-          throw new Error(body.error || `Dashboard query failed: ${queryName}`);
-        }
-
-        nextData[queryName] = body.results || [];
+      const response = await apiFetch('/dashboards');
+      const body = await response.json() as Array<{ id: string; name: string; description?: string | null; is_default: number }>;
+      if (!response.ok) throw new Error('Failed to load dashboards');
+      setPplDashboards(body || []);
+      if (body.length > 0 && !selectedDashboardId) {
+        setSelectedDashboardId(body[0].id);
       }
-
-      setDashboardData(nextData);
     } catch (requestError) {
       setDashboardError(String(requestError));
     } finally {
       setDashboardLoading(false);
     }
-  }, [apiFetch, indexName]);
+  }, [apiFetch, selectedDashboardId]);
+
+  const loadDashboardPanels = useCallback(async (dashId: string) => {
+    try {
+      const response = await apiFetch(`/dashboards/${dashId}/panels`);
+      const body = await response.json() as Array<{ id: string; title: string; ppl: string; viz_type: string; time_window_minutes: number; position: number }>;
+      if (response.ok) {
+        setDashboardPanels(body || []);
+        setPanelResults({});
+      }
+    } catch {
+      // best-effort
+    }
+  }, [apiFetch]);
+
+  const executePanelQuery = useCallback(async (panelId: string, ppl: string, timeWindowMinutes: number) => {
+    setPanelLoading(prev => ({ ...prev, [panelId]: true }));
+    try {
+      const now = new Date();
+      const from = new Date(now.getTime() - timeWindowMinutes * 60 * 1000).toISOString();
+      const to = now.toISOString();
+      const response = await apiFetch('/search', {
+        method: 'POST',
+        body: JSON.stringify({ ppl, from, to, limit: 500 })
+      });
+      const body = await response.json() as { results?: DashboardRow[]; events?: DashboardRow[] };
+      if (response.ok) {
+        setPanelResults(prev => ({ ...prev, [panelId]: (body.results || body.events || []) as DashboardRow[] }));
+      }
+    } catch {
+      setPanelResults(prev => ({ ...prev, [panelId]: [] }));
+    } finally {
+      setPanelLoading(prev => ({ ...prev, [panelId]: false }));
+    }
+  }, [apiFetch]);
 
   const loadSavedSearches = useCallback(async () => {
     setSavedLoading(true);
@@ -959,8 +968,9 @@ function App() {
     setScheduledLoading(true);
     setScheduledError(null);
     try {
-      const [response, body] = await apiFetch('/scheduled-searches');
-      if (!response.ok) throw new Error(typeof body === 'string' ? body : 'Failed to load scheduled searches');
+      const response = await apiFetch('/scheduled-searches');
+      const body = await response.json() as ScheduledSearchItem[] | { error?: string };
+      if (!response.ok) throw new Error('error' in body && body.error ? body.error : 'Failed to load scheduled searches');
       setScheduledSearches(body as ScheduledSearchItem[]);
     } catch (err) {
       setScheduledError(String(err));
@@ -972,7 +982,7 @@ function App() {
   const createScheduledSearch = useCallback(async () => {
     if (!scheduleFormName.trim() || !scheduleFormPpl.trim()) return;
     try {
-      const [response, body] = await apiFetch('/scheduled-searches', {
+      const response = await apiFetch('/scheduled-searches', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -982,7 +992,7 @@ function App() {
           time_window_minutes: scheduleFormWindow
         })
       });
-      if (!response.ok) throw new Error(typeof body === 'string' ? body : 'Failed to create');
+      if (!response.ok) throw new Error('Failed to create scheduled search');
       setShowScheduleForm(false);
       setScheduleFormName('');
       setScheduleFormPpl('');
@@ -994,8 +1004,8 @@ function App() {
 
   const deleteScheduledSearch = useCallback(async (id: string) => {
     try {
-      const [response, body] = await apiFetch(`/scheduled-searches/${id}`, { method: 'DELETE' });
-      if (!response.ok && response.status !== 204) throw new Error(typeof body === 'string' ? body : 'Failed to delete');
+      const response = await apiFetch(`/scheduled-searches/${id}`, { method: 'DELETE' });
+      if (!response.ok && response.status !== 204) throw new Error('Failed to delete');
       await loadScheduledSearches();
     } catch (err) {
       setScheduledError(String(err));
@@ -1017,9 +1027,10 @@ function App() {
 
   const loadScheduledResults = useCallback(async (id: string) => {
     try {
-      const [response, body] = await apiFetch(`/scheduled-searches/${id}/results`);
+      const response = await apiFetch(`/scheduled-searches/${id}/results`);
       if (response.ok) {
-        setScheduledResults(prev => ({ ...prev, [id]: body as ScheduledSearchResult[] }));
+        const body = await response.json() as ScheduledSearchResult[];
+        setScheduledResults(prev => ({ ...prev, [id]: body }));
       }
     } catch {
       // best-effort
@@ -1415,6 +1426,22 @@ function App() {
       }
     }
   }, [view, canOpenAdmin, loadAdminData, loadDashboard, loadSavedSearches, loadScheduledSearches, loadAlerts]);
+
+  useEffect(() => {
+    if (selectedDashboardId && view === 'dashboard') {
+      void loadDashboardPanels(selectedDashboardId);
+    }
+  }, [selectedDashboardId, view, loadDashboardPanels]);
+
+  useEffect(() => {
+    if (view === 'dashboard' && dashboardPanels.length > 0) {
+      for (const panel of dashboardPanels) {
+        if (!panelResults[panel.id] && !panelLoading[panel.id]) {
+          void executePanelQuery(panel.id, panel.ppl, panel.time_window_minutes);
+        }
+      }
+    }
+  }, [view, dashboardPanels, panelResults, panelLoading, executePanelQuery]);
 
   useEffect(() => {
     if (!user || view !== 'search' || bootstrappedSearch) return;
@@ -1863,59 +1890,77 @@ function App() {
         {view === 'dashboard' && (
           <div className="dashboard-view">
             {dashboardError && <div className="error-banner">{dashboardError}</div>}
-            {dashboardLoading && <div className="empty-state"><p>Loading dashboard...</p></div>}
+            {dashboardLoading && <div className="empty-state"><p>Loading dashboards...</p></div>}
 
-            {!dashboardLoading && (
+            {!dashboardLoading && pplDashboards.length > 0 && (
+              <div style={{ marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {pplDashboards.map(d => (
+                  <button
+                    key={d.id}
+                    className={selectedDashboardId === d.id ? 'active' : 'secondary'}
+                    onClick={() => setSelectedDashboardId(d.id)}
+                  >
+                    {d.name}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {!dashboardLoading && dashboardPanels.length === 0 && pplDashboards.length === 0 && (
+              <div className="empty-state"><p>No dashboards configured yet.</p></div>
+            )}
+
+            {dashboardPanels.length > 0 && (
               <div className="dashboard-grid">
-                <div className="card">
-                  <h3>Error Rate by Service</h3>
-                  {dashboardData.error_rate_by_service.length === 0 ? <p className="empty-card">No data</p> : dashboardData.error_rate_by_service.map((row, index) => (
-                    <div key={`error-rate-${index}`} className="metric-row">
-                      <span>{String(row.service || 'unknown')}</span>
-                      <span>{Number(row.error_rate || 0).toFixed(2)}%</span>
+                {dashboardPanels.map(panel => (
+                  <div key={panel.id} className="card">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <h3>{panel.title}</h3>
+                      <button className="secondary" style={{ fontSize: '0.7rem', padding: '2px 6px' }} onClick={() => void executePanelQuery(panel.id, panel.ppl, panel.time_window_minutes)}>
+                        Refresh
+                      </button>
                     </div>
-                  ))}
-                </div>
-
-                <div className="card">
-                  <h3>p95 Latency</h3>
-                  {dashboardData.latency_p95_by_service.length === 0 ? <p className="empty-card">No data</p> : dashboardData.latency_p95_by_service.map((row, index) => (
-                    <div key={`latency-${index}`} className="metric-row">
-                      <span>{String(row.service || 'unknown')}</span>
-                      <span>{Number(row.p95_latency || 0).toFixed(0)}ms</span>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="card">
-                  <h3>Top Error Signatures</h3>
-                  {dashboardData.top_errors.length === 0 ? <p className="empty-card">No data</p> : dashboardData.top_errors.map((row, index) => (
-                    <div key={`top-errors-${index}`} className="metric-row">
-                      <span>{String(row.service || 'unknown')}</span>
-                      <span>{Number(row.count || 0).toLocaleString()}</span>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="card">
-                  <h3>Throughput</h3>
-                  {dashboardData.throughput.length === 0 ? <p className="empty-card">No data</p> : dashboardData.throughput.map((row, index) => (
-                    <div key={`throughput-${index}`} className="metric-row">
-                      <span>{String(row.service || 'unknown')}</span>
-                      <span>{Number(row.count || 0).toLocaleString()}</span>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="card">
-                  <h3>Top Hosts</h3>
-                  {dashboardData.top_hosts.length === 0 ? <p className="empty-card">No data</p> : dashboardData.top_hosts.map((row, index) => (
-                    <div key={`top-hosts-${index}`} className="metric-row">
-                      <span>{String(row.host || 'unknown')}</span>
-                      <span>{Number(row.count || 0).toLocaleString()}</span>
-                    </div>
-                  ))}
-                </div>
+                    <div className="saved-query" style={{ fontSize: '0.75rem', marginBottom: 8, opacity: 0.6 }}>{panel.ppl}</div>
+                    {panelLoading[panel.id] && <p className="empty-card">Loading...</p>}
+                    {!panelLoading[panel.id] && (!panelResults[panel.id] || panelResults[panel.id].length === 0) && (
+                      <p className="empty-card">No data</p>
+                    )}
+                    {!panelLoading[panel.id] && panelResults[panel.id] && panelResults[panel.id].length > 0 && (
+                      panel.viz_type === 'counter' ? (
+                        <div style={{ fontSize: '2rem', fontWeight: 700, textAlign: 'center', padding: 16 }}>
+                          {(() => {
+                            const first = panelResults[panel.id][0];
+                            const numKey = Object.keys(first).find(k => typeof first[k] === 'number');
+                            return numKey ? Number(first[numKey]).toLocaleString() : JSON.stringify(first);
+                          })()}
+                        </div>
+                      ) : (
+                        <div style={{ overflowX: 'auto' }}>
+                          <table style={{ width: '100%', fontSize: '0.8rem', borderCollapse: 'collapse' }}>
+                            <thead>
+                              <tr>
+                                {Object.keys(panelResults[panel.id][0]).map(col => (
+                                  <th key={col} style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>{col}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {panelResults[panel.id].slice(0, 50).map((row, i) => (
+                                <tr key={i}>
+                                  {Object.values(row).map((val, j) => (
+                                    <td key={j} style={{ padding: '3px 8px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                                      {typeof val === 'number' ? val.toLocaleString() : String(val ?? '')}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )
+                    )}
+                  </div>
+                ))}
               </div>
             )}
           </div>

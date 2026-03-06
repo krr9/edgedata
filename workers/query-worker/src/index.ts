@@ -12,7 +12,8 @@ import {
   isIncrementalStreamPipeline,
   resolvePipelineLimit,
   rowMatchesWhereStages,
-  applyPostPipeline
+  applyPostPipeline,
+  executeLookupPipeline
 } from './search-stream-core.mjs';
 import { resolveCorsOriginFromPatterns } from './cors-utils.mjs';
 import {
@@ -237,7 +238,8 @@ type PplStage =
   | { command: 'top'; count: number; field: string; by: string | null }
   | { command: 'rare'; count: number; field: string; by: string | null }
   | { command: 'dedup'; fields: string[] }
-  | { command: 'eval'; field: string; expression: string };
+  | { command: 'eval'; field: string; expression: string }
+  | { command: 'lookup'; table: string; field: string; outputFields: string[] | null };
 
 interface PplPipeline {
   raw: string;
@@ -2091,9 +2093,35 @@ function buildSearchRequestFromPpl(request: PplSearchRequest, pipeline: PplPipel
   };
 }
 
+async function loadLookupCache(
+  pipeline: PplPipeline,
+  env: Env
+): Promise<Map<string, Map<string, Record<string, unknown>>>> {
+  const cache = new Map<string, Map<string, Record<string, unknown>>>();
+  const lookupStages = pipeline.stages.filter(s => s.command === 'lookup') as Array<{ command: 'lookup'; table: string; field: string; outputFields: string[] | null }>;
+  for (const stage of lookupStages) {
+    if (cache.has(stage.table)) continue;
+    try {
+      const table = await env.DB.prepare('SELECT id FROM lookup_tables WHERE name = ?').bind(stage.table).first<{ id: string }>();
+      if (!table) continue;
+      const rows = await env.DB.prepare('SELECT key_value, data_json FROM lookup_rows WHERE lookup_id = ? LIMIT 10000')
+        .bind(table.id).all<{ key_value: string; data_json: string }>();
+      const map = new Map<string, Record<string, unknown>>();
+      for (const row of rows.results || []) {
+        try { map.set(row.key_value, JSON.parse(row.data_json)); } catch { /* skip bad rows */ }
+      }
+      cache.set(stage.table, map);
+    } catch {
+      // lookup table not found — skip
+    }
+  }
+  return cache;
+}
+
 function applyPplPipelineStages(
   events: SearchEvent[],
-  pipeline: PplPipeline
+  pipeline: PplPipeline,
+  lookupCache?: Map<string, Map<string, Record<string, unknown>>>
 ): { resultType: 'events' | 'table'; rows: Array<SearchEvent | Record<string, unknown>> } {
   let rows: Array<Record<string, unknown>> = events.map((event) => ({ ...event }));
   let resultType: 'events' | 'table' = 'events';
@@ -2133,6 +2161,13 @@ function applyPplPipelineStages(
     }
     if (stage.command === 'eval') {
       rows = applyPostPipeline(rows, [stage]) as Array<Record<string, unknown>>;
+      continue;
+    }
+    if (stage.command === 'lookup') {
+      const lm = lookupCache?.get(stage.table);
+      if (lm) {
+        rows = executeLookupPipeline(rows, stage, lm) as Array<Record<string, unknown>>;
+      }
       continue;
     }
   }
@@ -2259,7 +2294,8 @@ async function performPplSearch(request: PplSearchRequest, env: Env, auth: AuthC
   const requestedLimit = clampLimit(request.limit, PPL_MAX_LIMIT);
   const executionLimit = context.mode === 'phrase' ? Math.min(200, requestedLimit) : requestedLimit;
   const execution = await executeSearchWithContext(context, env, auth, compiled.cursor, executionLimit);
-  const transformed = applyPplPipelineStages(execution.results, pipeline);
+  const lookupCache = await loadLookupCache(pipeline, env);
+  const transformed = applyPplPipelineStages(execution.results, pipeline, lookupCache);
   const rows = transformed.rows.slice(0, requestedLimit);
   const nextCursorValue = transformed.resultType === 'events'
     ? nextCursor(rows as SearchEvent[])
@@ -2466,7 +2502,8 @@ async function performPplSearchSummary(
   const compiled = buildSearchRequestFromPpl({ ...request, limit: MAX_SUMMARY_EVENTS, cursor: null }, pipeline);
   const context = buildSearchContext(compiled, auth);
   const execution = await executeSearchWithContext(context, env, auth, null, MAX_SUMMARY_EVENTS);
-  const transformed = applyPplPipelineStages(execution.results, pipeline);
+  const summaryLookupCache = await loadLookupCache(pipeline, env);
+  const transformed = applyPplPipelineStages(execution.results, pipeline, summaryLookupCache);
   const sampledEvents = transformed.resultType === 'events' ? transformed.rows as SearchEvent[] : [];
 
   const facets = {

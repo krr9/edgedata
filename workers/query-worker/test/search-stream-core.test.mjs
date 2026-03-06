@@ -10,7 +10,8 @@ import {
   executeTopPipeline,
   executeRarePipeline,
   executeDedupPipeline,
-  executeEvalPipeline
+  executeEvalPipeline,
+  executeLookupPipeline
 } from '../src/search-stream-core.mjs';
 
 test('isIncrementalStreamPipeline accepts search/where/head only', () => {
@@ -191,4 +192,33 @@ test('executeEvalPipeline computes string functions', () => {
   const stage = { command: 'eval', field: 'msg_lower', expression: 'lower(message)' };
   const result = executeEvalPipeline(events, stage);
   assert.strictEqual(result[0].msg_lower, 'connection refused');
+});
+
+test('executeLookupPipeline enriches events from lookup map', () => {
+  const events = [
+    { service: 'auth', message: 'login' },
+    { service: 'billing', message: 'charge' },
+    { service: 'unknown', message: 'test' }
+  ];
+  const lookupMap = new Map([
+    ['auth', { team: 'identity', oncall: '#auth-oncall' }],
+    ['billing', { team: 'payments', oncall: '#billing-oncall' }]
+  ]);
+  const stage = { command: 'lookup', table: 'services', field: 'service', outputFields: null };
+  const result = executeLookupPipeline(events, stage, lookupMap);
+  assert.strictEqual(result[0].team, 'identity');
+  assert.strictEqual(result[1].oncall, '#billing-oncall');
+  assert.strictEqual(result[2].team, undefined);
+});
+
+test('executeLookupPipeline respects output field filter', () => {
+  const events = [{ service: 'auth', message: 'login' }];
+  const lookupMap = new Map([
+    ['auth', { team: 'identity', oncall: '#auth-oncall', manager: 'alice' }]
+  ]);
+  const stage = { command: 'lookup', table: 'services', field: 'service', outputFields: ['team'] };
+  const result = executeLookupPipeline(events, stage, lookupMap);
+  assert.strictEqual(result[0].team, 'identity');
+  assert.strictEqual(result[0].oncall, undefined);
+  assert.strictEqual(result[0].manager, undefined);
 });

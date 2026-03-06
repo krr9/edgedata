@@ -1,4 +1,4 @@
-const COMMANDS = new Set(['search', 'where', 'fields', 'sort', 'head', 'stats', 'timechart', 'top', 'rare', 'dedup', 'eval']);
+const COMMANDS = new Set(['search', 'where', 'fields', 'sort', 'head', 'stats', 'timechart', 'top', 'rare', 'dedup', 'eval', 'lookup']);
 
 const FIELD_ALIASES = {
   '@timestamp': 'ts',
@@ -223,6 +223,19 @@ function parseStatsClause(body) {
   return { fn: aggregations[0].fn, as: aggregations[0].as, by, aggregations };
 }
 
+function parseLookupClause(body) {
+  const tokens = body.trim().split(/\s+/);
+  if (tokens.length < 2) throw new Error('lookup requires: <table> <field> [output <f1>, ...]');
+  const table = tokens[0];
+  const field = normalizeField(tokens[1]);
+  let outputFields = null;
+  const outputIdx = tokens.indexOf('output');
+  if (outputIdx !== -1) {
+    outputFields = tokens.slice(outputIdx + 1).join(' ').split(',').map(f => f.trim()).filter(Boolean);
+  }
+  return { table, field, outputFields };
+}
+
 function parseEvalClause(body) {
   const eqPos = body.indexOf('=');
   if (eqPos < 1) throw new Error('eval requires: <field>=<expression>');
@@ -339,6 +352,10 @@ export function parsePplPipeline(input) {
     }
     if (firstToken === 'eval') {
       stages.push({ command: 'eval', ...parseEvalClause(body) });
+      continue;
+    }
+    if (firstToken === 'lookup') {
+      stages.push({ command: 'lookup', ...parseLookupClause(body) });
       continue;
     }
     if (firstToken === 'dedup') {

@@ -140,6 +140,24 @@ test('timechart rejects invalid span', () => {
   assert.throws(() => parsePplPipeline('search * | timechart span=abc count()'), /Invalid timechart span/);
 });
 
+test('parsePplPipeline parses lookup command', () => {
+  const pipeline = parsePplPipeline('search * | lookup service_owners service');
+  const lookup = pipeline.stages.find(s => s.command === 'lookup');
+  assert.ok(lookup);
+  assert.strictEqual(lookup.table, 'service_owners');
+  assert.strictEqual(lookup.field, 'service');
+  assert.strictEqual(lookup.outputFields, null);
+});
+
+test('parsePplPipeline parses lookup with output fields', () => {
+  const pipeline = parsePplPipeline('search * | lookup hosts hostname output team, oncall');
+  const lookup = pipeline.stages.find(s => s.command === 'lookup');
+  assert.ok(lookup);
+  assert.strictEqual(lookup.table, 'hosts');
+  assert.strictEqual(lookup.field, 'hostname');
+  assert.deepStrictEqual(lookup.outputFields, ['team', 'oncall']);
+});
+
 test('parsePplPipeline rejects unsupported commands', () => {
   assert.throws(
     () => parsePplPipeline('search timeout | transaction trace_id'),

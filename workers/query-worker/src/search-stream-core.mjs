@@ -35,7 +35,7 @@ function rowMatchesCondition(row, condition) {
   return false;
 }
 
-const STREAMING_COMMANDS = new Set(['search', 'where', 'head', 'eval', 'dedup']);
+const STREAMING_COMMANDS = new Set(['search', 'where', 'head', 'eval', 'dedup', 'lookup']);
 
 export function isIncrementalStreamPipeline(stages) {
   return (stages || []).every(s => STREAMING_COMMANDS.has(s.command) || s.command === 'fields');
@@ -140,6 +140,19 @@ export function executeEvalPipeline(events, stage) {
     ...event,
     [stage.field]: evaluateExpression(stage.expression, event)
   }));
+}
+
+export function executeLookupPipeline(events, stage, lookupMap) {
+  if (!lookupMap || lookupMap.size === 0) return events;
+  return events.map(event => {
+    const key = String(event[stage.field] ?? '');
+    const enrichment = lookupMap.get(key);
+    if (!enrichment) return event;
+    const filtered = stage.outputFields
+      ? Object.fromEntries(stage.outputFields.map(f => [f, enrichment[f]]).filter(([, v]) => v !== undefined))
+      : enrichment;
+    return { ...event, ...filtered };
+  });
 }
 
 export function executeDedupPipeline(events, stage) {

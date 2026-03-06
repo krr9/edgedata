@@ -280,6 +280,31 @@ interface ScheduledSearchResultRow {
   created_at: string;
 }
 
+interface DashboardRow {
+  id: string;
+  name: string;
+  description?: string | null;
+  layout_json: string;
+  is_default: number;
+  created_by?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+interface DashboardPanelRow {
+  id: string;
+  dashboard_id: string;
+  title: string;
+  ppl: string;
+  viz_type: string;
+  time_window_minutes: number;
+  refresh_seconds: number;
+  options_json: string;
+  position: number;
+  created_at: string;
+  updated_at?: string | null;
+}
+
 interface AlertRow {
   id: string;
   name: string;
@@ -3199,6 +3224,137 @@ async function handleScheduledSearches(
   return textResponse('Method not allowed', 405, requestCorsHeaders);
 }
 
+async function handleDashboards(
+  request: Request,
+  env: Env,
+  pathname: string,
+  auth: AuthContext,
+  requestCorsHeaders: Record<string, string>
+): Promise<Response> {
+  const principal = auth.email || auth.principal;
+  const isAdmin = auth.role === 'admin' || auth.role === 'superadmin';
+
+  if (request.method === 'GET' && pathname === '/dashboards') {
+    assertPermission(auth, 'dashboard.read');
+    const rows = await env.DB.prepare('SELECT * FROM dashboards ORDER BY is_default DESC, created_at DESC LIMIT 100').all<DashboardRow>();
+    return jsonResponse(rows.results || [], 200, requestCorsHeaders);
+  }
+
+  if (request.method === 'POST' && pathname === '/dashboards') {
+    assertPermission(auth, 'dashboard.write');
+    const body = await request.json() as Record<string, unknown>;
+    const name = String(body.name || '').trim();
+    if (!name) return jsonResponse({ error: 'name is required' }, 400, requestCorsHeaders);
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await env.DB.prepare(
+      `INSERT INTO dashboards (id, name, description, layout_json, is_default, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, '[]', 0, ?, ?, ?)`
+    ).bind(id, name, String(body.description || ''), principal, now, now).run();
+    return jsonResponse({ id, name, created_at: now }, 201, requestCorsHeaders);
+  }
+
+  const dashMatch = pathname.match(/^\/dashboards\/([^/]+)/);
+  if (!dashMatch) return textResponse('Not found', 404, requestCorsHeaders);
+  const dashboardId = dashMatch[1];
+
+  const panelMatch = pathname.match(/^\/dashboards\/[^/]+\/panels(?:\/([^/]+))?$/);
+
+  if (panelMatch !== null) {
+    const panelId = panelMatch[1] || null;
+
+    if (request.method === 'GET' && !panelId) {
+      assertPermission(auth, 'dashboard.read');
+      const rows = await env.DB.prepare(
+        'SELECT * FROM dashboard_panels WHERE dashboard_id = ? ORDER BY position ASC'
+      ).bind(dashboardId).all<DashboardPanelRow>();
+      return jsonResponse(rows.results || [], 200, requestCorsHeaders);
+    }
+
+    if (request.method === 'POST' && !panelId) {
+      assertPermission(auth, 'dashboard.write');
+      const body = await request.json() as Record<string, unknown>;
+      const title = String(body.title || '').trim();
+      const ppl = String(body.ppl || '').trim();
+      if (!title || !ppl) return jsonResponse({ error: 'title and ppl are required' }, 400, requestCorsHeaders);
+      const id = crypto.randomUUID();
+      const now = new Date().toISOString();
+      const vizType = String(body.viz_type || 'table');
+      const timeWindow = Math.max(1, Math.min(10080, Number(body.time_window_minutes) || 60));
+      const refreshSec = Math.max(0, Math.min(3600, Number(body.refresh_seconds) || 0));
+      const position = Number(body.position) || 0;
+      await env.DB.prepare(
+        `INSERT INTO dashboard_panels (id, dashboard_id, title, ppl, viz_type, time_window_minutes, refresh_seconds, options_json, position, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?)`
+      ).bind(id, dashboardId, title, ppl, vizType, timeWindow, refreshSec, position, now, now).run();
+      return jsonResponse({ id, dashboard_id: dashboardId, title, ppl, viz_type: vizType, created_at: now }, 201, requestCorsHeaders);
+    }
+
+    if (request.method === 'PUT' && panelId) {
+      assertPermission(auth, 'dashboard.write');
+      const body = await request.json() as Record<string, unknown>;
+      const now = new Date().toISOString();
+      const updates: string[] = [];
+      const values: unknown[] = [];
+      if (body.title !== undefined) { updates.push('title = ?'); values.push(String(body.title).trim()); }
+      if (body.ppl !== undefined) { updates.push('ppl = ?'); values.push(String(body.ppl).trim()); }
+      if (body.viz_type !== undefined) { updates.push('viz_type = ?'); values.push(String(body.viz_type)); }
+      if (body.time_window_minutes !== undefined) { updates.push('time_window_minutes = ?'); values.push(Number(body.time_window_minutes) || 60); }
+      if (body.refresh_seconds !== undefined) { updates.push('refresh_seconds = ?'); values.push(Number(body.refresh_seconds) || 0); }
+      if (body.position !== undefined) { updates.push('position = ?'); values.push(Number(body.position) || 0); }
+      if (body.options_json !== undefined) { updates.push('options_json = ?'); values.push(typeof body.options_json === 'string' ? body.options_json : JSON.stringify(body.options_json)); }
+      updates.push('updated_at = ?');
+      values.push(now);
+      values.push(panelId);
+      if (updates.length > 1) {
+        await env.DB.prepare(`UPDATE dashboard_panels SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+      }
+      return jsonResponse({ id: panelId, updated_at: now }, 200, requestCorsHeaders);
+    }
+
+    if (request.method === 'DELETE' && panelId) {
+      assertPermission(auth, 'dashboard.write');
+      await env.DB.prepare('DELETE FROM dashboard_panels WHERE id = ? AND dashboard_id = ?').bind(panelId, dashboardId).run();
+      return new Response(null, { status: 204, headers: requestCorsHeaders });
+    }
+
+    return textResponse('Method not allowed', 405, requestCorsHeaders);
+  }
+
+  if (request.method === 'PUT') {
+    assertPermission(auth, 'dashboard.write');
+    const existing = await env.DB.prepare('SELECT id, is_default, created_by FROM dashboards WHERE id = ?')
+      .bind(dashboardId).first<{ id: string; is_default: number; created_by?: string | null }>();
+    if (!existing) return jsonResponse({ error: 'Not found' }, 404, requestCorsHeaders);
+    if (existing.is_default && !isAdmin) throw new Error('Forbidden');
+    const body = await request.json() as Record<string, unknown>;
+    const now = new Date().toISOString();
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    if (body.name !== undefined) { updates.push('name = ?'); values.push(String(body.name).trim()); }
+    if (body.description !== undefined) { updates.push('description = ?'); values.push(String(body.description)); }
+    if (body.layout_json !== undefined) { updates.push('layout_json = ?'); values.push(typeof body.layout_json === 'string' ? body.layout_json : JSON.stringify(body.layout_json)); }
+    updates.push('updated_at = ?');
+    values.push(now);
+    values.push(dashboardId);
+    await env.DB.prepare(`UPDATE dashboards SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+    return jsonResponse({ id: dashboardId, updated_at: now }, 200, requestCorsHeaders);
+  }
+
+  if (request.method === 'DELETE') {
+    assertPermission(auth, 'dashboard.delete');
+    const existing = await env.DB.prepare('SELECT id, is_default FROM dashboards WHERE id = ?')
+      .bind(dashboardId).first<{ id: string; is_default: number }>();
+    if (!existing) return new Response(null, { status: 204, headers: requestCorsHeaders });
+    if (existing.is_default) return jsonResponse({ error: 'Cannot delete default dashboard' }, 403, requestCorsHeaders);
+    await env.DB.prepare('DELETE FROM dashboard_panels WHERE dashboard_id = ?').bind(dashboardId).run();
+    await env.DB.prepare('DELETE FROM dashboards WHERE id = ?').bind(dashboardId).run();
+    return new Response(null, { status: 204, headers: requestCorsHeaders });
+  }
+
+  return textResponse('Method not allowed', 405, requestCorsHeaders);
+}
+
 async function getUserRoleIds(env: Env, userId: string): Promise<string[]> {
   const rows = await env.DB.prepare(
     'SELECT role_id FROM user_roles WHERE user_id = ?'
@@ -3811,6 +3967,15 @@ export default {
     if (url.pathname.startsWith('/saved-searches')) {
       try {
         return await handleSavedSearches(request, env, url.pathname, auth, requestCorsHeaders);
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders, 500);
+      }
+    }
+
+    if (url.pathname.startsWith('/dashboards')) {
+      try {
+        return await handleDashboards(request, env, url.pathname, auth, requestCorsHeaders);
       } catch (error) {
         await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
         return errorResponse(error, requestCorsHeaders, 500);

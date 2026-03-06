@@ -1,4 +1,4 @@
-const COMMANDS = new Set(['search', 'where', 'fields', 'sort', 'head', 'stats']);
+const COMMANDS = new Set(['search', 'where', 'fields', 'sort', 'head', 'stats', 'timechart']);
 
 const FIELD_ALIASES = {
   '@timestamp': 'ts',
@@ -223,6 +223,41 @@ function parseStatsClause(body) {
   return { fn: aggregations[0].fn, as: aggregations[0].as, by, aggregations };
 }
 
+const SPAN_REGEX = /^(\d+)(m|h|d)$/;
+const SPAN_MULTIPLIERS = { m: 60000, h: 3600000, d: 86400000 };
+
+function parseSpan(span) {
+  const match = span.match(SPAN_REGEX);
+  if (!match) throw new Error(`Invalid timechart span: ${span}. Use Nm, Nh, or Nd.`);
+  return { span, spanMs: parseInt(match[1], 10) * SPAN_MULTIPLIERS[match[2]] };
+}
+
+function parseTimechartClause(body) {
+  const spanMatch = body.match(/span\s*=\s*(\S+)/i);
+  if (!spanMatch) throw new Error('timechart requires span=<interval> (e.g., span=5m)');
+  const { span, spanMs } = parseSpan(spanMatch[1]);
+
+  const rest = body.replace(/span\s*=\s*\S+/i, '').trim();
+  const byMatch = rest.match(/^(.+?)\s+by\s+(\S+)$/i);
+  const aggPart = byMatch ? byMatch[1].trim() : rest;
+  const by = byMatch ? normalizeField(byMatch[2]) : null;
+
+  const aggRegex = /(\w+)\s*\(\s*(\*|[a-zA-Z_][a-zA-Z0-9_@.]*)?\s*\)(?:\s+as\s+([a-zA-Z_][a-zA-Z0-9_]*))?/gi;
+  const aggregations = [];
+  let m;
+  while ((m = aggRegex.exec(aggPart)) !== null) {
+    const fn = m[1].toLowerCase();
+    if (!STATS_FUNCTIONS.has(fn)) throw new Error(`Unsupported timechart function: ${fn}`);
+    const field = fn === 'count' ? null : normalizeField(m[2] || '');
+    if (fn !== 'count' && !field) throw new Error(`${fn}() requires a field argument`);
+    const as = m[3] || (fn === 'count' ? 'count' : `${fn}_${field}`);
+    aggregations.push({ fn, field, as });
+  }
+  if (aggregations.length === 0) throw new Error('timechart requires at least one aggregation');
+
+  return { span, spanMs, aggregations, by };
+}
+
 export function parsePplPipeline(input) {
   const segments = splitPipeline(input);
   if (segments.length === 0) {
@@ -266,6 +301,10 @@ export function parsePplPipeline(input) {
     }
     if (firstToken === 'stats') {
       stages.push({ command: 'stats', ...parseStatsClause(body) });
+      continue;
+    }
+    if (firstToken === 'timechart') {
+      stages.push({ command: 'timechart', ...parseTimechartClause(body) });
       continue;
     }
   }

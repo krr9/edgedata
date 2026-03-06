@@ -64,6 +64,29 @@ test('stats parses with custom alias', () => {
   ]);
 });
 
+test('timechart parses span and count by field', () => {
+  const result = parsePplPipeline('search * | timechart span=5m count() by level');
+  const tc = result.stages[1];
+  assert.strictEqual(tc.command, 'timechart');
+  assert.strictEqual(tc.span, '5m');
+  assert.strictEqual(tc.spanMs, 300000);
+  assert.deepStrictEqual(tc.aggregations, [{ fn: 'count', field: null, as: 'count' }]);
+  assert.strictEqual(tc.by, 'level');
+});
+
+test('timechart parses span with avg', () => {
+  const result = parsePplPipeline('search * | timechart span=1h avg(duration_ms)');
+  const tc = result.stages[1];
+  assert.strictEqual(tc.spanMs, 3600000);
+  assert.strictEqual(tc.aggregations[0].fn, 'avg');
+  assert.strictEqual(tc.aggregations[0].field, 'duration_ms');
+  assert.strictEqual(tc.by, null);
+});
+
+test('timechart rejects invalid span', () => {
+  assert.throws(() => parsePplPipeline('search * | timechart span=abc count()'), /Invalid timechart span/);
+});
+
 test('parsePplPipeline rejects unsupported commands', () => {
   assert.throws(
     () => parsePplPipeline('search timeout | eval foo=bar'),

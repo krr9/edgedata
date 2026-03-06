@@ -5,7 +5,8 @@ import {
   isIncrementalStreamPipeline,
   resolvePipelineLimit,
   rowMatchesWhereStages,
-  executeStatsPipeline
+  executeStatsPipeline,
+  executeTimechartPipeline
 } from '../src/search-stream-core.mjs';
 
 test('isIncrementalStreamPipeline accepts search/where/head only', () => {
@@ -88,4 +89,40 @@ test('executeStatsPipeline computes dc', () => {
   };
   const result = executeStatsPipeline(events, stage);
   assert.strictEqual(result[0].unique_ips, 2);
+});
+
+test('executeTimechartPipeline buckets events by 5m span', () => {
+  const events = [
+    { ts: '2026-03-05T10:01:00Z', level: 'error' },
+    { ts: '2026-03-05T10:03:00Z', level: 'error' },
+    { ts: '2026-03-05T10:06:00Z', level: 'info' },
+    { ts: '2026-03-05T10:08:00Z', level: 'error' },
+  ];
+  const stage = {
+    command: 'timechart',
+    spanMs: 300000,
+    aggregations: [{ fn: 'count', field: null, as: 'count' }],
+    by: 'level'
+  };
+  const result = executeTimechartPipeline(events, stage);
+  assert.ok(result.length > 0);
+  assert.ok(result[0]._time);
+  const errorBucket1 = result.find(r => r._time === '2026-03-05T10:00:00.000Z' && r.level === 'error');
+  assert.strictEqual(errorBucket1.count, 2);
+});
+
+test('executeTimechartPipeline without by field', () => {
+  const events = [
+    { ts: '2026-03-05T10:01:00Z', duration_ms: 100 },
+    { ts: '2026-03-05T10:03:00Z', duration_ms: 200 },
+  ];
+  const stage = {
+    command: 'timechart',
+    spanMs: 300000,
+    aggregations: [{ fn: 'avg', field: 'duration_ms', as: 'avg_ms' }],
+    by: null
+  };
+  const result = executeTimechartPipeline(events, stage);
+  assert.strictEqual(result.length, 1);
+  assert.strictEqual(result[0].avg_ms, 150);
 });

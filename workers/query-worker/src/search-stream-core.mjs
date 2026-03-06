@@ -101,6 +101,38 @@ function computeAggregation(fn, field, rows) {
   return null;
 }
 
+export function executeTimechartPipeline(events, stage) {
+  const { spanMs, aggregations, by } = stage;
+  const buckets = new Map();
+
+  for (const event of events) {
+    const tsMs = new Date(event.ts).getTime();
+    if (!Number.isFinite(tsMs)) continue;
+    const bucketMs = Math.floor(tsMs / spanMs) * spanMs;
+    const bucketKey = new Date(bucketMs).toISOString();
+    const groupVal = by ? String(event[by] ?? '') : '_all';
+    const key = `${bucketKey}\x00${groupVal}`;
+
+    if (!buckets.has(key)) {
+      buckets.set(key, { _time: bucketKey, _group: groupVal, rows: [] });
+    }
+    buckets.get(key).rows.push(event);
+  }
+
+  const results = [];
+  for (const { _time, _group, rows } of buckets.values()) {
+    const row = { _time };
+    if (by) row[by] = _group;
+    for (const agg of aggregations) {
+      row[agg.as] = computeAggregation(agg.fn, agg.field, rows);
+    }
+    results.push(row);
+  }
+
+  results.sort((a, b) => a._time.localeCompare(b._time));
+  return results;
+}
+
 export function rowMatchesWhereStages(row, stages) {
   for (const stage of stages || []) {
     if (stage.command !== 'where') continue;

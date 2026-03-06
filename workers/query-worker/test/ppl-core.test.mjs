@@ -83,6 +83,31 @@ test('timechart parses span with avg', () => {
   assert.strictEqual(tc.by, null);
 });
 
+test('top parses count and field', () => {
+  const result = parsePplPipeline('search * | top 10 msg_hash');
+  const stage = result.stages[1];
+  assert.strictEqual(stage.command, 'top');
+  assert.strictEqual(stage.count, 10);
+  assert.strictEqual(stage.field, 'msg_hash');
+  assert.strictEqual(stage.by, null);
+});
+
+test('top parses with by field', () => {
+  const result = parsePplPipeline('search * | top 5 host by service');
+  const stage = result.stages[1];
+  assert.strictEqual(stage.count, 5);
+  assert.strictEqual(stage.field, 'host');
+  assert.strictEqual(stage.by, 'service');
+});
+
+test('rare parses count and field', () => {
+  const result = parsePplPipeline('search * | rare 10 src_ip');
+  const stage = result.stages[1];
+  assert.strictEqual(stage.command, 'rare');
+  assert.strictEqual(stage.count, 10);
+  assert.strictEqual(stage.field, 'src_ip');
+});
+
 test('timechart rejects invalid span', () => {
   assert.throws(() => parsePplPipeline('search * | timechart span=abc count()'), /Invalid timechart span/);
 });

@@ -1,4 +1,4 @@
-const COMMANDS = new Set(['search', 'where', 'fields', 'sort', 'head', 'stats', 'timechart']);
+const COMMANDS = new Set(['search', 'where', 'fields', 'sort', 'head', 'stats', 'timechart', 'top', 'rare']);
 
 const FIELD_ALIASES = {
   '@timestamp': 'ts',
@@ -223,6 +223,21 @@ function parseStatsClause(body) {
   return { fn: aggregations[0].fn, as: aggregations[0].as, by, aggregations };
 }
 
+function parseTopRareClause(body) {
+  const byMatch = body.match(/^(.+?)\s+by\s+(\S+)$/i);
+  const mainPart = byMatch ? byMatch[1].trim() : body.trim();
+  const by = byMatch ? normalizeField(byMatch[2]) : null;
+
+  const parts = mainPart.split(/\s+/);
+  if (parts.length < 2) throw new Error('top/rare requires: <N> <field>');
+  const count = parseInt(parts[0], 10);
+  if (!Number.isFinite(count) || count <= 0) throw new Error('top/rare requires a positive integer count');
+  const field = normalizeField(parts[1]);
+  if (!field) throw new Error('top/rare requires a field name');
+
+  return { count: Math.min(count, 1000), field, by };
+}
+
 const SPAN_REGEX = /^(\d+)(m|h|d)$/;
 const SPAN_MULTIPLIERS = { m: 60000, h: 3600000, d: 86400000 };
 
@@ -305,6 +320,14 @@ export function parsePplPipeline(input) {
     }
     if (firstToken === 'timechart') {
       stages.push({ command: 'timechart', ...parseTimechartClause(body) });
+      continue;
+    }
+    if (firstToken === 'top') {
+      stages.push({ command: 'top', ...parseTopRareClause(body) });
+      continue;
+    }
+    if (firstToken === 'rare') {
+      stages.push({ command: 'rare', ...parseTopRareClause(body) });
       continue;
     }
   }

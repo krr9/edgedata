@@ -6,7 +6,9 @@ import {
   resolvePipelineLimit,
   rowMatchesWhereStages,
   executeStatsPipeline,
-  executeTimechartPipeline
+  executeTimechartPipeline,
+  executeTopPipeline,
+  executeRarePipeline
 } from '../src/search-stream-core.mjs';
 
 test('isIncrementalStreamPipeline accepts search/where/head only', () => {
@@ -125,4 +127,31 @@ test('executeTimechartPipeline without by field', () => {
   const result = executeTimechartPipeline(events, stage);
   assert.strictEqual(result.length, 1);
   assert.strictEqual(result[0].avg_ms, 150);
+});
+
+test('executeTopPipeline returns most frequent values', () => {
+  const events = [
+    { msg_hash: 'aaa' }, { msg_hash: 'aaa' }, { msg_hash: 'aaa' },
+    { msg_hash: 'bbb' }, { msg_hash: 'bbb' },
+    { msg_hash: 'ccc' },
+  ];
+  const stage = { command: 'top', count: 2, field: 'msg_hash', by: null };
+  const result = executeTopPipeline(events, stage);
+  assert.strictEqual(result.length, 2);
+  assert.strictEqual(result[0].msg_hash, 'aaa');
+  assert.strictEqual(result[0].count, 3);
+  assert.strictEqual(result[1].msg_hash, 'bbb');
+});
+
+test('executeRarePipeline returns least frequent values', () => {
+  const events = [
+    { src_ip: '1.1.1.1' }, { src_ip: '1.1.1.1' }, { src_ip: '1.1.1.1' },
+    { src_ip: '2.2.2.2' }, { src_ip: '2.2.2.2' },
+    { src_ip: '3.3.3.3' },
+  ];
+  const stage = { command: 'rare', count: 2, field: 'src_ip', by: null };
+  const result = executeRarePipeline(events, stage);
+  assert.strictEqual(result.length, 2);
+  assert.strictEqual(result[0].src_ip, '3.3.3.3');
+  assert.strictEqual(result[0].count, 1);
 });

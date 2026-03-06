@@ -101,6 +101,41 @@ function computeAggregation(fn, field, rows) {
   return null;
 }
 
+export function executeTopPipeline(events, stage) {
+  return executeFrequencyPipeline(events, stage, 'desc');
+}
+
+export function executeRarePipeline(events, stage) {
+  return executeFrequencyPipeline(events, stage, 'asc');
+}
+
+function executeFrequencyPipeline(events, stage, order) {
+  const { count, field, by } = stage;
+  const groups = new Map();
+  const total = events.length;
+
+  for (const event of events) {
+    const groupKey = by ? String(event[by] ?? '') : '_all';
+    if (!groups.has(groupKey)) groups.set(groupKey, new Map());
+    const freq = groups.get(groupKey);
+    const val = String(event[field] ?? '');
+    freq.set(val, (freq.get(val) || 0) + 1);
+  }
+
+  const results = [];
+  for (const [groupKey, freq] of groups) {
+    const sorted = [...freq.entries()]
+      .sort((a, b) => order === 'desc' ? b[1] - a[1] : a[1] - b[1])
+      .slice(0, count);
+    for (const [val, cnt] of sorted) {
+      const row = { [field]: val, count: cnt, percent: total ? +(cnt / total * 100).toFixed(2) : 0 };
+      if (by) row[by] = groupKey;
+      results.push(row);
+    }
+  }
+  return results;
+}
+
 export function executeTimechartPipeline(events, stage) {
   const { spanMs, aggregations, by } = stage;
   const buckets = new Map();

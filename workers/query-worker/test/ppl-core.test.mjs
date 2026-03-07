@@ -158,10 +158,59 @@ test('parsePplPipeline parses lookup with output fields', () => {
   assert.deepStrictEqual(lookup.outputFields, ['team', 'oncall']);
 });
 
+test('rex parses field and regex with named groups', () => {
+  const result = parsePplPipeline('search * | rex field=message "(?<error_code>E[0-9]{4})"');
+  const stage = result.stages[1];
+  assert.strictEqual(stage.command, 'rex');
+  assert.strictEqual(stage.sourceField, 'message');
+  assert.strictEqual(stage.pattern, '(?<error_code>E[0-9]{4})');
+});
+
+test('rex rejects missing field or pattern', () => {
+  assert.throws(() => parsePplPipeline('search * | rex "(?<x>abc)"'), /rex requires field=/);
+});
+
+test('rename parses old as new', () => {
+  const result = parsePplPipeline('search * | rename duration_ms as latency');
+  const stage = result.stages[1];
+  assert.strictEqual(stage.command, 'rename');
+  assert.strictEqual(stage.oldField, 'duration_ms');
+  assert.strictEqual(stage.newField, 'latency');
+});
+
+test('rename rejects missing as keyword', () => {
+  assert.throws(() => parsePplPipeline('search * | rename duration_ms latency'), /rename requires: <old_field> as <new_field>/);
+});
+
+test('table parses as alias for fields', () => {
+  const result = parsePplPipeline('search * | table ts, service, message');
+  const stage = result.stages[1];
+  assert.strictEqual(stage.command, 'table');
+  assert.deepStrictEqual(stage.fields, ['ts', 'service', 'message']);
+});
+
+test('transaction parses field with maxspan and maxevents', () => {
+  const result = parsePplPipeline('search * | transaction trace_id maxspan=5m maxevents=100');
+  const stage = result.stages[1];
+  assert.strictEqual(stage.command, 'transaction');
+  assert.strictEqual(stage.field, 'trace_id');
+  assert.strictEqual(stage.maxSpanMs, 300000);
+  assert.strictEqual(stage.maxEvents, 100);
+});
+
+test('transaction parses field without options', () => {
+  const result = parsePplPipeline('search * | transaction request_id');
+  const stage = result.stages[1];
+  assert.strictEqual(stage.command, 'transaction');
+  assert.strictEqual(stage.field, 'request_id');
+  assert.strictEqual(stage.maxSpanMs, 600000);
+  assert.strictEqual(stage.maxEvents, 1000);
+});
+
 test('parsePplPipeline rejects unsupported commands', () => {
   assert.throws(
-    () => parsePplPipeline('search timeout | transaction trace_id'),
-    /Unsupported PPL command: transaction/
+    () => parsePplPipeline('search timeout | cluster trace_id'),
+    /Unsupported PPL command: cluster/
   );
 });
 

@@ -35,7 +35,7 @@ function rowMatchesCondition(row, condition) {
   return false;
 }
 
-const STREAMING_COMMANDS = new Set(['search', 'where', 'head', 'eval', 'dedup', 'lookup']);
+const STREAMING_COMMANDS = new Set(['search', 'where', 'head', 'eval', 'dedup', 'lookup', 'rex', 'rename']);
 
 export function isIncrementalStreamPipeline(stages) {
   return (stages || []).every(s => STREAMING_COMMANDS.has(s.command) || s.command === 'fields');
@@ -52,6 +52,9 @@ export function applyPostPipeline(events, stages) {
     else if (stage.command === 'eval') result = executeEvalPipeline(result, stage);
     else if (stage.command === 'sort') result = applySortStage(result, stage);
     else if (stage.command === 'fields' || stage.command === 'table') result = applyFieldsStage(result, stage);
+    else if (stage.command === 'rex') result = executeRexPipeline(result, stage);
+    else if (stage.command === 'rename') result = executeRenamePipeline(result, stage);
+    else if (stage.command === 'transaction') result = executeTransactionPipeline(result, stage);
   }
   return result;
 }
@@ -153,6 +156,63 @@ export function executeLookupPipeline(events, stage, lookupMap) {
       : enrichment;
     return { ...event, ...filtered };
   });
+}
+
+export function executeRexPipeline(events, stage) {
+  let regex;
+  try {
+    regex = new RegExp(stage.pattern);
+  } catch {
+    return events;
+  }
+  return events.map(event => {
+    const source = String(event[stage.sourceField] ?? '');
+    const match = source.match(regex);
+    if (!match || !match.groups) return event;
+    return { ...event, ...match.groups };
+  });
+}
+
+export function executeRenamePipeline(events, stage) {
+  return events.map(event => {
+    const { [stage.oldField]: value, ...rest } = event;
+    if (value === undefined) return event;
+    return { ...rest, [stage.newField]: value };
+  });
+}
+
+export function executeTransactionPipeline(events, stage) {
+  const groups = new Map();
+  for (const event of events) {
+    const key = String(event[stage.field] ?? '');
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    const group = groups.get(key);
+    if (group.length < stage.maxEvents) {
+      group.push(event);
+    }
+  }
+
+  const results = [];
+  for (const [key, group] of groups) {
+    const timestamps = group
+      .map(e => new Date(e.ts).getTime())
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b);
+    const duration = timestamps.length >= 2 ? timestamps[timestamps.length - 1] - timestamps[0] : 0;
+
+    if (duration > stage.maxSpanMs) continue;
+
+    const first = group[0];
+    results.push({
+      ...first,
+      [stage.field]: key,
+      eventcount: group.length,
+      duration,
+      _events: group
+    });
+  }
+  return results;
 }
 
 export function executeDedupPipeline(events, stage) {

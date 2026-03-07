@@ -13,7 +13,10 @@ import {
   resolvePipelineLimit,
   rowMatchesWhereStages,
   applyPostPipeline,
-  executeLookupPipeline
+  executeLookupPipeline,
+  executeRexPipeline,
+  executeRenamePipeline,
+  executeTransactionPipeline
 } from './search-stream-core.mjs';
 import { resolveCorsOriginFromPatterns } from './cors-utils.mjs';
 import {
@@ -239,7 +242,11 @@ type PplStage =
   | { command: 'rare'; count: number; field: string; by: string | null }
   | { command: 'dedup'; fields: string[] }
   | { command: 'eval'; field: string; expression: string }
-  | { command: 'lookup'; table: string; field: string; outputFields: string[] | null };
+  | { command: 'lookup'; table: string; field: string; outputFields: string[] | null }
+  | { command: 'rex'; sourceField: string; pattern: string }
+  | { command: 'rename'; oldField: string; newField: string }
+  | { command: 'table'; fields: string[] }
+  | { command: 'transaction'; field: string; maxSpanMs: number; maxEvents: number };
 
 interface PplPipeline {
   raw: string;
@@ -2028,7 +2035,7 @@ function applyPplStatsCount(
   return result;
 }
 
-const TABLE_COMMANDS = new Set(['stats', 'fields', 'timechart', 'top', 'rare']);
+const TABLE_COMMANDS = new Set(['stats', 'fields', 'table', 'timechart', 'top', 'rare', 'transaction']);
 
 function isPplTableQuery(stages: PplStage[]): boolean {
   return stages.some((stage) => TABLE_COMMANDS.has(stage.command));
@@ -2168,6 +2175,24 @@ function applyPplPipelineStages(
       if (lm) {
         rows = executeLookupPipeline(rows, stage, lm) as Array<Record<string, unknown>>;
       }
+      continue;
+    }
+    if (stage.command === 'rex') {
+      rows = executeRexPipeline(rows, stage) as Array<Record<string, unknown>>;
+      continue;
+    }
+    if (stage.command === 'rename') {
+      rows = executeRenamePipeline(rows, stage) as Array<Record<string, unknown>>;
+      continue;
+    }
+    if (stage.command === 'table') {
+      rows = applyPostPipeline(rows, [stage]) as Array<Record<string, unknown>>;
+      resultType = 'table';
+      continue;
+    }
+    if (stage.command === 'transaction') {
+      rows = executeTransactionPipeline(rows, stage) as Array<Record<string, unknown>>;
+      resultType = 'table';
       continue;
     }
   }

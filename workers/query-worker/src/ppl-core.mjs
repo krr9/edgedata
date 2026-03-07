@@ -1,4 +1,4 @@
-const COMMANDS = new Set(['search', 'where', 'fields', 'sort', 'head', 'stats', 'timechart', 'top', 'rare', 'dedup', 'eval', 'lookup']);
+const COMMANDS = new Set(['search', 'where', 'fields', 'sort', 'head', 'stats', 'timechart', 'top', 'rare', 'dedup', 'eval', 'lookup', 'rex', 'transaction', 'rename', 'table']);
 
 const FIELD_ALIASES = {
   '@timestamp': 'ts',
@@ -301,6 +301,46 @@ function parseTimechartClause(body) {
   return { span, spanMs, aggregations, by };
 }
 
+function parseRexClause(body) {
+  const fieldMatch = body.match(/field\s*=\s*(\S+)/i);
+  if (!fieldMatch) throw new Error('rex requires field=<source_field> "<regex>"');
+  const sourceField = normalizeField(fieldMatch[1]);
+  const rest = body.replace(/field\s*=\s*\S+/i, '').trim();
+  const patternMatch = rest.match(/^"((?:[^"\\]|\\.)*)"$/);
+  if (!patternMatch) throw new Error('rex requires a quoted regex pattern');
+  return { sourceField, pattern: patternMatch[1] };
+}
+
+function parseRenameClause(body) {
+  const match = body.match(/^(\S+)\s+as\s+(\S+)$/i);
+  if (!match) throw new Error('rename requires: <old_field> as <new_field>');
+  return { oldField: normalizeField(match[1]), newField: normalizeField(match[2]) };
+}
+
+function parseTransactionClause(body) {
+  const tokens = body.trim().split(/\s+/);
+  if (tokens.length === 0 || !tokens[0]) throw new Error('transaction requires a field');
+  const field = normalizeField(tokens[0]);
+
+  let maxSpanMs = 600000;
+  let maxEvents = 1000;
+
+  const spanMatch = body.match(/maxspan\s*=\s*(\S+)/i);
+  if (spanMatch) {
+    const parsed = spanMatch[1].match(SPAN_REGEX);
+    if (parsed) {
+      maxSpanMs = parseInt(parsed[1], 10) * SPAN_MULTIPLIERS[parsed[2]];
+    }
+  }
+
+  const eventsMatch = body.match(/maxevents\s*=\s*(\d+)/i);
+  if (eventsMatch) {
+    maxEvents = Math.max(1, parseInt(eventsMatch[1], 10));
+  }
+
+  return { field, maxSpanMs, maxEvents };
+}
+
 export function parsePplPipeline(input) {
   const segments = splitPipeline(input);
   if (segments.length === 0) {
@@ -360,6 +400,22 @@ export function parsePplPipeline(input) {
     }
     if (firstToken === 'dedup') {
       stages.push({ command: 'dedup', ...parseDedupClause(body) });
+      continue;
+    }
+    if (firstToken === 'rex') {
+      stages.push({ command: 'rex', ...parseRexClause(body) });
+      continue;
+    }
+    if (firstToken === 'rename') {
+      stages.push({ command: 'rename', ...parseRenameClause(body) });
+      continue;
+    }
+    if (firstToken === 'table') {
+      stages.push({ command: 'table', fields: parseFieldsClause(body) });
+      continue;
+    }
+    if (firstToken === 'transaction') {
+      stages.push({ command: 'transaction', ...parseTransactionClause(body) });
       continue;
     }
     if (firstToken === 'top') {

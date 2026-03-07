@@ -11,7 +11,10 @@ import {
   executeRarePipeline,
   executeDedupPipeline,
   executeEvalPipeline,
-  executeLookupPipeline
+  executeLookupPipeline,
+  executeRexPipeline,
+  executeRenamePipeline,
+  executeTransactionPipeline
 } from '../src/search-stream-core.mjs';
 
 test('isIncrementalStreamPipeline accepts search/where/head only', () => {
@@ -221,4 +224,64 @@ test('executeLookupPipeline respects output field filter', () => {
   assert.strictEqual(result[0].team, 'identity');
   assert.strictEqual(result[0].oncall, undefined);
   assert.strictEqual(result[0].manager, undefined);
+});
+
+test('executeRexPipeline extracts named groups from regex', () => {
+  const events = [
+    { message: 'Error E1234 occurred in module X' },
+    { message: 'No error code here' },
+  ];
+  const stage = { command: 'rex', sourceField: 'message', pattern: '(?<error_code>E[0-9]{4})' };
+  const result = executeRexPipeline(events, stage);
+  assert.strictEqual(result[0].error_code, 'E1234');
+  assert.strictEqual(result[1].error_code, undefined);
+});
+
+test('executeRexPipeline extracts multiple groups', () => {
+  const events = [
+    { message: 'user=alice action=login' },
+  ];
+  const stage = { command: 'rex', sourceField: 'message', pattern: 'user=(?<user>\\w+) action=(?<action>\\w+)' };
+  const result = executeRexPipeline(events, stage);
+  assert.strictEqual(result[0].user, 'alice');
+  assert.strictEqual(result[0].action, 'login');
+});
+
+test('executeRenamePipeline renames field', () => {
+  const events = [
+    { duration_ms: 150, service: 'api' },
+  ];
+  const stage = { command: 'rename', oldField: 'duration_ms', newField: 'latency' };
+  const result = executeRenamePipeline(events, stage);
+  assert.strictEqual(result[0].latency, 150);
+  assert.strictEqual(result[0].duration_ms, undefined);
+  assert.strictEqual(result[0].service, 'api');
+});
+
+test('executeTransactionPipeline groups events by field', () => {
+  const events = [
+    { trace_id: 'aaa', ts: '2026-03-05T10:00:00Z', message: 'start' },
+    { trace_id: 'aaa', ts: '2026-03-05T10:00:03Z', message: 'end' },
+    { trace_id: 'bbb', ts: '2026-03-05T10:00:01Z', message: 'only' },
+  ];
+  const stage = { command: 'transaction', field: 'trace_id', maxSpanMs: 300000, maxEvents: 1000 };
+  const result = executeTransactionPipeline(events, stage);
+  assert.strictEqual(result.length, 2);
+  const aaa = result.find(r => r.trace_id === 'aaa');
+  assert.strictEqual(aaa.eventcount, 2);
+  assert.strictEqual(aaa.duration, 3000);
+  const bbb = result.find(r => r.trace_id === 'bbb');
+  assert.strictEqual(bbb.eventcount, 1);
+  assert.strictEqual(bbb.duration, 0);
+});
+
+test('executeTransactionPipeline respects maxevents', () => {
+  const events = [
+    { trace_id: 'aaa', ts: '2026-03-05T10:00:00Z' },
+    { trace_id: 'aaa', ts: '2026-03-05T10:00:01Z' },
+    { trace_id: 'aaa', ts: '2026-03-05T10:00:02Z' },
+  ];
+  const stage = { command: 'transaction', field: 'trace_id', maxSpanMs: 300000, maxEvents: 2 };
+  const result = executeTransactionPipeline(events, stage);
+  assert.strictEqual(result[0].eventcount, 2);
 });

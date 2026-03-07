@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from './AuthContext';
 import { AuthScreen } from './AuthScreen';
 
-type ViewMode = 'search' | 'dashboard' | 'saved' | 'scheduled' | 'alerts' | 'admin';
+type ViewMode = 'search' | 'dashboard' | 'saved' | 'scheduled' | 'alerts' | 'admin' | 'livetail';
 type SearchMode = 'structured' | 'token' | 'phrase';
 
 interface LogEvent {
@@ -343,6 +343,209 @@ function parseStringArray(raw: string | undefined, fallback: string[] = []): str
   } catch {
     return fallback;
   }
+}
+
+function formatTimeCompact(ts: string): string {
+  const d = new Date(ts);
+  const h = d.getHours().toString().padStart(2, '0');
+  const m = d.getMinutes().toString().padStart(2, '0');
+  const s = d.getSeconds().toString().padStart(2, '0');
+  const ms = d.getMilliseconds().toString().padStart(3, '0');
+  return `${h}:${m}:${s}.${ms}`;
+}
+
+const MAX_LIVETAIL_EVENTS = 2000;
+
+interface LiveTailFilters {
+  service: string;
+  env: string;
+  level: string;
+  keywords: string;
+}
+
+function LiveTailView({
+  apiBase,
+  apiToken,
+  onSelectEvent
+}: {
+  apiBase: string;
+  apiToken: string | null;
+  onSelectEvent: (event: LogEvent) => void;
+}) {
+  const [events, setEvents] = useState<LogEvent[]>([]);
+  const [connected, setConnected] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [filters, setFilters] = useState<LiveTailFilters>({ service: '', env: '', level: '', keywords: '' });
+  const [rate, setRate] = useState(0);
+  const streamRef = useRef<HTMLDivElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rateCountRef = useRef(0);
+  const userScrolledUpRef = useRef(false);
+
+  const wsUrl = apiToken
+    ? `${apiBase.replace(/^http/, 'ws')}/tail?token=${encodeURIComponent(apiToken)}`
+    : null;
+
+  useEffect(() => {
+    if (!wsUrl) return;
+
+    const connect = () => {
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => setConnected(true);
+
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data as string);
+          if ((data.type === 'events' || data.type === 'catchup') && Array.isArray(data.events)) {
+            const incoming = data.events as LogEvent[];
+            rateCountRef.current += incoming.length;
+            setEvents((prev) => {
+              const next = [...incoming, ...prev].slice(0, MAX_LIVETAIL_EVENTS);
+              return next;
+            });
+          }
+        } catch {
+          /* ignore parse errors */
+        }
+      };
+
+      ws.onclose = () => {
+        setConnected(false);
+        wsRef.current = null;
+        reconnectTimerRef.current = setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => {
+        /* handled in onclose */
+      };
+    };
+
+    connect();
+    return () => {
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [wsUrl]);
+
+  useEffect(() => {
+    if (!connected || !wsRef.current) return;
+    const f: Record<string, unknown> = {};
+    if (filters.service) f.service = filters.service;
+    if (filters.env) f.env = filters.env;
+    if (filters.level) f.level = filters.level;
+    if (filters.keywords) f.keywords = filters.keywords.split(/\s+/).filter(Boolean);
+    wsRef.current.send(JSON.stringify({ type: 'filter', filters: f }));
+  }, [connected, filters]);
+
+  useEffect(() => {
+    if (!connected || !wsRef.current) return;
+    wsRef.current.send(JSON.stringify(paused ? { type: 'pause' } : { type: 'resume' }));
+  }, [connected, paused]);
+
+  useEffect(() => {
+    const iv = setInterval(() => {
+      setRate(rateCountRef.current);
+      rateCountRef.current = 0;
+    }, 1000);
+    return () => clearInterval(iv);
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    const el = streamRef.current;
+    if (!el) return;
+    const atTop = el.scrollTop < 30;
+    userScrolledUpRef.current = !atTop;
+  }, []);
+
+  useEffect(() => {
+    if (!userScrolledUpRef.current && streamRef.current) {
+      streamRef.current.scrollTop = 0;
+    }
+  }, [events]);
+
+  const handleClear = useCallback(() => {
+    setEvents([]);
+  }, []);
+
+  const updateFilter = useCallback(<K extends keyof LiveTailFilters>(key: K, value: LiveTailFilters[K]) => {
+    setFilters((f) => ({ ...f, [key]: value }));
+  }, []);
+
+  return (
+    <div className="livetail-view">
+      <div className="livetail-toolbar">
+        <div className="livetail-filters">
+          <input
+            className="livetail-input"
+            placeholder="service"
+            value={filters.service}
+            onChange={(e) => updateFilter('service', e.target.value)}
+          />
+          <input
+            className="livetail-input"
+            placeholder="env"
+            value={filters.env}
+            onChange={(e) => updateFilter('env', e.target.value)}
+          />
+          <select
+            className="livetail-input"
+            value={filters.level}
+            onChange={(e) => updateFilter('level', e.target.value)}
+          >
+            <option value="">level</option>
+            <option value="error">error</option>
+            <option value="warn">warn</option>
+            <option value="info">info</option>
+            <option value="debug">debug</option>
+          </select>
+          <input
+            className="livetail-input livetail-keywords"
+            placeholder="keywords"
+            value={filters.keywords}
+            onChange={(e) => updateFilter('keywords', e.target.value)}
+          />
+        </div>
+        <div className="livetail-controls">
+          <span className={`livetail-status ${connected ? 'connected' : 'disconnected'}`}>
+            {connected ? 'connected' : 'disconnected'}
+          </span>
+          <span className="livetail-rate">{rate} evt/s</span>
+          <button className={`livetail-btn ${paused ? 'paused' : ''}`} onClick={() => setPaused((p) => !p)}>
+            {paused ? 'Resume' : 'Pause'}
+          </button>
+          <button className="livetail-btn" onClick={handleClear}>
+            Clear
+          </button>
+        </div>
+      </div>
+      <div className="livetail-stream" ref={streamRef} onScroll={handleScroll}>
+        {events.length === 0 ? (
+          <div className="livetail-empty">
+            {connected ? 'Waiting for events…' : 'Connecting…'}
+          </div>
+        ) : (
+          events.map((ev) => (
+            <div
+              key={ev.event_id}
+              className={`livetail-event level-${(ev.level || 'info').toLowerCase()}`}
+              onClick={() => onSelectEvent(ev)}
+            >
+              <span className="livetail-ts">{formatTimeCompact(ev.ts)}</span>
+              <span className={`livetail-level ${(ev.level || 'info').toLowerCase()}`}>{ev.level || 'info'}</span>
+              <span className="livetail-svc">{ev.service}</span>
+              <span className="livetail-msg">{ev.message}</span>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
 }
 
 function App() {
@@ -1542,6 +1745,7 @@ function App() {
           <button className={view === 'alerts' ? 'active' : ''} onClick={() => setView('alerts')}>Alerts</button>
           <button className={view === 'saved' ? 'active' : ''} onClick={() => setView('saved')}>Saved Searches</button>
           <button className={view === 'scheduled' ? 'active' : ''} onClick={() => setView('scheduled')}>Scheduled</button>
+          <button className={view === 'livetail' ? 'active' : ''} onClick={() => setView('livetail')}>Live Tail</button>
           {canOpenAdmin && (
             <button className={view === 'admin' ? 'active' : ''} onClick={() => setView('admin')}>Admin</button>
           )}
@@ -1555,6 +1759,7 @@ function App() {
       </nav>
 
       <main className="main">
+        {view === 'livetail' && <LiveTailView apiBase={API_BASE} apiToken={apiToken || null} onSelectEvent={setSelectedEvent} />}
         {view === 'search' && (
           <div className="search-view">
             <div className="search-bar sticky">

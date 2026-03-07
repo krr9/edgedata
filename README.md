@@ -5,10 +5,10 @@ Edge-native log search and SIEM-lite on Cloudflare Workers, R2, WAE, D1, and Pag
 ## Components
 
 - `workers/ingest-worker`: pluggable ingest framework that accepts batched log events (EdgeData JSON, OTLP/HTTP JSON logs, NDJSON), authenticates (Bearer or HMAC), normalizes payloads, writes raw NDJSON to R2, then asynchronously writes WAE metrics and token index shards.
-- `workers/query-worker`: search API, search summary API (facets/timeline/top terms/field coverage), dashboard query API, and saved search CRUD over D1.
+- `workers/query-worker`: search API, search summary API (facets/timeline/top terms/field coverage), dashboard query API, saved search CRUD over D1, and live tail WebSocket streaming via TailHub Durable Object.
 - `workers/alert-worker`: cron evaluator for D1 alert definitions with state/cooldown tracking and Slack/webhook notifications.
 - `workers/synthetic-worker`: cron-based synthetic data producer that posts small demo batches to ingest for always-on searchable data.
-- `pages`: React UI for log explorer, dashboards, alerts management, and saved searches, including event inspector syntax highlighting and field-count side panels.
+- `pages`: React UI for log explorer, dashboards, alerts management, saved searches, and live tail real-time log streaming, including event inspector syntax highlighting and field-count side panels.
 
 ## Data Layout
 
@@ -239,6 +239,8 @@ Query worker:
 - `POST /alerts/starter-pack/apply`
 - `PUT /alerts/:id`
 - `DELETE /alerts/:id`
+- `GET /tail` (WebSocket upgrade; real-time log streaming with per-session filters)
+- `GET /tail/stats` (active tail session count and ring buffer size)
 
 Search APIs are now PPL-first:
 

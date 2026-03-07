@@ -1,3 +1,4 @@
+export { TailHub } from './tail-hub.js';
 import {
   enforceTimeGuardrails,
   getDateRange,
@@ -55,6 +56,7 @@ export interface Env {
   QUERY_RATE_LIMIT_PER_MIN?: string;
   AUTH_LOGIN_RATE_LIMIT_PER_MIN?: string;
   OPS_WAE?: AnalyticsEngineDataset;
+  TAIL_HUB: DurableObjectNamespace;
 }
 
 type SearchMode = 'structured' | 'token' | 'phrase';
@@ -4034,6 +4036,71 @@ export default {
 
     if (url.pathname === '/health') {
       return jsonResponse({ status: 'ok', service: 'query-worker', version: '1.3.0' }, 200, requestCorsHeaders);
+    }
+
+    if (url.pathname === '/tail' && request.headers.get('Upgrade') === 'websocket') {
+      try {
+        const tokenParam = url.searchParams.get('token');
+        const authRequest = tokenParam
+          ? new Request(request.url, {
+              headers: new Headers([
+                ...Array.from(request.headers.entries()),
+                ['Authorization', `Bearer ${tokenParam}`]
+              ])
+            })
+          : request;
+        await ensureRbacInitialized(env);
+        const auth = await authenticateRequest(authRequest, env);
+        assertPermission(auth, 'search.read');
+
+        const id = env.TAIL_HUB.idFromName('global');
+        const stub = env.TAIL_HUB.get(id);
+        const doUrl = new URL(request.url);
+        doUrl.pathname = '/ws';
+        const doRequest = new Request(doUrl.toString(), {
+          headers: new Headers([
+            ['Upgrade', 'websocket'],
+            ['X-Tail-Scope', JSON.stringify(auth.scope)]
+          ])
+        });
+        return stub.fetch(doRequest);
+      } catch (error) {
+        return Response.json(
+          { error: error instanceof Error ? error.message : 'Auth failed' },
+          { status: 401 }
+        );
+      }
+    }
+
+    if (url.pathname === '/internal/tail-push' && request.method === 'POST') {
+      try {
+        const id = env.TAIL_HUB.idFromName('global');
+        const stub = env.TAIL_HUB.get(id);
+        const doRequest = new Request(new URL('/push', request.url).toString(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: request.body
+        });
+        return stub.fetch(doRequest);
+      } catch (error) {
+        return Response.json(
+          { error: error instanceof Error ? error.message : 'Push failed' },
+          { status: 500 }
+        );
+      }
+    }
+
+    if (url.pathname === '/tail/stats' && request.method === 'GET') {
+      try {
+        await ensureRbacInitialized(env);
+        const auth = await authenticateRequest(request, env);
+        assertPermission(auth, 'search.read');
+        const id = env.TAIL_HUB.idFromName('global');
+        const stub = env.TAIL_HUB.get(id);
+        return stub.fetch(new Request(new URL('/stats', request.url).toString()));
+      } catch (error) {
+        return errorResponse(error, requestCorsHeaders, 401);
+      }
     }
 
     await ensureRbacInitialized(env);

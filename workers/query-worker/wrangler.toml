@@ -39,3 +39,12 @@ SESSION_TTL_SECONDS = "43200"
 QUERY_RATE_LIMIT_PER_MIN = "600"
 AUTH_LOGIN_RATE_LIMIT_PER_MIN = "60"
 CORS_ORIGINS = "https://edgedata-1fo.pages.dev,https://*.edgedata-1fo.pages.dev"
+
+[durable_objects]
+bindings = [
+  { name = "TAIL_HUB", class_name = "TailHub" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["TailHub"]

@@ -19,3 +19,7 @@ dataset = "log_metrics"
 
 [vars]
 INGEST_RATE_LIMIT_PER_MIN = "2400"
+
+[[services]]
+binding = "QUERY_SERVICE"
+service = "query-worker"

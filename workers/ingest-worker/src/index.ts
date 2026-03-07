@@ -9,6 +9,7 @@ export interface Env {
   INGEST_HMAC_SECRET?: string;
   INGEST_RATE_LIMIT_PER_MIN?: string;
   REPROCESS_SECRET?: string;
+  QUERY_SERVICE?: Fetcher;
 }
 
 interface LogEvent {
@@ -476,17 +477,30 @@ async function writeTokens(events: NormalizedEvent[], env: Env): Promise<void> {
   }
 }
 
+async function pushToTailHub(events: NormalizedEvent[], env: Env): Promise<void> {
+  if (!env.QUERY_SERVICE) return;
+  await env.QUERY_SERVICE.fetch(
+    new Request('https://internal/internal/tail-push', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(events)
+    })
+  );
+}
+
 async function processBatch(events: NormalizedEvent[], env: Env, requestId: string): Promise<void> {
   const results = await Promise.allSettled([
     writeEventsR2(events, env),
     writeWAE(events, env),
-    writeTokens(events, env)
+    writeTokens(events, env),
+    pushToTailHub(events, env)
   ]);
 
+  const targets = ['events', 'WAE', 'tokens', 'tail_push'];
   for (let i = 0; i < results.length; i++) {
     const result = results[i];
     if (result.status === 'rejected') {
-      const target = i === 0 ? 'events' : (i === 1 ? 'WAE' : 'tokens');
+      const target = targets[i];
       console.error(`[${requestId}] ${target} write failed`, result.reason);
       await writeOpsMetric(env, `${target.toLowerCase()}_write_failures`, 1).catch(() => undefined);
       if (target === 'events' || target === 'tokens') {

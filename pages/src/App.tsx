@@ -548,6 +548,119 @@ function LiveTailView({
   );
 }
 
+function DashPanelContent({ vizType, data }: { vizType: string; data: DashboardRow[] }) {
+  if (vizType === 'counter' || vizType === 'stat') {
+    return <DashCounter data={data} />;
+  }
+  if (vizType === 'bar') {
+    return <DashBarChart data={data} />;
+  }
+  if (vizType === 'pie') {
+    return <DashBarChart data={data} />;
+  }
+  if (vizType === 'timechart') {
+    return <DashSparkBars data={data} />;
+  }
+  return <DashTable data={data} />;
+}
+
+function DashCounter({ data }: { data: DashboardRow[] }) {
+  const first = data[0];
+  const keys = Object.keys(first);
+  const numKey = keys.find(k => typeof first[k] === 'number');
+  const value = numKey ? Number(first[numKey]) : 0;
+  const label = numKey || keys[0] || '';
+  return (
+    <div className="dash-counter">
+      <div className="dash-counter-value">{value.toLocaleString()}</div>
+      <div className="dash-counter-label">{label.replace(/_/g, ' ')}</div>
+    </div>
+  );
+}
+
+function DashBarChart({ data }: { data: DashboardRow[] }) {
+  const keys = Object.keys(data[0]);
+  const labelKey = keys.find(k => typeof data[0][k] === 'string') || keys[0];
+  const valueKey = keys.find(k => typeof data[0][k] === 'number' && k !== labelKey) || keys[1];
+  if (!labelKey || !valueKey) return <DashTable data={data} />;
+
+  const rows = data.slice(0, 10);
+  const maxVal = Math.max(...rows.map(r => Math.abs(Number(r[valueKey]) || 0)), 1);
+  const barHeight = 26;
+
+  return (
+    <div className="dash-bars">
+      {rows.map((row, i) => {
+        const label = String(row[labelKey] ?? '');
+        const rawVal = Number(row[valueKey]) || 0;
+        const pct = Math.abs(rawVal) / maxVal * 100;
+        const displayVal = rawVal % 1 === 0 ? rawVal.toLocaleString() : rawVal.toFixed(2);
+        return (
+          <div key={i} className="dash-bar-row">
+            <span className="dash-bar-label" title={label}>{label}</span>
+            <div className="dash-bar-track">
+              <div className="dash-bar-fill" style={{ width: `${pct}%` }} />
+            </div>
+            <span className="dash-bar-value">{displayVal}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DashSparkBars({ data }: { data: DashboardRow[] }) {
+  const keys = Object.keys(data[0]);
+  const numKeys = keys.filter(k => typeof data[0][k] === 'number');
+  if (numKeys.length === 0) return <DashTable data={data} />;
+
+  const valueKey = numKeys[numKeys.length - 1];
+  const values = data.map(r => Number(r[valueKey]) || 0);
+  const maxVal = Math.max(...values, 1);
+  const total = values.reduce((a, b) => a + b, 0);
+
+  return (
+    <div className="dash-spark">
+      <div className="dash-spark-total">{total.toLocaleString()} <span className="dash-spark-label">{valueKey.replace(/_/g, ' ')}</span></div>
+      <div className="dash-spark-bars">
+        {values.map((v, i) => (
+          <div key={i} className="dash-spark-col" style={{ height: `${(v / maxVal) * 100}%` }} title={`${v}`} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DashTable({ data }: { data: DashboardRow[] }) {
+  const cols = Object.keys(data[0]);
+  return (
+    <div className="dash-table-wrap">
+      <table className="dash-table">
+        <thead>
+          <tr>
+            {cols.map(col => <th key={col}>{col.replace(/_/g, ' ')}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {data.slice(0, 50).map((row, i) => (
+            <tr key={i}>
+              {cols.map(col => (
+                <td key={col}>
+                  {typeof row[col] === 'number'
+                    ? (row[col] as number) % 1 === 0
+                      ? (row[col] as number).toLocaleString()
+                      : (row[col] as number).toFixed(2)
+                    : String(row[col] ?? '')}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function App() {
   const [view, setView] = useState<ViewMode>('search');
 
@@ -599,6 +712,7 @@ function App() {
   const [dashboardPanels, setDashboardPanels] = useState<Array<{ id: string; title: string; ppl: string; viz_type: string; time_window_minutes: number; position: number }>>([]);
   const [panelResults, setPanelResults] = useState<Record<string, DashboardRow[]>>({});
   const [panelLoading, setPanelLoading] = useState<Record<string, boolean>>({});
+  const [dashboardTimeMinutes, setDashboardTimeMinutes] = useState(60);
 
   const [savedLoading, setSavedLoading] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
@@ -1103,6 +1217,12 @@ function App() {
       setPanelLoading(prev => ({ ...prev, [panelId]: false }));
     }
   }, [apiFetch]);
+
+  const refreshAllPanels = useCallback(() => {
+    for (const panel of dashboardPanels) {
+      void executePanelQuery(panel.id, panel.ppl, dashboardTimeMinutes);
+    }
+  }, [dashboardPanels, executePanelQuery, dashboardTimeMinutes]);
 
   const loadSavedSearches = useCallback(async () => {
     setSavedLoading(true);
@@ -1638,13 +1758,15 @@ function App() {
 
   useEffect(() => {
     if (view === 'dashboard' && dashboardPanels.length > 0) {
-      for (const panel of dashboardPanels) {
-        if (!panelResults[panel.id] && !panelLoading[panel.id]) {
-          void executePanelQuery(panel.id, panel.ppl, panel.time_window_minutes);
-        }
-      }
+      refreshAllPanels();
     }
-  }, [view, dashboardPanels, panelResults, panelLoading, executePanelQuery]);
+  }, [view, dashboardPanels.length, refreshAllPanels]);
+
+  useEffect(() => {
+    if (view === 'dashboard' && dashboardPanels.length > 0) {
+      refreshAllPanels();
+    }
+  }, [dashboardTimeMinutes, view, dashboardPanels.length, refreshAllPanels]);
 
   useEffect(() => {
     if (!user || view !== 'search' || bootstrappedSearch) return;
@@ -2097,72 +2219,54 @@ function App() {
             {dashboardError && <div className="error-banner">{dashboardError}</div>}
             {dashboardLoading && <div className="empty-state"><p>Loading dashboards...</p></div>}
 
-            {!dashboardLoading && pplDashboards.length > 0 && (
-              <div style={{ marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {pplDashboards.map(d => (
-                  <button
-                    key={d.id}
-                    className={selectedDashboardId === d.id ? 'active' : 'secondary'}
-                    onClick={() => setSelectedDashboardId(d.id)}
-                  >
-                    {d.name}
-                  </button>
-                ))}
-              </div>
-            )}
+            {!dashboardLoading && (
+              <>
+                <div className="dashboard-toolbar">
+                  <div className="dashboard-tabs">
+                    {pplDashboards.map(d => (
+                      <button
+                        key={d.id}
+                        className={selectedDashboardId === d.id ? 'active' : 'secondary'}
+                        onClick={() => setSelectedDashboardId(d.id)}
+                      >
+                        {d.name}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="dashboard-time-controls">
+                    {[{label: '15m', mins: 15}, {label: '1h', mins: 60}, {label: '4h', mins: 240}, {label: '24h', mins: 1440}, {label: '7d', mins: 10080}].map(opt => (
+                      <button
+                        key={opt.mins}
+                        className={dashboardTimeMinutes === opt.mins ? 'active time-btn' : 'secondary time-btn'}
+                        onClick={() => setDashboardTimeMinutes(opt.mins)}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                    <button className="secondary time-btn" onClick={refreshAllPanels}>Refresh</button>
+                  </div>
+                </div>
 
-            {!dashboardLoading && dashboardPanels.length === 0 && pplDashboards.length === 0 && (
-              <div className="empty-state"><p>No dashboards configured yet.</p></div>
+                {dashboardPanels.length === 0 && pplDashboards.length === 0 && (
+                  <div className="empty-state"><p>No dashboards configured yet.</p></div>
+                )}
+              </>
             )}
 
             {dashboardPanels.length > 0 && (
               <div className="dashboard-grid">
                 {dashboardPanels.map(panel => (
-                  <div key={panel.id} className="card">
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                      <h3>{panel.title}</h3>
-                      <button className="secondary" style={{ fontSize: '0.7rem', padding: '2px 6px' }} onClick={() => void executePanelQuery(panel.id, panel.ppl, panel.time_window_minutes)}>
-                        Refresh
-                      </button>
+                  <div key={panel.id} className={`dash-card ${panel.viz_type === 'counter' ? 'dash-card-sm' : ''}`}>
+                    <div className="dash-card-header">
+                      <h3 className="dash-card-title">{panel.title}</h3>
+                      <button className="dash-refresh-btn" onClick={() => void executePanelQuery(panel.id, panel.ppl, dashboardTimeMinutes)}>↻</button>
                     </div>
-                    <div className="saved-query" style={{ fontSize: '0.75rem', marginBottom: 8, opacity: 0.6 }}>{panel.ppl}</div>
-                    {panelLoading[panel.id] && <p className="empty-card">Loading...</p>}
+                    {panelLoading[panel.id] && <div className="dash-card-loading">Loading...</div>}
                     {!panelLoading[panel.id] && (!panelResults[panel.id] || panelResults[panel.id].length === 0) && (
-                      <p className="empty-card">No data</p>
+                      <div className="dash-card-loading">No data</div>
                     )}
                     {!panelLoading[panel.id] && panelResults[panel.id] && panelResults[panel.id].length > 0 && (
-                      panel.viz_type === 'counter' ? (
-                        <div style={{ fontSize: '2rem', fontWeight: 700, textAlign: 'center', padding: 16 }}>
-                          {(() => {
-                            const first = panelResults[panel.id][0];
-                            const numKey = Object.keys(first).find(k => typeof first[k] === 'number');
-                            return numKey ? Number(first[numKey]).toLocaleString() : JSON.stringify(first);
-                          })()}
-                        </div>
-                      ) : (
-                        <div style={{ overflowX: 'auto' }}>
-                          <table style={{ width: '100%', fontSize: '0.8rem', borderCollapse: 'collapse' }}>
-                            <thead>
-                              <tr>
-                                {Object.keys(panelResults[panel.id][0]).map(col => (
-                                  <th key={col} style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>{col}</th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {panelResults[panel.id].slice(0, 50).map((row, i) => (
-                                <tr key={i}>
-                                  {Object.values(row).map((val, j) => (
-                                    <td key={j} style={{ padding: '3px 8px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                                      {typeof val === 'number' ? val.toLocaleString() : String(val ?? '')}
-                                    </td>
-                                  ))}
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      )
+                      <DashPanelContent vizType={panel.viz_type} data={panelResults[panel.id]} />
                     )}
                   </div>
                 ))}

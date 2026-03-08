@@ -1,8 +1,8 @@
 # EdgeData
 # Edge-Native Log Search & SIEM-lite (Cloudflare-Only)
 ## Full Product + Technical Specification (Operational-First, Deep-Search-Backed)
-**Version:** 1.1  
-**Date:** 2026-02-25  
+**Version:** 1.2  
+**Date:** 2026-03-08  
 **Deployment model:** Self-hosted in *customer* Cloudflare account (single-tenant per CF account)  
 **Primary objective:** Cloudflare-native operational product for SMB/mid companies that run on Cloudflare, with deep search as the core troubleshooting engine.
 
@@ -14,10 +14,10 @@ Execution roadmap: `docs/EXECUTION_PLAN_30_60_90.md`.
 ## Table of contents
 1. Product scope & principles  
 2. Architecture  
-3. Data model & schemas (Iceberg + WAE)  
+3. Data model & schemas (canonical schema + query-store options + WAE)  
 4. Search design (token index + query planner)  
 5. Ingestion design (agents + ingest Worker)  
-6. Storage design (R2 raw + Iceberg layout + maintenance)  
+6. Storage design (R2 raw + optional query-store integration)  
 7. Query layer (Query Worker)  
 8. UI (Pages)  
 9. Alerting (Alert Worker)  
@@ -85,6 +85,7 @@ Execution roadmap: `docs/EXECUTION_PLAN_30_60_90.md`.
 5. **Predictable spend and bounded blast radius**: guardrails on expensive paths (phrase scans, candidates, windows).  
 6. **Secure self-hosted by default**: tenant control, Access-first auth, clear secret boundaries.  
 7. **Fail-open ingestion where safe**: preserve raw source-of-truth and support reprocessing.
+8. **Differentiate on workflow, not storage internals**: invest in alert-to-investigation speed, runbook context, and operator outcomes over provider-level query backend implementation details.
 
 ## 1.5 Success metrics (product + business)
 **Adoption/activation**
@@ -121,7 +122,8 @@ Execution roadmap: `docs/EXECUTION_PLAN_30_60_90.md`.
 **Storage**
 - Workers Analytics Engine (WAE): hot aggregation + alert evaluation (recent window).
 - R2 Raw: immutable NDJSON partitioned by time/service (audit + reprocessing).
-- R2 Data Catalog + Iceberg tables: primary query store.
+- R2 index partitions (`events` + `tokens`) as the default deep-search backend in v1.
+- Optional provider-managed query-store integration (for example, Data Catalog/Iceberg + SQL) as a non-differentiating accelerator path.
 - D1: saved searches, alert definitions, alert state, user preferences.
 
 **UI**
@@ -134,20 +136,23 @@ Agent → (HTTP) → Ingest Worker
 Ingest Worker → (async)  
 - WAE write (metrics/aggregates)
 - R2 raw NDJSON write
-- Iceberg events write
-- Iceberg tokens write
+- R2 event index write
+- R2 token index write
 
-Cloudflare Logpush source → R2 raw landing prefix → Reprocess/normalization job → Iceberg events + tokens
+Optional integration path:
+- provider-managed query-store writes for acceleration/compliance use-cases
+
+Cloudflare Logpush source → R2 raw landing prefix → Reprocess/normalization job → `events` + `tokens` indexes
 
 ### Query flow
 UI → Query Worker →  
 - WAE SQL API (dashboards + fast aggregates)
-- R2 SQL (deep search over Iceberg tables)
+- Deep-search backend (default: R2 partitioned `events`/`tokens`; optional: provider-managed SQL path)
 
 ### Alert flow
 Cron → Alert Worker →  
 - WAE SQL (default)
-- R2 SQL (optional advanced alerts)
+- Optional deep-search backend for advanced alerts
 → Slack/Webhook
 
 ---
@@ -184,15 +189,15 @@ All incoming events are normalized into:
 
 ---
 
-## 3.2 Iceberg tables (R2 Data Catalog)
+## 3.2 Queryable store options for deep search
 
-### 3.2.1 `events` table (primary deep search)
-**Partitioning (v1 recommended)**
+### 3.2.1 `events` schema contract (primary deep search shape)
+**Partitioning / layout (v1 recommended)**
 - Partition by `date` and `service`
 - Add `env` to partition only if it’s high-volume and frequently filtered.
 - Avoid partitioning by `hour` unless daily volumes are huge (it creates many small partitions).
 
-**Columns (Iceberg)**
+**Columns (logical contract)**
 - `event_id` STRING
 - `ts` TIMESTAMP
 - `date` STRING
@@ -215,7 +220,7 @@ All incoming events are normalized into:
 **Why store full message?**
 Because this is a search product. Token index accelerates search; message column provides exact recall.
 
-### 3.2.2 `tokens` table (accelerator index)
+### 3.2.2 `tokens` schema contract (accelerator index)
 Purpose: fast keyword search without scanning full `message` in the `events` table.
 
 **Columns**
@@ -234,12 +239,12 @@ Purpose: fast keyword search without scanning full `message` in the `events` tab
 - Enforce token length (2–32 chars).
 - Drop purely numeric tokens except whitelisted (e.g., 500, 404, 503).
 
-### 3.2.3 Table creation & maintenance
-R2 SQL works over Iceberg tables registered in R2 Data Catalog. Ensure:
-- Compaction/maintenance is enabled (or scheduled) to avoid query degradation over time.
-- Partitioning aligns with your typical query filters.
+### 3.2.3 Backend implementation options
+- Default v1: partitioned object-backed indexes (`events` and `tokens`) queried via the query-worker planner.
+- Optional integration: provider-managed query-store (for example, Data Catalog/Iceberg + SQL) when it improves operations without becoming product-critical coupling.
 
-> Implementation detail: the precise mechanics of creating/maintaining Iceberg in Cloudflare evolve; treat this spec as the logical schema and rely on the chosen ingestion method (Pipelines or API-driven ingestion) to realize it.
+Implementation note:
+- Treat this section as a logical schema contract; backend engine choice is an implementation detail and should remain swappable.
 
 ---
 
@@ -278,22 +283,22 @@ Search supports:
 - pivots: click msg_hash/trace_id/request_id to filter
 
 ## 4.2 Query planner overview (Query Worker)
-Because R2 SQL lacks joins and may have limits on complex patterns, the query worker implements a planner:
+Because the deep-search backend may vary by deployment and capability, the query worker implements a planner with backend-agnostic guardrails:
 
 **If query has no keyword/phrase:**  
-→ single R2 SQL query on `events` with filters + time range + ORDER BY ts DESC + LIMIT.
+→ single backend query on `events` with filters + time range + ORDER BY ts DESC + LIMIT.
 
 **If query has keyword(s):**  
 → token-accelerated flow:
-1) R2 SQL query on `tokens` to fetch candidate `event_id`s (bounded)
-2) R2 SQL query on `events` with `event_id IN (...)` in chunks
+1) backend query on `tokens` to fetch candidate `event_id`s (bounded)
+2) backend query on `events` with `event_id IN (...)` in chunks
 3) Merge + sort by `ts` in worker
 4) Return page
 
 **If query has phrase/substring:**  
 → bounded scan:
 - Require tight time range and service/env filter
-- Query `events` with `message_lc LIKE '%phrase%'`
+- Query `events` with phrase/substring matching (`message_lc LIKE '%phrase%'` where supported)
 - Possibly add token pre-filter if phrase includes keywords
 
 ## 4.3 Query language (UI-level)
@@ -422,11 +427,11 @@ In `fetch()`:
 In `processBatch`:
 1) Write raw NDJSON to R2 (single object per batch)
 2) Write WAE datapoints (batched)
-3) Write Iceberg rows (`events` and `tokens`)
+3) Write index rows (`events` and `tokens`)
 
 **Ordering**
 - Prefer writing raw R2 first (source of truth)
-- If Iceberg write fails, you can reprocess from raw later
+- If index write fails, you can reprocess from raw later
 
 ## 5.7 Cloudflare-native source templates (must-have for target segment)
 Ship starter source templates for Cloudflare-first teams:
@@ -457,27 +462,27 @@ raw/date=YYYY-MM-DD/index=<index>/hour=HH/service=<service>/env=<env>/part-<ulid
 **Compression**
 - Optional gzip for cost reduction; if used, mark content-encoding and adjust reprocessing.
 
-## 6.2 Iceberg write pattern
-Two viable v1 implementations:
+## 6.2 Query-store implementation strategy
+Two supported approaches:
 
-### Path 1: Pipeline-managed ingestion (recommended for stability)
-- Ingest Worker writes normalized JSON to a pipeline ingestion endpoint/queue
-- Pipeline writes to Iceberg tables in R2 Data Catalog
-- Pros: compaction/maintenance integrated, fewer edge cases
-- Cons: more setup steps
+### Path 1: Default object-backed indexes (recommended for v1 differentiation)
+- Ingest Worker writes normalized rows to partitioned `events` and `tokens` objects.
+- Query-worker planner executes structured/token/phrase flows against these indexes with strict guardrails.
+- Pros: low coupling to provider-specific storage internals, clearer product ownership, fast iteration on operator workflows.
+- Cons: requires disciplined partition hygiene and planner optimization at higher volume tiers.
 
-### Path 2: Direct Iceberg writer (advanced)
-- Worker writes Parquet + updates Iceberg metadata
-- Pros: fewer external moving parts
-- Cons: complex; not recommended unless Cloudflare provides a managed writer API
+### Path 2: Optional provider-managed query-store integration
+- Use managed query-store capabilities when available (for example, Data Catalog/Iceberg + SQL).
+- Treat this as an acceleration/compliance option, not a required product dependency.
+- Pros: can simplify scale operations where provider capabilities are mature.
+- Cons: roadmap coupling and potential overlap with provider-native offerings.
 
-**Spec assumption:** Use Path 1 unless direct APIs exist that make Path 2 trivial.
+**Spec assumption:** ship and validate differentiation on Path 1 first; enable Path 2 only when it clearly improves outcomes without diluting product identity.
 
-## 6.3 Maintenance & compaction
-- Enable table maintenance (compaction) to avoid too many small files
-- Target file sizes:
-  - 64–256MB Parquet files per partition for efficient scans
-- If partitions become too granular, reduce partition keys (avoid hour partitioning early)
+## 6.3 Maintenance and partition health
+- Monitor partition/object health for `events` and `tokens` to avoid query degradation over time.
+- Keep partition strategy aligned with common filters (date/service/env) and avoid unnecessary granularity early.
+- If optional provider-managed query-store integration is enabled, inherit and monitor its maintenance mechanisms.
 
 ---
 
@@ -488,7 +493,7 @@ Two viable v1 implementations:
 - Enforce query guardrails
 - Parse user query language
 - Plan queries (token-first, bounded scan)
-- Execute R2 SQL and WAE SQL API calls
+- Execute deep-search plans against the active backend and WAE SQL API calls for aggregates
 - Merge, sort, paginate results
 - Return stable JSON to UI
 
@@ -530,12 +535,12 @@ CRUD for saved searches in D1.
   - phrase search: 6 hours (configurable)
 - Hard limit result rows per request: 200–500
 - Candidate cap for token search: 5,000 event_ids (configurable)
-- Chunk `IN (...)` lists (e.g., 250 ids per R2 SQL call)
+- Chunk `IN (...)` lists (e.g., 250 ids per backend call)
 
 ## 7.4 Query execution algorithms
 
 ### Structured-only
-Single SQL:
+Single backend query:
 - WHERE date in range AND ts between range
 - AND filters
 - ORDER BY ts DESC
@@ -544,7 +549,7 @@ Single SQL:
 ### Token search
 1) Build token set from `q`:
    - tokenize q using same tokenizer
-2) R2 SQL query `tokens`:
+2) backend query `tokens`:
    - WHERE date in range AND service/env filters AND token IN (...)
    - LIMIT candidate_cap
 3) Fetch events in chunks:
@@ -554,7 +559,7 @@ Single SQL:
 
 ### Phrase search
 - Require narrow window + service filter
-- SQL: `WHERE message_lc LIKE '%phrase%'`
+- backend phrase scan: `WHERE message_lc LIKE '%phrase%'` where supported
 - LIMIT N
 - If phrase includes tokens, optionally prefilter via token step then apply phrase filter in worker.
 
@@ -696,11 +701,11 @@ Default enabled/one-click templates:
   - do heavy work async
 - If downstream writes fail:
   - raw R2 is source-of-truth
-  - reprocessing job can rebuild Iceberg/tokens later
+  - reprocessing job can rebuild `events`/`tokens` indexes later
 
 ## 11.2 Partial failure behavior
-- If WAE write fails: still store raw + Iceberg; dashboards may lag.
-- If Iceberg write fails: store raw; mark ingestion status; reprocess.
+- If WAE write fails: still store raw + indexes; dashboards may lag.
+- If index write fails: store raw; mark ingestion status; reprocess.
 - If raw R2 fails: return 500 (since you lose source-of-truth).
 
 ## 11.3 Idempotency & duplicates
@@ -744,9 +749,9 @@ You will have three Workers and one Pages app.
 
 ### query-worker
 - D1 binding
-- R2 SQL access configuration
 - WAE SQL API token (if proxying WAE queries)
 - Access JWT validation config
+- Optional provider-managed query-store binding/config (only when integration path is enabled)
 
 ### alert-worker
 - D1 binding
@@ -757,10 +762,10 @@ You will have three Workers and one Pages app.
 ## 13.2 Optional Terraform
 Provide a module that:
 - creates R2 bucket
-- enables Data Catalog
 - sets up D1 database
 - provisions datasets/bindings
 - deploys Workers
+- optionally enables provider-managed query-store integration resources
 
 ---
 
@@ -839,7 +844,7 @@ Keep:
 
 ## Tests
 - Unit tests: tokenizer, query planner, auth
-- Integration: ingest → R2 raw + Iceberg rows + WAE metrics
+- Integration: ingest → R2 raw + `events`/`tokens` rows + WAE metrics
 - Load test: ingestion batching + query concurrency
 - Golden-path activation test: deploy -> ingest sample -> search -> alert fire -> deep-link investigation
 

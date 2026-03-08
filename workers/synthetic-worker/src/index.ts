@@ -26,7 +26,27 @@ export interface Env {
   SYNTHETIC_ENV?: string;
   SYNTHETIC_HOST_PREFIX?: string;
   SYNTHETIC_REGION?: string;
+  SYNTHETIC_EXTRA_TARGETS?: string;
   SYNTHETIC_RUN_SECRET?: string;
+}
+
+interface SyntheticTarget {
+  index: string;
+  service: string;
+  profile: string;
+  env: string;
+  host_prefix: string;
+  region: string;
+}
+
+interface TargetRunResult {
+  ok: boolean;
+  status: number;
+  batch_size: number;
+  profile: string;
+  index: string;
+  service: string;
+  ingest_response: string;
 }
 
 interface RunSummary {
@@ -37,6 +57,17 @@ interface RunSummary {
   ingest_response?: string;
   batch_size?: number;
   profile?: string;
+  target_count?: number;
+  total_batch_size?: number;
+  runs?: Array<{
+    ok: boolean;
+    status: number;
+    batch_size: number;
+    profile: string;
+    index: string;
+    service: string;
+    ingest_response: string;
+  }>;
 }
 
 interface RuntimeFlagRow {
@@ -52,6 +83,96 @@ function sanitizeResponsePreview(input: string): string {
   return input.length <= 300 ? input : `${input.slice(0, 300)}...`;
 }
 
+function normalizeTargetIndex(value: string | undefined, fallback = 'default'): string {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized || fallback;
+}
+
+function resolvePrimaryTarget(env: Env): SyntheticTarget {
+  return {
+    index: normalizeTargetIndex(env.SYNTHETIC_INDEX, 'default'),
+    service: String(env.SYNTHETIC_SERVICE || 'edgedata-demo').trim() || 'edgedata-demo',
+    profile: parseProfile(env.SYNTHETIC_PROFILE, 'basic'),
+    env: String(env.SYNTHETIC_ENV || 'demo').trim() || 'demo',
+    host_prefix: String(env.SYNTHETIC_HOST_PREFIX || 'edgedata-cron').trim() || 'edgedata-cron',
+    region: String(env.SYNTHETIC_REGION || 'global').trim() || 'global'
+  };
+}
+
+function parseExtraTargets(raw: string | undefined, defaults: SyntheticTarget): SyntheticTarget[] {
+  const text = String(raw || '').trim();
+  if (!text) return [];
+
+  const targets: SyntheticTarget[] = [];
+  for (const entry of text.split(';')) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const parts = trimmed.split(',').map((value) => value.trim());
+    const index = normalizeTargetIndex(parts[0], '');
+    if (!index) continue;
+    const service = parts[1] || defaults.service;
+    const profile = parseProfile(parts[2], defaults.profile);
+    const targetEnv = parts[3] || defaults.env;
+    targets.push({
+      index,
+      service,
+      profile,
+      env: targetEnv,
+      host_prefix: defaults.host_prefix,
+      region: defaults.region
+    });
+  }
+  return targets;
+}
+
+function resolveTargets(env: Env): SyntheticTarget[] {
+  const primary = resolvePrimaryTarget(env);
+  const extras = parseExtraTargets(env.SYNTHETIC_EXTRA_TARGETS, primary);
+  return [primary, ...extras];
+}
+
+async function runTargetIngest(env: Env, target: SyntheticTarget): Promise<TargetRunResult> {
+  const batchSize = parseBatchSize(env.SYNTHETIC_BATCH_SIZE, 24, 400);
+  const events = buildSyntheticEvents({
+    batch_size: batchSize,
+    batch_min: env.SYNTHETIC_BATCH_MIN,
+    batch_max: env.SYNTHETIC_BATCH_MAX,
+    profile: target.profile,
+    index: target.index,
+    service: target.service,
+    env: target.env,
+    host_prefix: target.host_prefix,
+    region: target.region
+  });
+
+  const request = new Request(env.INGEST_URL || 'https://ingest.internal/ingest', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${env.INGEST_SECRET}`,
+      'x-agent-id': 'synthetic-cron',
+      'x-service': target.service,
+      'x-index': target.index,
+      'x-env': target.env,
+      'x-host': target.host_prefix
+    },
+    body: JSON.stringify({ events })
+  });
+  const response = env.INGEST_SERVICE
+    ? await env.INGEST_SERVICE.fetch(request)
+    : await fetch(request);
+  const responseText = sanitizeResponsePreview(await response.text());
+  return {
+    ok: response.ok,
+    status: response.status,
+    batch_size: events.length,
+    profile: target.profile,
+    index: target.index,
+    service: target.service,
+    ingest_response: responseText
+  };
+}
+
 async function runSyntheticIngest(env: Env): Promise<RunSummary> {
   const enabled = await readSyntheticIngestEnabled(env.DB, isEnabled(env));
   if (!enabled) {
@@ -64,54 +185,36 @@ async function runSyntheticIngest(env: Env): Promise<RunSummary> {
     return { ok: false, reason: 'Missing INGEST_SERVICE or INGEST_URL' };
   }
 
-  const batchSize = parseBatchSize(env.SYNTHETIC_BATCH_SIZE, 24, 400);
-  const profile = parseProfile(env.SYNTHETIC_PROFILE, 'basic');
-  const events = buildSyntheticEvents({
-    batch_size: batchSize,
-    batch_min: env.SYNTHETIC_BATCH_MIN,
-    batch_max: env.SYNTHETIC_BATCH_MAX,
-    profile,
-    index: env.SYNTHETIC_INDEX,
-    service: env.SYNTHETIC_SERVICE,
-    env: env.SYNTHETIC_ENV,
-    host_prefix: env.SYNTHETIC_HOST_PREFIX,
-    region: env.SYNTHETIC_REGION
-  });
-
-  const request = new Request(env.INGEST_URL || 'https://ingest.internal/ingest', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${env.INGEST_SECRET}`,
-      'x-agent-id': 'synthetic-cron',
-      'x-service': String(env.SYNTHETIC_SERVICE || 'edgedata-demo'),
-      'x-index': String(env.SYNTHETIC_INDEX || 'default'),
-      'x-env': String(env.SYNTHETIC_ENV || 'demo'),
-      'x-host': String(env.SYNTHETIC_HOST_PREFIX || 'edgedata-cron')
-    },
-    body: JSON.stringify({ events })
-  });
-  const response = env.INGEST_SERVICE
-    ? await env.INGEST_SERVICE.fetch(request)
-    : await fetch(request);
-
-  const responseText = sanitizeResponsePreview(await response.text());
-  if (!response.ok) {
+  const targets = resolveTargets(env);
+  const runs: TargetRunResult[] = [];
+  for (const target of targets) {
+    const run = await runTargetIngest(env, target);
+    runs.push(run);
+  }
+  const failed = runs.find((run) => !run.ok);
+  const totalBatchSize = runs.reduce((sum, run) => sum + run.batch_size, 0);
+  if (failed) {
     return {
       ok: false,
-      status: response.status,
-      batch_size: events.length,
-      profile,
-      ingest_response: responseText
+      status: failed.status,
+      batch_size: failed.batch_size,
+      profile: failed.profile,
+      ingest_response: failed.ingest_response,
+      target_count: runs.length,
+      total_batch_size: totalBatchSize,
+      runs
     };
   }
-
+  const first = runs[0];
   return {
     ok: true,
-    status: response.status,
-    batch_size: events.length,
-    profile,
-    ingest_response: responseText
+    status: first?.status || 200,
+    batch_size: first?.batch_size || 0,
+    profile: first?.profile || parseProfile(env.SYNTHETIC_PROFILE, 'basic'),
+    ingest_response: first?.ingest_response || '',
+    target_count: runs.length,
+    total_batch_size: totalBatchSize,
+    runs
   };
 }
 
@@ -131,6 +234,7 @@ export default {
 
     if (url.pathname === '/health' && request.method === 'GET') {
       const runtimeEnabled = await readSyntheticIngestEnabled(env.DB, isEnabled(env));
+      const targets = resolveTargets(env);
       return Response.json({
         status: 'ok',
         service: 'synthetic-worker',
@@ -150,7 +254,14 @@ export default {
           service: env.SYNTHETIC_SERVICE
         }),
         synthetic_profile: parseProfile(env.SYNTHETIC_PROFILE, 'basic'),
-        synthetic_index: String(env.SYNTHETIC_INDEX || 'default')
+        synthetic_index: String(env.SYNTHETIC_INDEX || 'default'),
+        synthetic_target_count: targets.length,
+        synthetic_targets: targets.map((target) => ({
+          index: target.index,
+          service: target.service,
+          profile: target.profile,
+          env: target.env
+        }))
       });
     }
 

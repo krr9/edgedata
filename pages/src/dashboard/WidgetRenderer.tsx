@@ -33,8 +33,16 @@ function renderChart(widgetType: WidgetType, data: DashboardRow[], title: string
   const categories = rows.map((row) => String(row[categoryKey] ?? ''));
   const values = rows.map((row) => Number(row[valueKey]) || 0);
   const common = {
-    grid: { left: 10, right: 10, top: 28, bottom: 28, containLabel: true },
-    tooltip: { trigger: widgetType === 'pie' ? 'item' : 'axis' }
+    grid: { left: 10, right: 12, top: 20, bottom: 18, containLabel: true },
+    tooltip: {
+      trigger: widgetType === 'pie' ? 'item' : 'axis',
+      backgroundColor: '#ffffff',
+      borderColor: '#dbe4ef',
+      borderWidth: 1,
+      textStyle: { color: '#334861', fontSize: 12 },
+      extraCssText: 'box-shadow: 0 8px 20px rgba(12,38,72,0.08); border-radius: 8px;'
+    },
+    animationDuration: 240
   };
   const option =
     widgetType === 'pie'
@@ -52,14 +60,48 @@ function renderChart(widgetType: WidgetType, data: DashboardRow[], title: string
         }
       : {
           ...common,
-          xAxis: widgetType === 'timeseries' ? { type: 'category', data: categories } : { type: 'value' },
-          yAxis: widgetType === 'timeseries' ? { type: 'value' } : { type: 'category', data: categories },
+          xAxis: widgetType === 'timeseries'
+            ? {
+                type: 'category',
+                data: categories,
+                axisLine: { lineStyle: { color: '#dbe5f2' } },
+                axisTick: { show: false },
+                axisLabel: { color: '#6b7d93', fontSize: 11 }
+              }
+            : {
+                type: 'value',
+                axisLine: { show: false },
+                axisTick: { show: false },
+                axisLabel: { color: '#6b7d93', fontSize: 11 },
+                splitLine: { lineStyle: { color: '#edf2f8' } }
+              },
+          yAxis: widgetType === 'timeseries'
+            ? {
+                type: 'value',
+                axisLine: { show: false },
+                axisTick: { show: false },
+                axisLabel: { color: '#6b7d93', fontSize: 11 },
+                splitLine: { lineStyle: { color: '#edf2f8' } }
+              }
+            : {
+                type: 'category',
+                data: categories,
+                axisLine: { show: false },
+                axisTick: { show: false },
+                axisLabel: { color: '#5f738a', fontSize: 11 }
+              },
           series: [
             {
               type: widgetType === 'timeseries' ? 'line' : 'bar',
               data: values,
               smooth: widgetType === 'timeseries',
-              showSymbol: widgetType !== 'timeseries' ? false : true
+              showSymbol: widgetType === 'timeseries',
+              itemStyle: widgetType === 'timeseries'
+                ? { color: '#5b8ff9' }
+                : { color: '#5b8ff9', borderRadius: [0, 6, 6, 0] },
+              lineStyle: widgetType === 'timeseries' ? { color: '#5b8ff9', width: 2 } : undefined,
+              areaStyle: widgetType === 'timeseries' ? { color: 'rgba(91,143,249,0.12)' } : undefined,
+              barMaxWidth: widgetType === 'timeseries' ? undefined : 14
             }
           ]
         };

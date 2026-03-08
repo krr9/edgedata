@@ -14,7 +14,7 @@ Target evidence by Day 90:
 - 3-5 design partners live on non-demo data.
 - >= 2 partners using starter alerts in production.
 - >= 1 public or private case-study-quality result with measurable MTTR improvement.
-- Iceberg + R2 SQL query path running as primary path for at least one design partner tier.
+- Clear proof that users prefer EdgeData workflows over native provider-only tooling for incident triage.
 
 ## 2) Strategic Thesis
 
@@ -34,14 +34,13 @@ Strengths already shipped:
 
 Critical gaps from current checklist:
 - Access audience/group pinning still incomplete (`ACCESS_AUD`, `ACCESS_*_GROUPS` discipline).
-- Iceberg/R2 Data Catalog not yet primary query store.
-- No compaction/maintenance pipeline for predictable query performance.
+- Alert-to-investigation loop and runbook governance still under-instrumented for proof-grade outcomes.
 - Product activation path not yet codified as a single guided flow.
 
 ## 4) Priority Order (Non-Negotiable)
 
 1. Reliability/security baseline (auth config correctness, access mapping hardening).  
-2. Query architecture parity (Iceberg + R2 SQL + maintenance).  
+2. Workflow differentiation (alert-to-investigation speed, runbook context, explainability, operator-first UX).  
 3. Activation productization (starter alert pack + onboarding templates + golden path).  
 4. Design partner outcomes and distribution proof.
 
@@ -86,11 +85,9 @@ Critical gaps from current checklist:
 ## 6) Day 31-60: Architecture and Proof of Performance
 
 ### Engineering deliverables
-- Implement Iceberg + R2 SQL query path as production-ready option.
-- Add dual-path execution toggle in query-worker:
-  - primary: R2 SQL over Iceberg
-  - fallback: existing object-scan path for safety.
-- Implement compaction/maintenance job with SLO-backed cadence.
+- Harden query-worker backend abstraction so deep search backend remains swappable without API/UI changes.
+- Improve planner and partition/index hygiene for predictable query latency on default object-backed indexes.
+- Add optional provider-managed query-store integration hook behind a non-default feature toggle.
 - Build performance benchmark suite and publish internal scorecard:
   - p50/p95 query latency by mode
   - scanned partitions/objects
@@ -109,14 +106,14 @@ Critical gaps from current checklist:
   - time to root-cause.
 
 ### Exit criteria for Day 60
-- Iceberg/R2 SQL path handles core searches for at least 2 design partners.
-- Compaction running on schedule with no severe regressions.
+- Default deep-search backend meets latency/cost envelope for at least 2 design partners.
+- Alert-to-investigation loop demonstrates measurable triage acceleration in partner drills.
 - Documented evidence of improved triage speed in at least 2 partner incidents/drills.
 
 ## 7) Day 61-90: Conversion, Packaging, and Repeatability
 
 ### Engineering deliverables
-- Make Iceberg/R2 SQL primary path by default (with monitored fallback).
+- Keep backend path swappable while defaulting to the operator-validated path.
 - Finalize operational SLOs:
   - ingest acceptance
   - query latency by mode
@@ -157,7 +154,7 @@ Operational value:
 Technical:
 - query p50/p95 by mode (structured/token/phrase)
 - candidate cap hit rate and guardrail rejection rate
-- compaction freshness and partition health
+- partition/index health and planner efficiency
 
 Business:
 - active design partners
@@ -170,7 +167,7 @@ Risk: Cloudflare native tooling overlaps core value proposition.
 Mitigation: focus messaging/product on cross-signal workflows, alert state, runbooks, and operational outcomes.
 
 Risk: Performance/cost fails at higher data volumes.  
-Mitigation: prioritize Iceberg/R2 SQL + compaction before broader sales push; publish benchmark envelope.
+Mitigation: prioritize planner efficiency, partition hygiene, and benchmark envelope before broader sales push; enable provider-managed query-store integration only when evidence shows clear benefit.
 
 Risk: Teams perceive setup as "yet another observability project."  
 Mitigation: enforce 60-minute activation goal with templates and guided setup; no blank-slate default.
@@ -185,7 +182,7 @@ Go at Day 45 only if:
 - Activation flow consistently <= 60 minutes in internal runs.
 
 Go at Day 75 only if:
-- Iceberg/R2 SQL path is stable for pilot workloads.
+- Core deep-search path is stable for pilot workloads with predictable latency/cost.
 - At least one partner can show measurable incident response improvement.
 
 If these gates fail, narrow scope:

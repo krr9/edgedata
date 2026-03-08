@@ -63,6 +63,19 @@ function writeViewToLocation(view: ViewMode, options?: { replace?: boolean }): v
   }
 }
 
+function formatDateTimeLocalValue(date: Date): string {
+  const pad2 = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+}
+
+function toUtcIsoFromLocalDateTime(value: string): string {
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) {
+    throw new Error(`Invalid local datetime: ${value}`);
+  }
+  return parsed.toISOString();
+}
+
 interface LogEvent {
   event_id: string;
   ts: string;
@@ -791,19 +804,19 @@ function App() {
     return readViewFromLocation(window.location) || 'search';
   });
 
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState('search * | where status=500 | head 200');
   const [queryFocused, setQueryFocused] = useState(false);
   const [querySuggestions, setQuerySuggestions] = useState<QuerySuggestionItem[]>([]);
   const [querySuggestionsOpen, setQuerySuggestionsOpen] = useState(false);
   const [querySuggestionsLoading, setQuerySuggestionsLoading] = useState(false);
   const [querySuggestionIndex, setQuerySuggestionIndex] = useState(-1);
   const [timeFrom, setTimeFrom] = useState(() => {
-    const d = new Date();
-    d.setHours(d.getHours() - 24);
-    return d.toISOString().slice(0, 16);
+    const now = new Date();
+    const from = new Date(now.getTime() - (15 * 60 * 1000));
+    return formatDateTimeLocalValue(from);
   });
-  const [timeTo, setTimeTo] = useState(() => new Date().toISOString().slice(0, 16));
-  const [activeTimePreset, setActiveTimePreset] = useState<string | null>('Last 24h');
+  const [timeTo, setTimeTo] = useState(() => formatDateTimeLocalValue(new Date()));
+  const [activeTimePreset, setActiveTimePreset] = useState<string | null>('Last 15m');
 
   const [indexName, setIndexName] = useState('');
   const [service, setService] = useState('');
@@ -819,8 +832,8 @@ function App() {
     const now = new Date();
     const to = new Date(now.getTime() - (toOffsetMinutes * 60 * 1000));
     const from = new Date(now.getTime() - (fromOffsetMinutes * 60 * 1000));
-    setTimeFrom(from.toISOString().slice(0, 16));
-    setTimeTo(to.toISOString().slice(0, 16));
+    setTimeFrom(formatDateTimeLocalValue(from));
+    setTimeTo(formatDateTimeLocalValue(to));
     setActiveTimePreset(label);
   }, []);
 
@@ -896,7 +909,6 @@ function App() {
 
   const [activeIndex, setActiveIndex] = useState(-1);
   const [selectedEvent, setSelectedEvent] = useState<LogEvent | null>(null);
-  const [bootstrappedSearch, setBootstrappedSearch] = useState(false);
   const [investigationPivots, setInvestigationPivots] = useState<InvestigationPivots>(() => {
     if (typeof window === 'undefined') return {};
     return parseInvestigationParams(window.location.search);
@@ -1230,8 +1242,8 @@ function App() {
   }): SearchRequestPayload => {
     return {
       time: {
-        from: new Date(timeFrom).toISOString(),
-        to: new Date(timeTo).toISOString()
+        from: toUtcIsoFromLocalDateTime(timeFrom),
+        to: toUtcIsoFromLocalDateTime(timeTo)
       },
       ppl: buildPpl({
         queryOverride: options?.queryOverride,
@@ -2223,12 +2235,6 @@ function App() {
       refreshAllPanels();
     }
   }, [dashboardTimeMinutes, view, dashboardPanels.length, refreshAllPanels]);
-
-  useEffect(() => {
-    if (!user || view !== 'search' || bootstrappedSearch) return;
-    setBootstrappedSearch(true);
-    void runSearch({ append: false, cursor: null });
-  }, [bootstrappedSearch, runSearch, user, view]);
 
   useEffect(() => {
     return () => {

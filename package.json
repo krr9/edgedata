@@ -7,7 +7,7 @@
     "deploy:query": "cd workers/query-worker && wrangler deploy",
     "deploy:alert": "cd workers/alert-worker && wrangler deploy",
     "deploy:synthetic": "cd workers/synthetic-worker && wrangler deploy",
-    "deploy:pages": "cd pages && npm run build && wrangler pages deploy dist --project-name edgedata-1fo",
+    "deploy:pages": "cd pages && npm run build && wrangler pages deploy",
     "deploy:all": "npm run deploy:ingest && npm run deploy:query && npm run deploy:alert && npm run deploy:synthetic",
     "dev:ingest": "cd workers/ingest-worker && wrangler dev",
     "dev:query": "cd workers/query-worker && wrangler dev",

@@ -24,9 +24,10 @@ test('parseBatchSize clamps and falls back safely', () => {
   assert.equal(parseBatchSize('bad', 24, 120), 24);
 });
 
-test('parseProfile accepts basic, realistic, and otel aliases', () => {
+test('parseProfile accepts basic, realistic, mixed and otel aliases', () => {
   assert.equal(parseProfile('basic', 'realistic'), 'basic');
   assert.equal(parseProfile('REALISTIC', 'basic'), 'realistic');
+  assert.equal(parseProfile('mixed', 'basic'), 'mixed');
   assert.equal(parseProfile('otel', 'basic'), 'otel-demo');
   assert.equal(parseProfile('OTEL-DEMO', 'basic'), 'otel-demo');
   assert.equal(parseProfile('unknown', 'basic'), 'basic');
@@ -172,4 +173,29 @@ test('buildSyntheticEvents uses non-uniform timestamp distribution', () => {
   const uniqueCounts = new Set(values);
   assert.equal(countsByMinute.size >= 3, true);
   assert.equal(uniqueCounts.size >= 2, true);
+});
+
+test('mixed profile rotates runtime profile families over time', () => {
+  const observed = new Set();
+  const base = Date.UTC(2026, 2, 8, 0, 0, 0);
+  for (let i = 0; i < 24; i++) {
+    const events = buildSyntheticEvents({
+      now_ms: base + (i * 5 * 60 * 1000),
+      batch_size: 6,
+      batch_min: 6,
+      batch_max: 6,
+      profile: 'mixed',
+      index: 'otel-demo',
+      service: 'frontend',
+      env: 'demo',
+      host_prefix: 'otel-node',
+      region: 'us'
+    });
+    observed.add(events[0].attrs.synthetic_profile);
+    assert.equal(events[0].attrs.synthetic_profile_requested, 'mixed');
+  }
+
+  assert.equal(observed.has('otel-demo'), true);
+  assert.equal(observed.has('realistic'), true);
+  assert.equal(observed.has('basic'), true);
 });

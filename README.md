@@ -2,10 +2,18 @@
 
 Edge-native log search and SIEM-lite on Cloudflare Workers, R2, WAE, D1, and Pages.
 
+## Product Positioning
+
+EdgeData is a Cloudflare-operations control layer, not a replacement for Cloudflare-native analytics.
+
+- Differentiate on operator workflows: alert -> context -> investigation -> runbook.
+- Optimize for MTTR reduction, explainable investigations, and repeatable incident response.
+- Keep storage/query backend choices implementation-level and swappable.
+
 ## Components
 
 - `workers/ingest-worker`: pluggable ingest framework that accepts batched log events (EdgeData JSON, OTLP/HTTP JSON logs, NDJSON), authenticates (Bearer or HMAC), normalizes payloads, writes raw NDJSON to R2, then asynchronously writes WAE metrics and token index shards.
-- `workers/query-worker`: search API, search summary API (facets/timeline/top terms/field coverage), dashboard query API, saved search CRUD over D1, and live tail WebSocket streaming via TailHub Durable Object.
+- `workers/query-worker`: search API, search summary API (facets/timeline/top terms/field coverage), dashboard query API, saved search CRUD over D1, and live tail WebSocket streaming via TailHub Durable Object. Query planning is backend-agnostic: default deep search uses partitioned `events`/`tokens` indexes, with optional provider-managed query-store integration.
 - `workers/alert-worker`: cron evaluator for D1 alert definitions with state/cooldown tracking and Slack/webhook notifications.
 - `workers/synthetic-worker`: cron-based synthetic data producer that posts small demo batches to ingest for always-on searchable data.
 - `pages`: React UI for log explorer, dashboards, incident workspace investigations, alerts management, saved searches, and live tail real-time log streaming, including event inspector syntax highlighting and field-count side panels.
@@ -25,6 +33,8 @@ Event index (primary search path):
 - `events/date=YYYY-MM-DD/index=<index>/service=<service>/env=<env>/part-<id>.jsonl`
 
 `index` is a first-class ingest dimension (defaults to `default`). Agents can set event-level `index` or `X-Index` header on ingest requests.
+
+Default deep-search backend is object-backed partition indexes (`events` + `tokens`). Provider-managed query-store integration can be enabled later as an optional accelerator path without changing API contracts.
 
 ## Local Commands
 
@@ -181,15 +191,16 @@ Synthetic worker:
 - `INGEST_SERVICE` service binding to `ingest-worker` (preferred)
 - `INGEST_URL` (defaults to deployed ingest-worker URL)
 - `SYNTHETIC_ENABLED` (`"true"`/`"false"`, default `"true"`)
-- `SYNTHETIC_BATCH_SIZE` (base batch size, default `48`)
+- `SYNTHETIC_BATCH_SIZE` (base batch size, runtime fallback `24`; deployed default `24`)
 - `SYNTHETIC_BATCH_MIN` (optional lower bound for per-run variability, default derived from base)
 - `SYNTHETIC_BATCH_MAX` (optional upper bound for per-run variability, default derived from base)
-- `SYNTHETIC_PROFILE` (`basic`, `realistic`, or `otel-demo`/`otel`; default `otel-demo`)
+- `SYNTHETIC_PROFILE` (`basic`, `realistic`, `mixed`, or `otel-demo`/`otel`; deployed default `otel-demo`)
 - `SYNTHETIC_INDEX` (default `otel-demo`)
 - `SYNTHETIC_SERVICE` (default `frontend`)
 - `SYNTHETIC_ENV` (default `demo`)
 - `SYNTHETIC_HOST_PREFIX` (default `otel-demo-node`)
 - `SYNTHETIC_REGION` (default `us`)
+- `SYNTHETIC_EXTRA_TARGETS` (optional semicolon-delimited targets as `index,service,profile[,env]`)
 - Wrangler secret `INGEST_SECRET` (must match ingest-worker auth secret)
 - Wrangler secret `SYNTHETIC_RUN_SECRET` (optional; protects manual `/run`)
 

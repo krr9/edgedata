@@ -63,7 +63,7 @@ const INFO_MESSAGES = [
   'checkpoint persisted'
 ];
 
-const PROFILES = new Set(['basic', 'realistic', 'otel', 'otel-demo']);
+const PROFILES = new Set(['basic', 'realistic', 'otel', 'otel-demo', 'mixed']);
 
 export function parseBoolean(value, fallback = false) {
   const normalized = String(value || '').trim().toLowerCase();
@@ -81,6 +81,14 @@ export function parseBatchSize(value, fallback = 24, max = 120) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.max(1, Math.min(Math.trunc(parsed), max));
+}
+
+function resolveRuntimeProfile(configuredProfile, nowMs, index = '', service = '') {
+  const profile = parseProfile(configuredProfile, 'basic');
+  if (profile !== 'mixed') return profile;
+  const bucket = Math.floor(Number(nowMs || Date.now()) / (5 * 60 * 1000));
+  const seed = hashText(`${bucket}:${String(index)}:${String(service)}:mixed`);
+  return ['otel-demo', 'realistic', 'basic'][seed % 3];
 }
 
 function hashText(input) {
@@ -106,7 +114,13 @@ function hexId(seed, length) {
 
 export function computeSyntheticBatchSize(options = {}) {
   const nowMs = Number(options.now_ms || Date.now());
-  const profile = parseProfile(options.profile, 'basic');
+  const configuredProfile = parseProfile(options.profile, 'basic');
+  const profile = resolveRuntimeProfile(
+    configuredProfile,
+    nowMs,
+    String(options.index || ''),
+    String(options.service || '')
+  );
   const base = parseBatchSize(options.batch_size, 24, 400);
   const hasExplicitRange = options.batch_min !== undefined || options.batch_max !== undefined;
   if (!hasExplicitRange) return base;
@@ -280,7 +294,13 @@ function timestampShapeForProfile(profile, incidentWave) {
 
 export function buildSyntheticEvents(options = {}) {
   const nowMs = Number(options.now_ms || Date.now());
-  const profile = parseProfile(options.profile, 'basic');
+  const configuredProfile = parseProfile(options.profile, 'basic');
+  const profile = resolveRuntimeProfile(
+    configuredProfile,
+    nowMs,
+    String(options.index || ''),
+    String(options.service || '')
+  );
   const service = String(options.service || 'edgedata-demo').trim() || 'edgedata-demo';
   const index = String(options.index || 'default').trim().toLowerCase() || 'default';
   const batchSize = computeSyntheticBatchSize({
@@ -357,6 +377,7 @@ export function buildSyntheticEvents(options = {}) {
         synthetic: true,
         source: 'synthetic-worker',
         synthetic_profile: profile,
+        synthetic_profile_requested: configuredProfile,
         incident_wave: incidentWave,
         route,
         region,

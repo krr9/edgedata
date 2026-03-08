@@ -10,6 +10,7 @@ import {
   tokenize
 } from './query-core.mjs';
 import { parsePplPipeline } from './ppl-core.mjs';
+import { getPplSuggestions } from './ppl-suggestions.mjs';
 import {
   isIncrementalStreamPipeline,
   resolvePipelineLimit,
@@ -128,6 +129,15 @@ interface PplSearchRequest {
   ppl: string;
   limit?: number;
   cursor?: { before_ts: string; before_event_id: string } | null;
+}
+
+interface PplSuggestionsRequest {
+  query?: string;
+  cursorPos?: number;
+  maxItems?: number;
+  context?: {
+    topTerms?: string[];
+  };
 }
 
 interface SearchEvent {
@@ -4676,6 +4686,35 @@ export default {
         await writeOpsMetric(env, 'r2sql_calls_total', summary.scanned_objects).catch(() => undefined);
         await writeOpsMetric(env, 'query_latency_ms', Date.now() - startedAt).catch(() => undefined);
         return jsonResponse(summary, 200, requestCorsHeaders);
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders, 400);
+      }
+    }
+
+    if (url.pathname === '/search/suggestions' && request.method === 'POST') {
+      await writeOpsMetric(env, 'search_suggestions_requests_total', 1).catch(() => undefined);
+      try {
+        assertPermission(auth, 'search.read');
+        const req = await request.json().catch(() => ({})) as PplSuggestionsRequest;
+        const response = getPplSuggestions({
+          query: String(req.query || ''),
+          cursorPos: typeof req.cursorPos === 'number' ? req.cursorPos : undefined,
+          maxItems: typeof req.maxItems === 'number' ? req.maxItems : undefined,
+          context: {
+            topTerms: Array.isArray(req.context?.topTerms)
+              ? req.context.topTerms.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 50)
+              : []
+          }
+        });
+        await writeOpsMetric(env, 'query_latency_ms', Date.now() - startedAt).catch(() => undefined);
+        return jsonResponse({
+          suggestions: response.suggestions,
+          meta: {
+            context_stage: response.contextStage,
+            latency_ms: Date.now() - startedAt
+          }
+        }, 200, requestCorsHeaders);
       } catch (error) {
         await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
         return errorResponse(error, requestCorsHeaders, 400);

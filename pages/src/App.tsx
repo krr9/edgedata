@@ -22,6 +22,15 @@ type ViewMode = 'search' | 'dashboard' | 'saved' | 'scheduled' | 'alerts' | 'adm
 type SearchMode = 'structured' | 'token' | 'phrase';
 const TAB_QUERY_PARAM = 'tab';
 const VIEW_MODES = new Set<ViewMode>(['search', 'dashboard', 'saved', 'scheduled', 'alerts', 'admin', 'livetail', 'workspace']);
+const TIME_RANGE_PRESETS: Array<{ label: string; fromOffsetMinutes: number; toOffsetMinutes: number }> = [
+  { label: 'Last 15m', fromOffsetMinutes: 15, toOffsetMinutes: 0 },
+  { label: 'Last 1h', fromOffsetMinutes: 60, toOffsetMinutes: 0 },
+  { label: 'Last 6h', fromOffsetMinutes: 6 * 60, toOffsetMinutes: 0 },
+  { label: 'Last 24h', fromOffsetMinutes: 24 * 60, toOffsetMinutes: 0 },
+  { label: 'Previous 24h', fromOffsetMinutes: 48 * 60, toOffsetMinutes: 24 * 60 },
+  { label: 'Last 7d', fromOffsetMinutes: 7 * 24 * 60, toOffsetMinutes: 0 },
+  { label: 'Last 30d', fromOffsetMinutes: 30 * 24 * 60, toOffsetMinutes: 0 }
+];
 
 function parseViewMode(raw: string | null): ViewMode | null {
   if (!raw) return null;
@@ -261,8 +270,58 @@ interface SearchStreamChunk {
   error?: string;
 }
 
+interface QuerySuggestionItem {
+  label: string;
+  kind: 'command' | 'template' | 'field' | 'term';
+  detail?: string;
+  example?: string;
+  next_query: string;
+  score?: number;
+}
+
+interface QuerySuggestionResponse {
+  suggestions?: QuerySuggestionItem[];
+  meta?: {
+    context_stage?: string;
+    latency_ms?: number;
+  };
+}
+
 const API_BASE = (import.meta as { env?: Record<string, string> }).env?.VITE_QUERY_API_BASE || 'https://query-worker.example.workers.dev';
 const STREAM_FLUSH_INTERVAL_MS = 250;
+const QUERY_SUGGESTION_DEBOUNCE_MS = 120;
+const QUERY_SUGGESTION_CACHE_TTL_MS = 30_000;
+
+const LOCAL_FALLBACK_SNIPPETS = [
+  { label: 'search', kind: 'command', detail: 'Search logs by free text', insert: 'search ' },
+  { label: 'where', kind: 'command', detail: 'Filter fields and values', insert: 'where service=' },
+  { label: 'stats', kind: 'template', detail: 'Count by service', insert: 'stats count() by service' },
+  { label: 'timechart', kind: 'template', detail: 'Trend by 5-minute buckets', insert: 'timechart span=5m count()' },
+  { label: 'sort', kind: 'command', detail: 'Sort newest first', insert: 'sort -ts' },
+  { label: 'head', kind: 'command', detail: 'Limit returned rows', insert: 'head 100' }
+] as const;
+
+function buildInlineSuggestionQuery(currentQuery: string, replacement: string): string {
+  const segmentStart = currentQuery.lastIndexOf('|') + 1;
+  const prefix = currentQuery.slice(0, segmentStart);
+  if (!prefix) return replacement;
+  if (prefix.endsWith('|')) return `${prefix} ${replacement}`;
+  return `${prefix}${replacement}`;
+}
+
+function buildLocalFallbackSuggestions(query: string): QuerySuggestionItem[] {
+  const segment = query.slice(query.lastIndexOf('|') + 1).trim().toLowerCase();
+  return LOCAL_FALLBACK_SNIPPETS
+    .filter((item) => !segment || item.label.startsWith(segment))
+    .map((item, index) => ({
+      label: item.label,
+      kind: item.kind,
+      detail: item.detail,
+      next_query: buildInlineSuggestionQuery(query, item.insert),
+      score: 30 - index
+    }))
+    .slice(0, 6);
+}
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -371,6 +430,14 @@ function modeLabel(mode: SearchMode | null): string {
 
 function formatDateTime(value: string): string {
   return new Date(value).toLocaleString();
+}
+
+function formatTimelineTick(value: string): string {
+  const date = new Date(value);
+  return date.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit'
+  });
 }
 
 function compareEventsDesc(left: LogEvent, right: LogEvent): number {
@@ -725,19 +792,92 @@ function App() {
   });
 
   const [query, setQuery] = useState('');
+  const [queryFocused, setQueryFocused] = useState(false);
+  const [querySuggestions, setQuerySuggestions] = useState<QuerySuggestionItem[]>([]);
+  const [querySuggestionsOpen, setQuerySuggestionsOpen] = useState(false);
+  const [querySuggestionsLoading, setQuerySuggestionsLoading] = useState(false);
+  const [querySuggestionIndex, setQuerySuggestionIndex] = useState(-1);
   const [timeFrom, setTimeFrom] = useState(() => {
     const d = new Date();
     d.setHours(d.getHours() - 24);
     return d.toISOString().slice(0, 16);
   });
   const [timeTo, setTimeTo] = useState(() => new Date().toISOString().slice(0, 16));
+  const [activeTimePreset, setActiveTimePreset] = useState<string | null>('Last 24h');
 
-  const [indexName, setIndexName] = useState('default');
+  const [indexName, setIndexName] = useState('');
   const [service, setService] = useState('');
   const [environment, setEnvironment] = useState('');
   const [host, setHost] = useState('');
   const [level, setLevel] = useState('');
   const [statusCode, setStatusCode] = useState('');
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+  const [showSearchActions, setShowSearchActions] = useState(false);
+  const [showSaveSearchInline, setShowSaveSearchInline] = useState(false);
+
+  const applyTimePreset = useCallback((fromOffsetMinutes: number, toOffsetMinutes: number, label: string) => {
+    const now = new Date();
+    const to = new Date(now.getTime() - (toOffsetMinutes * 60 * 1000));
+    const from = new Date(now.getTime() - (fromOffsetMinutes * 60 * 1000));
+    setTimeFrom(from.toISOString().slice(0, 16));
+    setTimeTo(to.toISOString().slice(0, 16));
+    setActiveTimePreset(label);
+  }, []);
+
+  const hasActiveAdvancedFilters = useMemo(() => {
+    return [
+      indexName.trim(),
+      service.trim(),
+      environment.trim(),
+      host.trim(),
+      level.trim(),
+      statusCode.trim()
+    ].some((value) => value.length > 0);
+  }, [indexName, service, environment, host, level, statusCode]);
+
+  const activeAdvancedFilterCount = useMemo(() => {
+    return [
+      indexName.trim(),
+      service.trim(),
+      environment.trim(),
+      host.trim(),
+      level.trim(),
+      statusCode.trim()
+    ].filter((value) => value.length > 0).length;
+  }, [indexName, service, environment, host, level, statusCode]);
+
+  useEffect(() => {
+    if (hasActiveAdvancedFilters) {
+      setShowAdvancedFilters(true);
+    }
+  }, [hasActiveAdvancedFilters]);
+
+  useEffect(() => {
+    if (!showSearchActions) return;
+
+    const handlePointerDown = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (!searchActionsRef.current?.contains(target)) {
+        setShowSearchActions(false);
+      }
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowSearchActions(false);
+      }
+    };
+
+    window.addEventListener('mousedown', handlePointerDown);
+    window.addEventListener('touchstart', handlePointerDown, { passive: true });
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', handlePointerDown);
+      window.removeEventListener('touchstart', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showSearchActions]);
 
   const [resultType, setResultType] = useState<'events' | 'table'>('events');
   const [results, setResults] = useState<LogEvent[]>([]);
@@ -830,6 +970,11 @@ function App() {
   const [newMappingRoleId, setNewMappingRoleId] = useState('viewer');
   const streamAbortRef = useRef<AbortController | null>(null);
   const summaryAbortRef = useRef<AbortController | null>(null);
+  const querySuggestionsAbortRef = useRef<AbortController | null>(null);
+  const querySuggestionsCacheRef = useRef<Map<string, { at: number; items: QuerySuggestionItem[] }>>(new Map());
+  const searchActionsRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const queryTypeaheadRef = useRef<HTMLDivElement | null>(null);
 
   const sessionIdFromUrl = useMemo(() => {
     if (typeof window === 'undefined') return null;
@@ -898,6 +1043,24 @@ function App() {
 
   const timeline = summary?.timeline || localTimeline;
   const timelineMax = useMemo(() => Math.max(1, ...timeline.map((item) => item.count)), [timeline]);
+  const timelineStepMs = useMemo(() => {
+    if (timeline.length < 2) return 60_000;
+    const first = new Date(timeline[0].minute).getTime();
+    const second = new Date(timeline[1].minute).getTime();
+    const delta = Math.abs(second - first);
+    return Number.isFinite(delta) && delta > 0 ? delta : 60_000;
+  }, [timeline]);
+  const timelineAxisMarks = useMemo(() => {
+    if (timeline.length === 0) return [];
+    const last = timeline.length - 1;
+    const middle = Math.floor(last / 2);
+    const marks = Array.from(new Set([0, middle, last]));
+    return marks.map((index) => ({
+      key: `${timeline[index].minute}-${index}`,
+      label: formatTimelineTick(timeline[index].minute),
+      align: index === 0 ? 'left' : index === last ? 'right' : 'center'
+    }));
+  }, [timeline]);
 
   const apiFetch = useCallback((path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers || {});
@@ -909,6 +1072,109 @@ function App() {
     }
     return fetch(`${API_BASE}${path}`, { ...init, headers });
   }, [apiToken]);
+
+  const closeQuerySuggestions = useCallback(() => {
+    setQuerySuggestionsOpen(false);
+    setQuerySuggestionIndex(-1);
+  }, []);
+
+  const applyQuerySuggestion = useCallback((item: QuerySuggestionItem) => {
+    setQuery(item.next_query);
+    setQuerySuggestionsOpen(false);
+    setQuerySuggestionIndex(-1);
+    if (searchInputRef.current) {
+      const nextPos = item.next_query.length;
+      searchInputRef.current.focus();
+      searchInputRef.current.setSelectionRange(nextPos, nextPos);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!queryFocused || view !== 'search') {
+      closeQuerySuggestions();
+      return;
+    }
+
+    const topContextTerms = topTerms.map((item) => item.value).filter(Boolean).slice(0, 8);
+    const cacheKey = JSON.stringify({ query, terms: topContextTerms });
+    const cached = querySuggestionsCacheRef.current.get(cacheKey);
+    if (cached && Date.now() - cached.at < QUERY_SUGGESTION_CACHE_TTL_MS) {
+      setQuerySuggestions(cached.items);
+      setQuerySuggestionsOpen(cached.items.length > 0);
+      setQuerySuggestionIndex(cached.items.length > 0 ? 0 : -1);
+      return;
+    }
+
+    const timeout = globalThis.setTimeout(async () => {
+      if (querySuggestionsAbortRef.current) {
+        querySuggestionsAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      querySuggestionsAbortRef.current = controller;
+      setQuerySuggestionsLoading(true);
+      try {
+        const response = await apiFetch('/search/suggestions', {
+          method: 'POST',
+          signal: controller.signal,
+          body: JSON.stringify({
+            query,
+            cursorPos: query.length,
+            maxItems: 8,
+            context: { topTerms: topContextTerms }
+          })
+        });
+        const body = await response.json() as QuerySuggestionResponse;
+        if (!response.ok || !Array.isArray(body.suggestions)) {
+          throw new Error('suggestions unavailable');
+        }
+        const nextItems = body.suggestions.slice(0, 8);
+        querySuggestionsCacheRef.current.set(cacheKey, { at: Date.now(), items: nextItems });
+        setQuerySuggestions(nextItems);
+        setQuerySuggestionsOpen(nextItems.length > 0);
+        setQuerySuggestionIndex(nextItems.length > 0 ? 0 : -1);
+      } catch {
+        if (!controller.signal.aborted) {
+          const fallback = buildLocalFallbackSuggestions(query);
+          setQuerySuggestions(fallback);
+          setQuerySuggestionsOpen(fallback.length > 0);
+          setQuerySuggestionIndex(fallback.length > 0 ? 0 : -1);
+        }
+      } finally {
+        if (querySuggestionsAbortRef.current === controller) {
+          querySuggestionsAbortRef.current = null;
+        }
+        setQuerySuggestionsLoading(false);
+      }
+    }, QUERY_SUGGESTION_DEBOUNCE_MS);
+
+    return () => {
+      globalThis.clearTimeout(timeout);
+    };
+  }, [apiFetch, closeQuerySuggestions, query, queryFocused, topTerms, view]);
+
+  useEffect(() => {
+    if (!querySuggestionsOpen) return;
+    const onPointerDown = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (!queryTypeaheadRef.current?.contains(target)) {
+        closeQuerySuggestions();
+      }
+    };
+    window.addEventListener('mousedown', onPointerDown);
+    window.addEventListener('touchstart', onPointerDown, { passive: true });
+    return () => {
+      window.removeEventListener('mousedown', onPointerDown);
+      window.removeEventListener('touchstart', onPointerDown);
+    };
+  }, [closeQuerySuggestions, querySuggestionsOpen]);
+
+  useEffect(() => {
+    if (view !== 'search') {
+      closeQuerySuggestions();
+      setQueryFocused(false);
+    }
+  }, [closeQuerySuggestions, view]);
 
   const buildPpl = useCallback((overrides?: {
     queryOverride?: string;
@@ -1974,6 +2240,10 @@ function App() {
         summaryAbortRef.current.abort();
         summaryAbortRef.current = null;
       }
+      if (querySuggestionsAbortRef.current) {
+        querySuggestionsAbortRef.current.abort();
+        querySuggestionsAbortRef.current = null;
+      }
     };
   }, []);
 
@@ -2082,65 +2352,177 @@ function App() {
         {view === 'search' && (
           <div className="search-view">
             <div className="search-bar sticky">
-              <div className="search-filters">
+              <div className="search-filters search-filters-primary">
                 <div className="filter-group">
                   <label>Time Range</label>
                   <div className="time-inputs">
-                    <input type="datetime-local" value={timeFrom} onChange={(event) => setTimeFrom(event.target.value)} />
+                    <input
+                      type="datetime-local"
+                      value={timeFrom}
+                      onChange={(event) => {
+                        setTimeFrom(event.target.value);
+                        setActiveTimePreset(null);
+                      }}
+                    />
                     <span>to</span>
-                    <input type="datetime-local" value={timeTo} onChange={(event) => setTimeTo(event.target.value)} />
+                    <input
+                      type="datetime-local"
+                      value={timeTo}
+                      onChange={(event) => {
+                        setTimeTo(event.target.value);
+                        setActiveTimePreset(null);
+                      }}
+                    />
+                  </div>
+                  <div className="time-presets">
+                    {TIME_RANGE_PRESETS.map((preset) => (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        className={activeTimePreset === preset.label ? 'active' : ''}
+                        onClick={() => applyTimePreset(preset.fromOffsetMinutes, preset.toOffsetMinutes, preset.label)}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
                   </div>
                 </div>
-
-                <div className="filter-group">
-                  <label>Index</label>
-                  <input type="text" value={indexName} onChange={(event) => setIndexName(event.target.value)} placeholder="default" />
-                </div>
-
-                <div className="filter-group">
-                  <label>Service</label>
-                  <input type="text" value={service} onChange={(event) => setService(event.target.value)} placeholder="payments" />
-                </div>
-
-                <div className="filter-group">
-                  <label>Env</label>
-                  <input type="text" value={environment} onChange={(event) => setEnvironment(event.target.value)} placeholder="prod" />
-                </div>
-
-                <div className="filter-group">
-                  <label>Host</label>
-                  <input type="text" value={host} onChange={(event) => setHost(event.target.value)} placeholder="api-01" />
-                </div>
-
-                <div className="filter-group">
-                  <label>Level</label>
-                  <input type="text" value={level} onChange={(event) => setLevel(event.target.value)} placeholder="error" />
-                </div>
-
-                <div className="filter-group">
-                  <label>Status</label>
-                  <input type="number" value={statusCode} onChange={(event) => setStatusCode(event.target.value)} placeholder="500" />
+                <div className="search-top-actions">
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => setShowAdvancedFilters((value) => !value)}
+                  >
+                    {showAdvancedFilters ? 'Hide Filters' : `Advanced Filters${activeAdvancedFilterCount > 0 ? ` (${activeAdvancedFilterCount})` : ''}`}
+                  </button>
                 </div>
               </div>
 
+              {showAdvancedFilters && (
+                <div className="search-filters search-filters-advanced">
+                  <div className="filter-group">
+                    <label>Index</label>
+                    <input type="text" value={indexName} onChange={(event) => setIndexName(event.target.value)} placeholder="all indexes" />
+                  </div>
+
+                  <div className="filter-group">
+                    <label>Service</label>
+                    <input type="text" value={service} onChange={(event) => setService(event.target.value)} placeholder="paymentservice" />
+                  </div>
+
+                  <div className="filter-group">
+                    <label>Env</label>
+                    <input type="text" value={environment} onChange={(event) => setEnvironment(event.target.value)} placeholder="demo" />
+                  </div>
+
+                  <div className="filter-group">
+                    <label>Host</label>
+                    <input type="text" value={host} onChange={(event) => setHost(event.target.value)} placeholder="otel-demo-node-1" />
+                  </div>
+
+                  <div className="filter-group">
+                    <label>Level</label>
+                    <input type="text" value={level} onChange={(event) => setLevel(event.target.value)} placeholder="error" />
+                  </div>
+
+                  <div className="filter-group">
+                    <label>Status</label>
+                    <input type="number" value={statusCode} onChange={(event) => setStatusCode(event.target.value)} placeholder="500" />
+                  </div>
+                </div>
+              )}
+
               <div className="search-input">
-                <input
-                  type="text"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder='search timeout postgres | where index="default" and service="payments" and status>=500 | sort -ts | head 200'
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') {
-                      setCursor(null);
-                      setActiveIndex(-1);
-                      void runSearch({ append: false, cursor: null });
-                    }
-                  }}
-                />
+                <div className="query-input-wrapper" ref={queryTypeaheadRef}>
+                  <input
+                    ref={searchInputRef}
+                    type="text"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    onFocus={() => {
+                      setQueryFocused(true);
+                      setQuerySuggestionsOpen(querySuggestions.length > 0);
+                    }}
+                    onBlur={() => {
+                      setQueryFocused(false);
+                    }}
+                    placeholder='search timeout postgres | where index="otel-demo" and service="paymentservice" and status>=500 | sort -ts | head 200'
+                    onKeyDown={(event) => {
+                      if ((event.ctrlKey || event.metaKey) && event.key === ' ') {
+                        event.preventDefault();
+                        setQuerySuggestionsOpen(querySuggestions.length > 0);
+                        setQuerySuggestionIndex(querySuggestions.length > 0 ? 0 : -1);
+                        return;
+                      }
+
+                      if (querySuggestionsOpen && querySuggestions.length > 0) {
+                        if (event.key === 'ArrowDown') {
+                          event.preventDefault();
+                          setQuerySuggestionIndex((index) => (index + 1) % querySuggestions.length);
+                          return;
+                        }
+                        if (event.key === 'ArrowUp') {
+                          event.preventDefault();
+                          setQuerySuggestionIndex((index) => (index <= 0 ? querySuggestions.length - 1 : index - 1));
+                          return;
+                        }
+                        if (event.key === 'Escape') {
+                          event.preventDefault();
+                          closeQuerySuggestions();
+                          return;
+                        }
+                        if (event.key === 'Enter' || event.key === 'Tab') {
+                          if (querySuggestionIndex >= 0 && querySuggestionIndex < querySuggestions.length) {
+                            event.preventDefault();
+                            applyQuerySuggestion(querySuggestions[querySuggestionIndex]);
+                            return;
+                          }
+                        }
+                      }
+
+                      if (event.key === 'Enter') {
+                        setCursor(null);
+                        setActiveIndex(-1);
+                        closeQuerySuggestions();
+                        void runSearch({ append: false, cursor: null });
+                      }
+                    }}
+                  />
+                  {querySuggestionsOpen && (
+                    <div className="query-typeahead-dropdown" role="listbox" aria-label="Search suggestions">
+                      {querySuggestionsLoading && (
+                        <div className="query-typeahead-status">Loading suggestions...</div>
+                      )}
+                      {!querySuggestionsLoading && querySuggestions.length === 0 && (
+                        <div className="query-typeahead-status">No suggestions yet.</div>
+                      )}
+                      {querySuggestions.map((item, index) => (
+                        <button
+                          key={`${item.kind}-${item.label}-${index}`}
+                          type="button"
+                          className={`query-typeahead-item ${index === querySuggestionIndex ? 'active' : ''}`}
+                          onMouseDown={(event) => {
+                            event.preventDefault();
+                            applyQuerySuggestion(item);
+                          }}
+                          onMouseEnter={() => setQuerySuggestionIndex(index)}
+                        >
+                          <span className="query-typeahead-row">
+                            <strong>{item.label}</strong>
+                            <span className="query-typeahead-kind">{item.kind}</span>
+                          </span>
+                          {item.detail && <span className="query-typeahead-detail">{item.detail}</span>}
+                          {item.example && <span className="query-typeahead-example">{item.example}</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <button
                   onClick={() => {
                     setCursor(null);
                     setActiveIndex(-1);
+                    closeQuerySuggestions();
                     void runSearch({ append: false, cursor: null });
                   }}
                   disabled={loading}
@@ -2155,18 +2537,86 @@ function App() {
                   />
                   Stream
                 </label>
+                <div className="search-actions-anchor" ref={searchActionsRef}>
+                  <button
+                    type="button"
+                    className="secondary"
+                    aria-label="More search actions"
+                    onClick={() => setShowSearchActions((value) => !value)}
+                  >
+                    ...
+                  </button>
+                  {showSearchActions && (
+                    <div className="search-actions-menu">
+                      <button
+                        className="secondary search-action-item"
+                        type="button"
+                        onClick={() => {
+                          setShowSaveSearchInline(true);
+                          setShowSearchActions(false);
+                        }}
+                      >
+                        <span className="action-icon" aria-hidden="true">S</span>
+                        Save current search
+                      </button>
+                      {query.trim() && (
+                        <button
+                          className="secondary search-action-item"
+                          type="button"
+                          onClick={() => {
+                            scheduleCurrentSearch();
+                            setShowSearchActions(false);
+                          }}
+                        >
+                          <span className="action-icon" aria-hidden="true">T</span>
+                          Schedule current search
+                        </button>
+                      )}
+                      {hasActiveAdvancedFilters && (
+                        <button
+                          className="secondary search-action-item"
+                          type="button"
+                          onClick={() => {
+                            setIndexName('');
+                            setService('');
+                            setEnvironment('');
+                            setHost('');
+                            setLevel('');
+                            setStatusCode('');
+                            setShowAdvancedFilters(false);
+                            setShowSearchActions(false);
+                          }}
+                        >
+                          <span className="action-icon" aria-hidden="true">C</span>
+                          Clear advanced filters
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
 
-              <div className="save-search-row">
-                <input
-                  type="text"
-                  value={saveName}
-                  onChange={(event) => setSaveName(event.target.value)}
-                  placeholder="Saved search name"
-                />
-                <button className="secondary" onClick={() => void saveCurrentSearch()}>Save Search</button>
-                {query.trim() && <button className="secondary" onClick={scheduleCurrentSearch}>Schedule</button>}
-              </div>
+              {showSaveSearchInline && (
+                <div className="save-search-row">
+                  <input
+                    type="text"
+                    value={saveName}
+                    onChange={(event) => setSaveName(event.target.value)}
+                    placeholder="Saved search name"
+                  />
+                  <button className="secondary" type="button" onClick={() => void saveCurrentSearch()}>Save Search</button>
+                  <button
+                    className="secondary"
+                    type="button"
+                    onClick={() => {
+                      setShowSaveSearchInline(false);
+                      setSaveName('');
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
 
               {hasPivots(investigationPivots) && (
                 <PivotChips pivots={investigationPivots} onPivotClick={handlePivotClick} />
@@ -2204,11 +2654,11 @@ function App() {
                 <h4>Activity Timeline</h4>
                 <span>
                   {streaming
-                    ? `Streaming ${results.length.toLocaleString()} events...`
+                    ? 'Streaming...'
                     : summary
-                      ? `${summary.sampled_events.toLocaleString()} sampled events${summary.truncated ? ' (capped)' : ''}`
+                      ? (summary.truncated ? 'Sampled timeline' : 'Timeline')
                       : results.length > 0
-                        ? `${results.length.toLocaleString()} events`
+                        ? 'Timeline'
                         : summaryLoading
                           ? 'Updating summary...'
                           : 'Run a search to load summary'}
@@ -2219,12 +2669,23 @@ function App() {
                   <p className="facet-empty">No timeline data yet.</p>
                 ) : (
                   timeline.map((point) => (
-                    <div key={point.minute} className="timeline-col" title={`${point.minute} - ${point.count}`}>
+                    <div
+                      key={point.minute}
+                      className="timeline-col"
+                      title={`${formatDateTime(point.minute)} to ${formatDateTime(new Date(new Date(point.minute).getTime() + timelineStepMs).toISOString())} - ${point.count} events`}
+                    >
                       <div className="timeline-bar" style={{ height: `${Math.max(8, (point.count / timelineMax) * 58)}px` }} />
                     </div>
                   ))
                 )}
               </div>
+              {timelineAxisMarks.length > 0 && (
+                <div className="timeline-axis">
+                  {timelineAxisMarks.map((mark) => (
+                    <span key={mark.key} className={`timeline-axis-label ${mark.align}`}>{mark.label}</span>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="explorer-layout">

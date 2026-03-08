@@ -25,6 +25,17 @@ import {
   buildStarterAlertPackDefinitions,
   extractStarterIdFromParamsJson
 } from './starter-alert-pack.mjs';
+import {
+  validateBootstrapRequest,
+  buildBootstrapPayload,
+  validateRelatedEventsRequest,
+  normalizePivots,
+  rankRelatedEvents,
+  buildSessionRecord,
+  validateSessionSaveRequest,
+  canAccessInvestigationSession
+} from './investigation-core.mjs';
+import { statusFromError } from './error-utils.mjs';
 import { seedStarterDashboards } from './starter-dashboards.mjs';
 import { validateQueryAccessJwtConfig } from '../../shared/access-config.mjs';
 
@@ -61,6 +72,7 @@ export interface Env {
   SYNTHETIC_RUN_SECRET?: string;
   TAIL_HUB: DurableObjectNamespace;
   DASHBOARD_CACHE: DurableObjectNamespace;
+  DEMO_SCENARIOS_ENABLED?: string;
 }
 
 type SearchMode = 'structured' | 'token' | 'phrase';
@@ -4505,23 +4517,6 @@ async function handleAuth(
   return textResponse('Method not allowed', 405, requestCorsHeaders);
 }
 
-function statusFromError(error: unknown, fallback = 500): number {
-  if (error instanceof Error) {
-    const message = error.message.toLowerCase();
-    if (message.includes('misconfigured')) return 500;
-    if (message.includes('rate limit')) return 429;
-    if (message.includes('forbidden') || message.includes('access denied') || message.includes('not invited')) return 403;
-    if (
-      message.includes('unauthorized') ||
-      message.includes('missing access jwt') ||
-      message.includes('invalid access jwt') ||
-      message.includes('expired')
-    ) return 401;
-    if (message.includes('invalid') || message.includes('required') || message.includes('limited')) return 400;
-  }
-  return fallback;
-}
-
 function errorResponse(
   error: unknown,
   requestCorsHeaders: Record<string, string>,
@@ -4710,6 +4705,182 @@ export default {
       } catch (error) {
         await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
         return errorResponse(error, requestCorsHeaders, 500);
+      }
+    }
+
+    if (url.pathname === '/investigations/demo-scenarios' && request.method === 'GET') {
+      try {
+        assertPermission(auth, 'search.read');
+        const demoEnabled = env.DEMO_SCENARIOS_ENABLED === 'true';
+        if (!demoEnabled) {
+          return jsonResponse({ demo_mode: false, scenarios: [] }, 200, requestCorsHeaders);
+        }
+        const to = new Date();
+        const from = new Date(to.getTime() - 6 * 60 * 60 * 1000);
+        const timeRange = { from: from.toISOString(), to: to.toISOString() };
+        const scenarios = [
+          {
+            id: 'synthetic-errors',
+            label: 'Synthetic errors (edgedata-demo)',
+            scope: { index: 'default', service: 'edgedata-demo', env: 'demo' },
+            time: timeRange,
+            pivot_chips: [],
+            starter_queries: [
+              { id: 'errors', title: 'Errors', ppl: 'search * | where level="error" | where index="default" and service="edgedata-demo" and env="demo" | head 50' },
+              { id: 'volume', title: 'Volume', ppl: 'search * | where index="default" and service="edgedata-demo" and env="demo" | timechart span=5m count() | head 100' }
+            ]
+          },
+          {
+            id: 'zeek-conn',
+            label: 'Zeek connection anomalies',
+            scope: { index: 'default', service: 'zeek-conn', env: 'demo' },
+            time: timeRange,
+            pivot_chips: [],
+            starter_queries: [
+              { id: 'conn', title: 'Conn anomalies', ppl: 'search s0 rej rst | where index="default" and service="zeek-conn" and env="demo" | head 50' },
+              { id: 'volume', title: 'Volume', ppl: 'search * | where index="default" and service="zeek-conn" and env="demo" | timechart span=5m count() | head 100' }
+            ]
+          },
+          {
+            id: 'zeek-http',
+            label: 'Zeek HTTP failures',
+            scope: { index: 'default', service: 'zeek-http', env: 'demo' },
+            time: timeRange,
+            pivot_chips: [],
+            starter_queries: [
+              { id: 'http-errors', title: 'HTTP errors', ppl: 'search * | where index="default" and service="zeek-http" and env="demo" and status>=400 | head 50' },
+              { id: 'volume', title: 'Volume', ppl: 'search * | where index="default" and service="zeek-http" and env="demo" | timechart span=5m count() | head 100' }
+            ]
+          }
+        ];
+        return jsonResponse({ demo_mode: true, scenarios }, 200, requestCorsHeaders);
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders);
+      }
+    }
+
+    if (url.pathname === '/investigations/bootstrap' && request.method === 'POST') {
+      try {
+        assertPermission(auth, 'search.read');
+        const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+        const validation = validateBootstrapRequest(body);
+        if (!validation.ok) {
+          return jsonResponse({ error: validation.error }, 400, requestCorsHeaders);
+        }
+        const payload = buildBootstrapPayload(body);
+        return jsonResponse(payload, 200, requestCorsHeaders);
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders);
+      }
+    }
+
+    if (url.pathname === '/investigations/related-events' && request.method === 'POST') {
+      try {
+        assertPermission(auth, 'search.read');
+        const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+        const validation = validateRelatedEventsRequest(body);
+        if (!validation.ok) {
+          return jsonResponse({ error: validation.error }, 400, requestCorsHeaders);
+        }
+        const pivots = normalizePivots(body.pivots);
+        const pivotTokens = Array.isArray(body.pivot_tokens) ? body.pivot_tokens : [];
+        const maxCandidates = body.max_candidates != null
+          ? Math.min(Number(body.max_candidates), 100)
+          : 100;
+        // Candidate retrieval from R2/query planner intentionally deferred; ranking wired for future integration.
+        const candidates: Array<Record<string, unknown>> = [];
+        const ranked = rankRelatedEvents(pivots, pivotTokens, candidates, { maxCandidates });
+        return jsonResponse({ related_events: ranked }, 200, requestCorsHeaders);
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders);
+      }
+    }
+
+    if (url.pathname === '/investigations/session' && request.method === 'POST') {
+      try {
+        assertPermission(auth, 'search.read');
+        const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+        const validation = validateSessionSaveRequest(body);
+        if (!validation.ok) {
+          return jsonResponse({ error: validation.error }, 400, requestCorsHeaders);
+        }
+        const id = crypto.randomUUID();
+        const now = new Date().toISOString();
+        const principal = auth.email || auth.principal;
+        const recordInput = {
+          id,
+          owner_user_id: principal,
+          source_type: validation.source_type,
+          scope_json: validation.scope_json,
+          state_json: validation.state_json,
+          created_at: now,
+          expires_at: validation.expires_at
+        };
+        const built = buildSessionRecord(recordInput);
+        if (!built.ok) {
+          return jsonResponse({ error: built.error }, 400, requestCorsHeaders);
+        }
+        await env.DB.prepare(
+          `INSERT INTO investigation_sessions (id, owner_user_id, source_type, scope_json, state_json, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          built.id,
+          built.owner_user_id ?? null,
+          built.source_type ?? null,
+          built.scope_json,
+          built.state_json,
+          built.created_at,
+          built.expires_at ?? null
+        ).run();
+        return jsonResponse({ id: built.id, created_at: built.created_at }, 201, requestCorsHeaders);
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders);
+      }
+    }
+
+    const sessionMatch = url.pathname.match(/^\/investigations\/session\/([^/]+)$/);
+    if (sessionMatch && request.method === 'GET') {
+      try {
+        assertPermission(auth, 'search.read');
+        const sessionId = sessionMatch[1];
+        if (!sessionId) {
+          return jsonResponse({ error: 'Session id required' }, 400, requestCorsHeaders);
+        }
+        const row = await env.DB.prepare(
+          'SELECT id, owner_user_id, source_type, scope_json, state_json, created_at, expires_at FROM investigation_sessions WHERE id = ?'
+        ).bind(sessionId).first<{
+          id: string;
+          owner_user_id: string | null;
+          source_type: string | null;
+          scope_json: string;
+          state_json: string;
+          created_at: string;
+          expires_at: string | null;
+        }>();
+        if (!row) {
+          return jsonResponse({ error: 'Session not found' }, 404, requestCorsHeaders);
+        }
+        const principal = auth.email || auth.principal;
+        const isAdmin = auth.role === 'admin' || auth.role === 'superadmin';
+        if (!canAccessInvestigationSession(row.owner_user_id, principal, isAdmin)) {
+          throw new Error('Forbidden');
+        }
+        return jsonResponse({
+          id: row.id,
+          owner_user_id: row.owner_user_id,
+          source_type: row.source_type,
+          scope_json: row.scope_json,
+          state_json: row.state_json,
+          created_at: row.created_at,
+          expires_at: row.expires_at
+        }, 200, requestCorsHeaders);
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders);
       }
     }
 

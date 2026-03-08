@@ -1,16 +1,27 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from './AuthContext';
 import { AuthScreen } from './AuthScreen';
+import { IncidentWorkspacePage } from './investigation/IncidentWorkspacePage';
+import { PivotChips } from './investigation/PivotChips';
+import { RelatedEventsPanel } from './investigation/RelatedEventsPanel';
+import {
+  type InvestigationPivots,
+  type PivotKey,
+  type RelatedEvent,
+  hasPivots,
+  parseInvestigationParams,
+  pivotsFromRelatedEvent
+} from './investigation/types';
 
 const DashboardPage = lazy(async () => {
   const mod = await import('./dashboard/DashboardPage');
   return { default: mod.DashboardPage };
 });
 
-type ViewMode = 'search' | 'dashboard' | 'saved' | 'scheduled' | 'alerts' | 'admin' | 'livetail';
+type ViewMode = 'search' | 'dashboard' | 'saved' | 'scheduled' | 'alerts' | 'admin' | 'livetail' | 'workspace';
 type SearchMode = 'structured' | 'token' | 'phrase';
 const TAB_QUERY_PARAM = 'tab';
-const VIEW_MODES = new Set<ViewMode>(['search', 'dashboard', 'saved', 'scheduled', 'alerts', 'admin', 'livetail']);
+const VIEW_MODES = new Set<ViewMode>(['search', 'dashboard', 'saved', 'scheduled', 'alerts', 'admin', 'livetail', 'workspace']);
 
 function parseViewMode(raw: string | null): ViewMode | null {
   if (!raw) return null;
@@ -746,6 +757,10 @@ function App() {
   const [activeIndex, setActiveIndex] = useState(-1);
   const [selectedEvent, setSelectedEvent] = useState<LogEvent | null>(null);
   const [bootstrappedSearch, setBootstrappedSearch] = useState(false);
+  const [investigationPivots, setInvestigationPivots] = useState<InvestigationPivots>(() => {
+    if (typeof window === 'undefined') return {};
+    return parseInvestigationParams(window.location.search);
+  });
 
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardError, setDashboardError] = useState<string | null>(null);
@@ -815,6 +830,17 @@ function App() {
   const [newMappingRoleId, setNewMappingRoleId] = useState('viewer');
   const streamAbortRef = useRef<AbortController | null>(null);
   const summaryAbortRef = useRef<AbortController | null>(null);
+
+  const sessionIdFromUrl = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    return new URLSearchParams(window.location.search).get('session')?.trim() || null;
+  }, []);
+
+  useEffect(() => {
+    if (sessionIdFromUrl && user) {
+      setView('workspace');
+    }
+  }, [sessionIdFromUrl, user]);
 
   const highlightTerms = useMemo(() => extractHighlightTerms(query), [query]);
   const canOpenAdmin = user?.role === 'admin' || user?.role === 'superadmin';
@@ -887,6 +913,7 @@ function App() {
   const buildPpl = useCallback((overrides?: {
     queryOverride?: string;
     filterOverrides?: Partial<SearchFilterState>;
+    pivotOverrides?: InvestigationPivots;
   }): string => {
     const filterState: SearchFilterState = {
       indexName,
@@ -897,6 +924,7 @@ function App() {
       statusCode,
       ...(overrides?.filterOverrides || {})
     };
+    const pivots = overrides?.pivotOverrides ?? investigationPivots;
 
     const rawQuery = (overrides?.queryOverride ?? query).trim();
     const looksLikePipeline = /\|/.test(rawQuery) || /^(search|where|fields|sort|head|stats)\b/i.test(rawQuery);
@@ -917,15 +945,20 @@ function App() {
       const numeric = Number(filterState.statusCode.trim());
       if (!Number.isNaN(numeric)) conditions.push(`status=${Math.trunc(numeric)}`);
     }
+    if (pivots.trace_id) conditions.push(`trace_id=${quote(pivots.trace_id)}`);
+    if (pivots.request_id) conditions.push(`request_id=${quote(pivots.request_id)}`);
+    if (pivots.user_id) conditions.push(`user_id=${quote(pivots.user_id)}`);
+    if (pivots.msg_hash) conditions.push(`msg_hash=${quote(pivots.msg_hash)}`);
 
     const searchExpr = rawQuery || '*';
     if (conditions.length === 0) return `search ${searchExpr}`;
     return `search ${searchExpr} | where ${conditions.join(' and ')}`;
-  }, [indexName, query, service, environment, host, level, statusCode]);
+  }, [indexName, query, service, environment, host, level, statusCode, investigationPivots]);
 
   const buildSearchPayload = useCallback((options?: {
     queryOverride?: string;
     filterOverrides?: Partial<SearchFilterState>;
+    pivotOverrides?: InvestigationPivots;
     cursor?: { before_ts: string; before_event_id: string } | null;
     limit?: number;
   }): SearchRequestPayload => {
@@ -936,7 +969,8 @@ function App() {
       },
       ppl: buildPpl({
         queryOverride: options?.queryOverride,
-        filterOverrides: options?.filterOverrides
+        filterOverrides: options?.filterOverrides,
+        pivotOverrides: options?.pivotOverrides
       }),
       limit: options?.limit ?? 200,
       cursor: options?.cursor ?? null
@@ -992,6 +1026,7 @@ function App() {
     cursor?: { before_ts: string; before_event_id: string } | null;
     queryOverride?: string;
     filterOverrides?: Partial<SearchFilterState>;
+    pivotOverrides?: InvestigationPivots;
   }) => {
     if (streamAbortRef.current) {
       streamAbortRef.current.abort();
@@ -1015,6 +1050,7 @@ function App() {
       const payload = buildSearchPayload({
         queryOverride: options?.queryOverride,
         filterOverrides: options?.filterOverrides,
+        pivotOverrides: options?.pivotOverrides,
         cursor: requestCursor,
         limit: 200
       });
@@ -1866,6 +1902,26 @@ function App() {
     };
   }, []);
 
+  const handlePivotClick = useCallback((key: PivotKey, _value: string) => {
+    const nextPivots = { ...investigationPivots };
+    delete nextPivots[key];
+    setInvestigationPivots(nextPivots);
+    setView('search');
+    setCursor(null);
+    setActiveIndex(-1);
+    void runSearch({ append: false, cursor: null, pivotOverrides: nextPivots });
+  }, [investigationPivots, runSearch]);
+
+  const handleSelectRelatedEvent = useCallback((ev: RelatedEvent) => {
+    const nextPivots = pivotsFromRelatedEvent(ev);
+    if (!hasPivots(nextPivots)) return;
+    setInvestigationPivots(nextPivots);
+    setView('search');
+    setCursor(null);
+    setActiveIndex(-1);
+    void runSearch({ append: false, cursor: null, pivotOverrides: nextPivots });
+  }, [runSearch]);
+
   useEffect(() => {
     if (view === 'dashboard') {
       void loadDashboard();
@@ -2002,6 +2058,7 @@ function App() {
           <button className={view === 'saved' ? 'active' : ''} onClick={() => setAddressableView('saved')}>Saved Searches</button>
           <button className={view === 'scheduled' ? 'active' : ''} onClick={() => setAddressableView('scheduled')}>Scheduled</button>
           <button className={view === 'livetail' ? 'active' : ''} onClick={() => setAddressableView('livetail')}>Live Tail</button>
+          <button className={view === 'workspace' ? 'active' : ''} onClick={() => setAddressableView('workspace')}>Incident Workspace</button>
           {canOpenAdmin && (
             <button className={view === 'admin' ? 'active' : ''} onClick={() => setAddressableView('admin')}>Admin</button>
           )}
@@ -2016,6 +2073,12 @@ function App() {
 
       <main className="main">
         {view === 'livetail' && <LiveTailView apiBase={API_BASE} apiToken={apiToken || null} onSelectEvent={setSelectedEvent} />}
+        {view === 'workspace' && (
+          <IncidentWorkspacePage
+            apiToken={apiToken}
+            sessionIdFromUrl={sessionIdFromUrl}
+          />
+        )}
         {view === 'search' && (
           <div className="search-view">
             <div className="search-bar sticky">
@@ -2104,6 +2167,10 @@ function App() {
                 <button className="secondary" onClick={() => void saveCurrentSearch()}>Save Search</button>
                 {query.trim() && <button className="secondary" onClick={scheduleCurrentSearch}>Schedule</button>}
               </div>
+
+              {hasPivots(investigationPivots) && (
+                <PivotChips pivots={investigationPivots} onPivotClick={handlePivotClick} />
+              )}
             </div>
 
             {error && <div className="error-banner">{error}</div>}
@@ -2245,6 +2312,23 @@ function App() {
                     </button>
                   ))}
                 </div>
+
+                {hasPivots(investigationPivots) && (
+                  <RelatedEventsPanel
+                    apiFetch={apiFetch}
+                    scope={{
+                      index: indexName.trim() || 'default',
+                      service: service.trim() || 'unknown',
+                      env: environment.trim() || 'prod'
+                    }}
+                    time={{
+                      from: new Date(timeFrom).toISOString(),
+                      to: new Date(timeTo).toISOString()
+                    }}
+                    pivots={investigationPivots}
+                    onSelectRelatedEvent={handleSelectRelatedEvent}
+                  />
+                )}
 
                 <div className="facet-card">
                   <h4>Field Coverage</h4>

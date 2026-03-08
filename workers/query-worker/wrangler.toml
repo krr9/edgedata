@@ -43,6 +43,8 @@ SESSION_TTL_SECONDS = "43200"
 QUERY_RATE_LIMIT_PER_MIN = "600"
 AUTH_LOGIN_RATE_LIMIT_PER_MIN = "60"
 CORS_ORIGINS = "https://edgedata-1fo.pages.dev,https://*.edgedata-1fo.pages.dev"
+# Set to "true" for demo deployments to enable scenario picker in Incident Workspace.
+DEMO_SCENARIOS_ENABLED = "false"
 
 [durable_objects]
 bindings = [

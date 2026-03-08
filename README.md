@@ -8,7 +8,7 @@ Edge-native log search and SIEM-lite on Cloudflare Workers, R2, WAE, D1, and Pag
 - `workers/query-worker`: search API, search summary API (facets/timeline/top terms/field coverage), dashboard query API, saved search CRUD over D1, and live tail WebSocket streaming via TailHub Durable Object.
 - `workers/alert-worker`: cron evaluator for D1 alert definitions with state/cooldown tracking and Slack/webhook notifications.
 - `workers/synthetic-worker`: cron-based synthetic data producer that posts small demo batches to ingest for always-on searchable data.
-- `pages`: React UI for log explorer, dashboards, alerts management, saved searches, and live tail real-time log streaming, including event inspector syntax highlighting and field-count side panels.
+- `pages`: React UI for log explorer, dashboards, incident workspace investigations, alerts management, saved searches, and live tail real-time log streaming, including event inspector syntax highlighting and field-count side panels.
 
 ## Data Layout
 
@@ -153,6 +153,7 @@ Query worker:
 - `QUERY_ANALYST_TOKEN` (optional bearer token for analyst role)
 - `QUERY_ADMIN_TOKEN` (optional bearer token for admin role)
 - `OPS_WAE` analytics dataset binding (optional operational metrics)
+- `DEMO_SCENARIOS_ENABLED` (`"true"` enables investigation demo scenario presets, default `"false"`)
 - Wrangler secret `AUTH_BOOTSTRAP_PASSWORD`
 - Wrangler secret `AUTH_BOOTSTRAP_SUPERADMIN_PASSWORD` (preferred; falls back to `AUTH_BOOTSTRAP_PASSWORD`)
 - Wrangler secret `AUTH_SESSION_SECRET`
@@ -220,6 +221,11 @@ Query worker:
 - `POST /search`
 - `POST /search/stream` (NDJSON streaming: `meta`, `event`/`row`, `progress`, `final`, `error`)
 - `POST /search/summary`
+- `POST /investigations/bootstrap`
+- `POST /investigations/related-events`
+- `POST /investigations/session`
+- `GET /investigations/session/:id`
+- `GET /investigations/demo-scenarios`
 - `POST /dashboards/query`
 - `GET /users`
 - `PATCH /users/:id`

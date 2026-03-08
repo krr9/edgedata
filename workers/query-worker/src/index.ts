@@ -1,4 +1,5 @@
 export { TailHub } from './tail-hub.js';
+export { DashboardCache } from './dashboard-cache.js';
 import {
   enforceTimeGuardrails,
   getDateRange,
@@ -56,7 +57,10 @@ export interface Env {
   QUERY_RATE_LIMIT_PER_MIN?: string;
   AUTH_LOGIN_RATE_LIMIT_PER_MIN?: string;
   OPS_WAE?: AnalyticsEngineDataset;
+  SYNTHETIC_SERVICE?: Fetcher;
+  SYNTHETIC_RUN_SECRET?: string;
   TAIL_HUB: DurableObjectNamespace;
+  DASHBOARD_CACHE: DurableObjectNamespace;
 }
 
 type SearchMode = 'structured' | 'token' | 'phrase';
@@ -309,6 +313,13 @@ interface DashboardPanelRow {
   title: string;
   ppl: string;
   viz_type: string;
+  widget_type?: string | null;
+  query_text?: string | null;
+  query_mode?: string | null;
+  viz_config_json?: string | null;
+  layout_json?: string | null;
+  bindings_json?: string | null;
+  display_options_json?: string | null;
   time_window_minutes: number;
   refresh_seconds: number;
   options_json: string;
@@ -316,6 +327,8 @@ interface DashboardPanelRow {
   created_at: string;
   updated_at?: string | null;
 }
+
+type DashboardWidgetType = 'timeseries' | 'bar' | 'pie' | 'table' | 'kpi' | 'topn' | 'markdown';
 
 interface LookupTableRow {
   id: string;
@@ -2735,7 +2748,7 @@ async function handleDashboardQuery(
   requestCorsHeaders: Record<string, string>
 ): Promise<Response> {
   const body = await request.json() as { query: string; params?: Record<string, unknown> };
-  const query = body.query;
+  const query = String(body.query || '').trim();
   const params = body.params || {};
   const windowMinutes = asPositiveInt(params.window_minutes, 60, 24 * 60);
   const requestedIndex = typeof params.index === 'string'
@@ -2747,6 +2760,34 @@ async function handleDashboardQuery(
 
   if (requestedIndex && !matchesScopedValue(requestedIndex, auth.scope.indexes)) {
     return jsonResponse({ error: 'Forbidden: index outside role scope', results: [] }, 403, requestCorsHeaders);
+  }
+
+  if (!query) {
+    return jsonResponse({ error: 'query is required', results: [] }, 400, requestCorsHeaders);
+  }
+
+  const scopeCacheKey = buildScopeCacheKey(scope);
+  const cacheApi = typeof caches !== 'undefined' && caches.default ? caches.default : null;
+  const cacheKeyUrl = new URL(request.url);
+  cacheKeyUrl.pathname = '/__cache/dashboard-query';
+  cacheKeyUrl.searchParams.set('query', query);
+  cacheKeyUrl.searchParams.set('window_minutes', String(windowMinutes));
+  if (requestedIndex) cacheKeyUrl.searchParams.set('index', requestedIndex);
+  cacheKeyUrl.searchParams.set('scope', scopeCacheKey);
+  const cacheRequest = new Request(cacheKeyUrl.toString(), { method: 'GET' });
+  if (cacheApi) {
+    const cached = await cacheApi.match(cacheRequest);
+    if (cached) {
+      const cachedBody = await cached.json() as {
+        results: Array<Record<string, unknown>>;
+        source?: string;
+        warning?: string;
+      };
+      return jsonResponse({
+        ...cachedBody,
+        cache: 'hit'
+      }, 200, requestCorsHeaders);
+    }
   }
 
   const scopeSql = buildWaeScopeWhere(scope);
@@ -2824,15 +2865,90 @@ async function handleDashboardQuery(
       throw new Error('Scope requires fallback execution');
     }
     const results = await executeWAESQL(sql, env);
-    return jsonResponse({ results, source: 'wae' }, 200, requestCorsHeaders);
+    const payload = { results, source: 'wae', cache: 'miss' };
+    if (cacheApi) {
+      await cacheApi.put(cacheRequest, new Response(JSON.stringify(payload), {
+        headers: {
+          'content-type': 'application/json',
+          'cache-control': `public, max-age=${DASHBOARD_QUERY_CACHE_TTL_SECONDS}`
+        }
+      })).catch(() => undefined);
+    }
+    return jsonResponse(payload, 200, requestCorsHeaders);
   } catch (error) {
     const fallbackResults = await computeDashboardFallback(query, windowMinutes, env, scope);
-    return jsonResponse({
+    const payload = {
       results: fallbackResults,
       source: 'events_fallback',
-      warning: String(error)
-    }, 200, requestCorsHeaders);
+      warning: String(error),
+      cache: 'miss'
+    };
+    if (cacheApi) {
+      await cacheApi.put(cacheRequest, new Response(JSON.stringify(payload), {
+        headers: {
+          'content-type': 'application/json',
+          'cache-control': `public, max-age=${DASHBOARD_QUERY_CACHE_TTL_SECONDS}`
+        }
+      })).catch(() => undefined);
+    }
+    return jsonResponse(payload, 200, requestCorsHeaders);
   }
+}
+
+async function handleDashboardWidgetQuery(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  requestCorsHeaders: Record<string, string>
+): Promise<Response> {
+  const body = await request.json() as (PplSearchRequest & { widget_id?: string });
+  const req: PplSearchRequest = {
+    time: body.time,
+    ppl: String(body.ppl || '').trim(),
+    limit: Math.max(1, Math.min(2000, Number(body.limit) || 500)),
+    cursor: body.cursor || null
+  };
+  if (!req.time || !req.time.from || !req.time.to || !req.ppl) {
+    return jsonResponse({ error: 'time.from, time.to, and ppl are required' }, 400, requestCorsHeaders);
+  }
+  const widgetId = body.widget_id ? String(body.widget_id) : null;
+  const cacheKey = buildDashboardWidgetCacheKey(req, auth.scope, widgetId);
+  const cacheKeyHash = hashCacheKey(cacheKey);
+  const toMs = Date.parse(req.time.to);
+  const cacheBucket = Number.isFinite(toMs) ? Math.floor(toMs / (DASHBOARD_QUERY_CACHE_BUCKET_SECONDS * 1000)) : null;
+  const cached = await getDashboardCachePayload(env, cacheKey);
+  if (cached.hit && cached.payload) {
+    return jsonResponse(
+      {
+        ...cached.payload,
+        cache: 'hit',
+        cache_debug: {
+          key_hash: cacheKeyHash,
+          bucket: cacheBucket,
+          bucket_seconds: DASHBOARD_QUERY_CACHE_BUCKET_SECONDS,
+          ttl_seconds: DASHBOARD_QUERY_CACHE_TTL_SECONDS
+        }
+      },
+      200,
+      { ...requestCorsHeaders, 'x-edgedata-cache': 'hit' }
+    );
+  }
+  const response = await performPplSearch(req, env, auth);
+  await setDashboardCachePayload(env, cacheKey, response);
+  return jsonResponse(
+    {
+      ...response,
+      cache: 'miss',
+      cache_debug: {
+        key_hash: cacheKeyHash,
+        bucket: cacheBucket,
+        bucket_seconds: DASHBOARD_QUERY_CACHE_BUCKET_SECONDS,
+        ttl_seconds: DASHBOARD_QUERY_CACHE_TTL_SECONDS
+      }
+    },
+    200,
+    { ...requestCorsHeaders, 'x-edgedata-cache': 'miss' }
+  );
 }
 
 function normalizeJsonInput(input: unknown, fallback: string): string {
@@ -2848,6 +2964,164 @@ function normalizeJsonInput(input: unknown, fallback: string): string {
     return JSON.stringify(input);
   }
   return fallback;
+}
+
+const DASHBOARD_WIDGET_TYPES: DashboardWidgetType[] = ['timeseries', 'bar', 'pie', 'table', 'kpi', 'topn', 'markdown'];
+
+function mapLegacyVizToWidgetType(vizType: string | null | undefined): DashboardWidgetType {
+  const value = String(vizType || 'table').toLowerCase();
+  if (value === 'counter' || value === 'stat') return 'kpi';
+  if (value === 'timechart') return 'timeseries';
+  if (value === 'top') return 'topn';
+  if ((DASHBOARD_WIDGET_TYPES as string[]).includes(value)) return value as DashboardWidgetType;
+  return 'table';
+}
+
+function mapWidgetTypeToLegacyViz(widgetType: DashboardWidgetType): string {
+  if (widgetType === 'timeseries') return 'timechart';
+  if (widgetType === 'kpi') return 'stat';
+  if (widgetType === 'topn') return 'bar';
+  return widgetType;
+}
+
+function normalizeWidgetType(value: unknown): DashboardWidgetType {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return 'table';
+  if (raw === 'counter' || raw === 'stat') return 'kpi';
+  if (raw === 'timechart') return 'timeseries';
+  if ((DASHBOARD_WIDGET_TYPES as string[]).includes(raw)) return raw as DashboardWidgetType;
+  return 'table';
+}
+
+function defaultLayoutForPanel(position: number, widgetType: DashboardWidgetType): string {
+  const safePosition = Math.max(0, Math.trunc(position || 0));
+  const width = widgetType === 'kpi' ? 3 : 6;
+  const height = widgetType === 'kpi' ? 4 : 8;
+  return JSON.stringify({
+    x: (safePosition % 2) * 6,
+    y: Math.trunc(safePosition / 2) * 8,
+    w: width,
+    h: height,
+    minW: Math.min(width, 3),
+    minH: Math.min(height, 4)
+  });
+}
+
+function parseJsonObject(input: unknown, fallback: Record<string, unknown> = {}): Record<string, unknown> {
+  if (!input) return { ...fallback };
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+      return { ...fallback };
+    } catch {
+      return { ...fallback };
+    }
+  }
+  if (input && typeof input === 'object' && !Array.isArray(input)) {
+    return input as Record<string, unknown>;
+  }
+  return { ...fallback };
+}
+
+function normalizeDashboardPanelRow(row: DashboardPanelRow): Record<string, unknown> {
+  const widgetType = row.widget_type
+    ? mapLegacyVizToWidgetType(row.widget_type)
+    : mapLegacyVizToWidgetType(row.viz_type);
+  const queryText = String(row.query_text || row.ppl || '').trim();
+  const normalizedLayoutJson = normalizeJsonInput(
+    row.layout_json,
+    defaultLayoutForPanel(row.position, widgetType)
+  );
+  return {
+    ...row,
+    widget_type: widgetType,
+    query_text: queryText,
+    query_mode: String(row.query_mode || 'ppl'),
+    viz_config_json: normalizeJsonInput(row.viz_config_json || row.options_json, '{}'),
+    layout_json: normalizedLayoutJson,
+    bindings_json: normalizeJsonInput(row.bindings_json, '{}'),
+    display_options_json: normalizeJsonInput(row.display_options_json, '{}'),
+    viz_type: row.viz_type || mapWidgetTypeToLegacyViz(widgetType),
+    ppl: row.ppl || queryText,
+    layout: parseJsonObject(normalizedLayoutJson, {}),
+    bindings: parseJsonObject(row.bindings_json, {}),
+    viz_config: parseJsonObject(row.viz_config_json || row.options_json, {}),
+    display_options: parseJsonObject(row.display_options_json, {})
+  };
+}
+
+const DASHBOARD_QUERY_CACHE_TTL_SECONDS = 60;
+const DASHBOARD_QUERY_CACHE_BUCKET_SECONDS = 60;
+
+function buildScopeCacheKey(scope: DataScope): string {
+  const parts = [
+    `i:${scope.indexes.slice().sort().join(',')}`,
+    `s:${scope.services.slice().sort().join(',')}`,
+    `e:${scope.envs.slice().sort().join(',')}`,
+    `h:${scope.hosts.slice().sort().join(',')}`
+  ];
+  return parts.join('|');
+}
+
+function normalizePplForCache(ppl: string): string {
+  return ppl.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function buildDashboardWidgetCacheKey(req: PplSearchRequest, scope: DataScope, widgetId: string | null): string {
+  const fromMs = Date.parse(req.time.from);
+  const toMs = Date.parse(req.time.to);
+  const windowMs = Number.isFinite(fromMs) && Number.isFinite(toMs) && toMs > fromMs ? toMs - fromMs : 0;
+  const toBucket = Number.isFinite(toMs) ? Math.floor(toMs / (DASHBOARD_QUERY_CACHE_BUCKET_SECONDS * 1000)) : 0;
+  return [
+    `wid:${widgetId || '_'}`,
+    `ppl:${normalizePplForCache(req.ppl)}`,
+    `wm:${windowMs}`,
+    `tb:${toBucket}`,
+    `sc:${buildScopeCacheKey(scope)}`
+  ].join('|');
+}
+
+function hashCacheKey(raw: string): string {
+  // Deterministic lightweight hash for debug visibility.
+  let h = 2166136261;
+  for (let i = 0; i < raw.length; i++) {
+    h ^= raw.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+async function getDashboardCachePayload(
+  env: Env,
+  key: string
+): Promise<{ hit: boolean; payload?: PplSearchResponse }> {
+  try {
+    const stub = env.DASHBOARD_CACHE.get(env.DASHBOARD_CACHE.idFromName('global'));
+    const response = await stub.fetch(`https://dashboard-cache/cache/get?key=${encodeURIComponent(key)}`);
+    if (!response.ok) return { hit: false };
+    const body = await response.json() as { hit?: boolean; payload?: PplSearchResponse };
+    if (!body.hit || !body.payload) return { hit: false };
+    return { hit: true, payload: body.payload };
+  } catch {
+    return { hit: false };
+  }
+}
+
+async function setDashboardCachePayload(env: Env, key: string, payload: PplSearchResponse): Promise<void> {
+  try {
+    const stub = env.DASHBOARD_CACHE.get(env.DASHBOARD_CACHE.idFromName('global'));
+    await stub.fetch('https://dashboard-cache/cache/set', {
+      method: 'POST',
+      body: JSON.stringify({
+        key,
+        ttl_seconds: DASHBOARD_QUERY_CACHE_TTL_SECONDS,
+        payload
+      })
+    });
+  } catch {
+    // cache failures are non-fatal
+  }
 }
 
 async function handleAlerts(
@@ -3340,6 +3614,31 @@ async function handleDashboards(
   const dashMatch = pathname.match(/^\/dashboards\/([^/]+)/);
   if (!dashMatch) return textResponse('Not found', 404, requestCorsHeaders);
   const dashboardId = dashMatch[1];
+  const layoutMatch = pathname.match(/^\/dashboards\/[^/]+\/layout$/);
+
+  if (layoutMatch !== null) {
+    if (request.method !== 'PUT') return textResponse('Method not allowed', 405, requestCorsHeaders);
+    assertPermission(auth, 'dashboard.write');
+    const body = await request.json().catch(() => ({})) as { items?: Array<{ id?: string; layout_json?: unknown; layout?: unknown }> };
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (items.length === 0) return jsonResponse({ error: 'items is required' }, 400, requestCorsHeaders);
+    const now = new Date().toISOString();
+    let updated = 0;
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index];
+      const panelId = String(item.id || '').trim();
+      if (!panelId) continue;
+      const layoutInput = item.layout_json ?? item.layout ?? {};
+      const layoutJson = normalizeJsonInput(layoutInput, defaultLayoutForPanel(index, 'table'));
+      await env.DB.prepare(
+        `UPDATE dashboard_panels
+         SET layout_json = ?, position = ?, updated_at = ?
+         WHERE id = ? AND dashboard_id = ?`
+      ).bind(layoutJson, index, now, panelId, dashboardId).run();
+      updated++;
+    }
+    return jsonResponse({ dashboard_id: dashboardId, updated, updated_at: now }, 200, requestCorsHeaders);
+  }
 
   const panelMatch = pathname.match(/^\/dashboards\/[^/]+\/panels(?:\/([^/]+))?$/);
 
@@ -3351,26 +3650,81 @@ async function handleDashboards(
       const rows = await env.DB.prepare(
         'SELECT * FROM dashboard_panels WHERE dashboard_id = ? ORDER BY position ASC'
       ).bind(dashboardId).all<DashboardPanelRow>();
-      return jsonResponse(rows.results || [], 200, requestCorsHeaders);
+      return jsonResponse((rows.results || []).map(normalizeDashboardPanelRow), 200, requestCorsHeaders);
     }
 
     if (request.method === 'POST' && !panelId) {
       assertPermission(auth, 'dashboard.write');
       const body = await request.json() as Record<string, unknown>;
       const title = String(body.title || '').trim();
-      const ppl = String(body.ppl || '').trim();
-      if (!title || !ppl) return jsonResponse({ error: 'title and ppl are required' }, 400, requestCorsHeaders);
+      const widgetType = normalizeWidgetType(body.widget_type ?? body.viz_type);
+      const queryText = String(body.query_text ?? body.ppl ?? '').trim();
+      if (!title) return jsonResponse({ error: 'title is required' }, 400, requestCorsHeaders);
+      if (widgetType !== 'markdown' && !queryText) {
+        return jsonResponse({ error: 'query_text is required for data widgets' }, 400, requestCorsHeaders);
+      }
       const id = crypto.randomUUID();
       const now = new Date().toISOString();
-      const vizType = String(body.viz_type || 'table');
+      const vizType = mapWidgetTypeToLegacyViz(widgetType);
       const timeWindow = Math.max(1, Math.min(10080, Number(body.time_window_minutes) || 60));
       const refreshSec = Math.max(0, Math.min(3600, Number(body.refresh_seconds) || 0));
-      const position = Number(body.position) || 0;
+      const position = Math.max(0, Number(body.position) || 0);
+      const queryMode = String(body.query_mode || 'ppl');
+      const vizConfigJson = normalizeJsonInput(body.viz_config_json ?? body.viz_config ?? body.options_json, '{}');
+      const layoutJson = normalizeJsonInput(body.layout_json ?? body.layout, defaultLayoutForPanel(position, widgetType));
+      const bindingsJson = normalizeJsonInput(body.bindings_json ?? body.bindings, '{}');
+      const displayOptionsJson = normalizeJsonInput(body.display_options_json ?? body.display_options, '{}');
       await env.DB.prepare(
-        `INSERT INTO dashboard_panels (id, dashboard_id, title, ppl, viz_type, time_window_minutes, refresh_seconds, options_json, position, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?)`
-      ).bind(id, dashboardId, title, ppl, vizType, timeWindow, refreshSec, position, now, now).run();
-      return jsonResponse({ id, dashboard_id: dashboardId, title, ppl, viz_type: vizType, created_at: now }, 201, requestCorsHeaders);
+        `INSERT INTO dashboard_panels (
+          id, dashboard_id, title, ppl, viz_type, widget_type, query_text, query_mode,
+          viz_config_json, layout_json, bindings_json, display_options_json,
+          time_window_minutes, refresh_seconds, options_json, position, created_at, updated_at
+        )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        id,
+        dashboardId,
+        title,
+        queryText,
+        vizType,
+        widgetType,
+        queryText,
+        queryMode,
+        vizConfigJson,
+        layoutJson,
+        bindingsJson,
+        displayOptionsJson,
+        timeWindow,
+        refreshSec,
+        vizConfigJson,
+        position,
+        now,
+        now
+      ).run();
+      return jsonResponse(
+        normalizeDashboardPanelRow({
+          id,
+          dashboard_id: dashboardId,
+          title,
+          ppl: queryText,
+          viz_type: vizType,
+          widget_type: widgetType,
+          query_text: queryText,
+          query_mode: queryMode,
+          viz_config_json: vizConfigJson,
+          layout_json: layoutJson,
+          bindings_json: bindingsJson,
+          display_options_json: displayOptionsJson,
+          time_window_minutes: timeWindow,
+          refresh_seconds: refreshSec,
+          options_json: vizConfigJson,
+          position,
+          created_at: now,
+          updated_at: now
+        }),
+        201,
+        requestCorsHeaders
+      );
     }
 
     if (request.method === 'PUT' && panelId) {
@@ -3382,6 +3736,40 @@ async function handleDashboards(
       if (body.title !== undefined) { updates.push('title = ?'); values.push(String(body.title).trim()); }
       if (body.ppl !== undefined) { updates.push('ppl = ?'); values.push(String(body.ppl).trim()); }
       if (body.viz_type !== undefined) { updates.push('viz_type = ?'); values.push(String(body.viz_type)); }
+      if (body.widget_type !== undefined) {
+        const widgetType = normalizeWidgetType(body.widget_type);
+        updates.push('widget_type = ?');
+        values.push(widgetType);
+        updates.push('viz_type = ?');
+        values.push(mapWidgetTypeToLegacyViz(widgetType));
+      }
+      if (body.query_text !== undefined) {
+        const queryText = String(body.query_text || '').trim();
+        updates.push('query_text = ?');
+        values.push(queryText);
+        updates.push('ppl = ?');
+        values.push(queryText);
+      }
+      if (body.query_mode !== undefined) { updates.push('query_mode = ?'); values.push(String(body.query_mode || 'ppl')); }
+      if (body.viz_config_json !== undefined || body.viz_config !== undefined) {
+        const configJson = normalizeJsonInput(body.viz_config_json ?? body.viz_config, '{}');
+        updates.push('viz_config_json = ?');
+        values.push(configJson);
+        updates.push('options_json = ?');
+        values.push(configJson);
+      }
+      if (body.layout_json !== undefined || body.layout !== undefined) {
+        updates.push('layout_json = ?');
+        values.push(normalizeJsonInput(body.layout_json ?? body.layout, '{}'));
+      }
+      if (body.bindings_json !== undefined || body.bindings !== undefined) {
+        updates.push('bindings_json = ?');
+        values.push(normalizeJsonInput(body.bindings_json ?? body.bindings, '{}'));
+      }
+      if (body.display_options_json !== undefined || body.display_options !== undefined) {
+        updates.push('display_options_json = ?');
+        values.push(normalizeJsonInput(body.display_options_json ?? body.display_options, '{}'));
+      }
       if (body.time_window_minutes !== undefined) { updates.push('time_window_minutes = ?'); values.push(Number(body.time_window_minutes) || 60); }
       if (body.refresh_seconds !== undefined) { updates.push('refresh_seconds = ?'); values.push(Number(body.refresh_seconds) || 0); }
       if (body.position !== undefined) { updates.push('position = ?'); values.push(Number(body.position) || 0); }
@@ -3392,7 +3780,10 @@ async function handleDashboards(
       if (updates.length > 1) {
         await env.DB.prepare(`UPDATE dashboard_panels SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
       }
-      return jsonResponse({ id: panelId, updated_at: now }, 200, requestCorsHeaders);
+      const updatedRow = await env.DB.prepare(
+        'SELECT * FROM dashboard_panels WHERE id = ? AND dashboard_id = ?'
+      ).bind(panelId, dashboardId).first<DashboardPanelRow>();
+      return jsonResponse(updatedRow ? normalizeDashboardPanelRow(updatedRow) : { id: panelId, updated_at: now }, 200, requestCorsHeaders);
     }
 
     if (request.method === 'DELETE' && panelId) {
@@ -3803,6 +4194,123 @@ async function handleAudit(
   return textResponse('Method not allowed', 405, requestCorsHeaders);
 }
 
+async function fetchSyntheticControl(
+  env: Env,
+  path: string,
+  init: RequestInit = {}
+): Promise<Response> {
+  if (!env.SYNTHETIC_SERVICE) {
+    throw new Error('Synthetic control is not configured (missing SYNTHETIC_SERVICE binding)');
+  }
+  if (!env.SYNTHETIC_RUN_SECRET) {
+    throw new Error('Synthetic control is not configured (missing SYNTHETIC_RUN_SECRET secret)');
+  }
+  const headers = new Headers(init.headers || {});
+  headers.set('Authorization', `Bearer ${env.SYNTHETIC_RUN_SECRET}`);
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  return env.SYNTHETIC_SERVICE.fetch(
+    new Request(`https://internal${path}`, { ...init, headers })
+  );
+}
+
+async function handleSyntheticIngestAdmin(
+  request: Request,
+  env: Env,
+  pathname: string,
+  auth: AuthContext,
+  requestCorsHeaders: Record<string, string>
+): Promise<Response> {
+  if (!pathname.startsWith('/admin/synthetic-ingest')) {
+    return textResponse('Not found', 404, requestCorsHeaders);
+  }
+  assertPermission(auth, 'role.write');
+
+  if (request.method === 'POST' && pathname === '/admin/synthetic-ingest/run') {
+    const runResponse = await fetchSyntheticControl(env, '/run', { method: 'POST' });
+    const runBody = await runResponse.json() as Record<string, unknown>;
+    if (!runResponse.ok || runBody.error) {
+      return jsonResponse(
+        { error: String(runBody.error || `Synthetic run failed (${runResponse.status})`) },
+        runResponse.status >= 400 ? runResponse.status : 500,
+        requestCorsHeaders
+      );
+    }
+    await writeAuditLog(env, auth, 'synthetic.ingest.run.triggered', 'runtime_flags', 'synthetic_ingest_enabled', {
+      source: 'admin'
+    }).catch(() => undefined);
+    return jsonResponse({ ok: true, run: runBody }, 200, requestCorsHeaders);
+  }
+
+  if (request.method === 'GET') {
+    const response = await fetchSyntheticControl(env, '/control');
+    const body = await response.json() as Record<string, unknown>;
+    if (!response.ok || body.error) {
+      return jsonResponse(
+        { error: String(body.error || `Synthetic control request failed (${response.status})`) },
+        response.status >= 400 ? response.status : 500,
+        requestCorsHeaders
+      );
+    }
+    return jsonResponse(body, 200, requestCorsHeaders);
+  }
+
+  if (request.method === 'POST') {
+    const body = await request.json() as { enabled?: unknown; trigger_run?: unknown };
+    if (typeof body.enabled !== 'boolean') {
+      return jsonResponse({ error: 'enabled boolean is required' }, 400, requestCorsHeaders);
+    }
+
+    const controlResponse = await fetchSyntheticControl(env, '/control', {
+      method: 'POST',
+      body: JSON.stringify({ enabled: body.enabled })
+    });
+    const controlBody = await controlResponse.json() as Record<string, unknown>;
+    if (!controlResponse.ok || controlBody.error) {
+      return jsonResponse(
+        { error: String(controlBody.error || `Synthetic control update failed (${controlResponse.status})`) },
+        controlResponse.status >= 400 ? controlResponse.status : 500,
+        requestCorsHeaders
+      );
+    }
+
+    let runBody: Record<string, unknown> | null = null;
+    const triggerRun = body.trigger_run !== false;
+    if (body.enabled && triggerRun) {
+      const runResponse = await fetchSyntheticControl(env, '/run', { method: 'POST' });
+      runBody = await runResponse.json() as Record<string, unknown>;
+      if (!runResponse.ok || runBody.error) {
+        return jsonResponse(
+          {
+            error: String(runBody.error || `Synthetic run failed (${runResponse.status})`),
+            control: controlBody
+          },
+          runResponse.status >= 400 ? runResponse.status : 500,
+          requestCorsHeaders
+        );
+      }
+    }
+
+    await writeAuditLog(env, auth, 'synthetic.ingest.control.updated', 'runtime_flags', 'synthetic_ingest_enabled', {
+      enabled: body.enabled,
+      trigger_run: body.enabled && triggerRun
+    }).catch(() => undefined);
+
+    return jsonResponse(
+      {
+        ok: true,
+        control: controlBody,
+        run: runBody
+      },
+      200,
+      requestCorsHeaders
+    );
+  }
+
+  return textResponse('Method not allowed', 405, requestCorsHeaders);
+}
+
 async function handleAuth(
   request: Request,
   env: Env,
@@ -4192,9 +4700,31 @@ export default {
       }
     }
 
+    if (url.pathname === '/dashboards/widgets/query' && request.method === 'POST') {
+      await writeOpsMetric(env, 'dashboard_widget_requests_total', 1).catch(() => undefined);
+      try {
+        assertPermission(auth, 'dashboard.read');
+        const response = await handleDashboardWidgetQuery(request, env, auth, requestCorsHeaders);
+        await writeOpsMetric(env, 'query_latency_ms', Date.now() - startedAt).catch(() => undefined);
+        return response;
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders, 500);
+      }
+    }
+
     if (url.pathname.startsWith('/users')) {
       try {
         return await handleUsers(request, env, url.pathname, auth, requestCorsHeaders);
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders, 500);
+      }
+    }
+
+    if (url.pathname.startsWith('/admin/synthetic-ingest')) {
+      try {
+        return await handleSyntheticIngestAdmin(request, env, url.pathname, auth, requestCorsHeaders);
       } catch (error) {
         await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
         return errorResponse(error, requestCorsHeaders, 500);

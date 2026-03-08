@@ -18,6 +18,10 @@ bucket_name = "edgedata-raw"
 binding = "WAE"
 dataset = "log_metrics"
 
+[[services]]
+binding = "SYNTHETIC_SERVICE"
+service = "synthetic-worker"
+
 [vars]
 CF_ACCOUNT_ID = ""
 REQUIRE_ACCESS_JWT = "true"
@@ -42,9 +46,14 @@ CORS_ORIGINS = "https://edgedata-1fo.pages.dev,https://*.edgedata-1fo.pages.dev"
 
 [durable_objects]
 bindings = [
-  { name = "TAIL_HUB", class_name = "TailHub" }
+  { name = "TAIL_HUB", class_name = "TailHub" },
+  { name = "DASHBOARD_CACHE", class_name = "DashboardCache" }
 ]
 
 [[migrations]]
 tag = "v1"
 new_classes = ["TailHub"]
+
+[[migrations]]
+tag = "v2"
+new_classes = ["DashboardCache"]

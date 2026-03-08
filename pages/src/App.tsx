@@ -1,9 +1,47 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from './AuthContext';
 import { AuthScreen } from './AuthScreen';
 
+const DashboardPage = lazy(async () => {
+  const mod = await import('./dashboard/DashboardPage');
+  return { default: mod.DashboardPage };
+});
+
 type ViewMode = 'search' | 'dashboard' | 'saved' | 'scheduled' | 'alerts' | 'admin' | 'livetail';
 type SearchMode = 'structured' | 'token' | 'phrase';
+const TAB_QUERY_PARAM = 'tab';
+const VIEW_MODES = new Set<ViewMode>(['search', 'dashboard', 'saved', 'scheduled', 'alerts', 'admin', 'livetail']);
+
+function parseViewMode(raw: string | null): ViewMode | null {
+  if (!raw) return null;
+  const normalized = raw.trim().replace(/^#/, '');
+  if (!normalized) return null;
+  if (VIEW_MODES.has(normalized as ViewMode)) return normalized as ViewMode;
+
+  const hashParams = new URLSearchParams(normalized.startsWith('?') ? normalized.slice(1) : normalized);
+  const nested = hashParams.get(TAB_QUERY_PARAM);
+  if (!nested) return null;
+  return VIEW_MODES.has(nested as ViewMode) ? (nested as ViewMode) : null;
+}
+
+function readViewFromLocation(loc: Pick<Location, 'search' | 'hash'>): ViewMode | null {
+  const params = new URLSearchParams(loc.search);
+  return parseViewMode(params.get(TAB_QUERY_PARAM)) || parseViewMode(loc.hash);
+}
+
+function writeViewToLocation(view: ViewMode, options?: { replace?: boolean }): void {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  if (url.searchParams.get(TAB_QUERY_PARAM) === view) return;
+
+  url.searchParams.set(TAB_QUERY_PARAM, view);
+  const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+  if (options?.replace) {
+    window.history.replaceState({}, '', nextUrl);
+  } else {
+    window.history.pushState({}, '', nextUrl);
+  }
+}
 
 interface LogEvent {
   event_id: string;
@@ -158,6 +196,14 @@ interface AuditLogRow {
   target_id?: string | null;
   metadata_json?: string | null;
   created_at: string;
+}
+
+interface SyntheticIngestControl {
+  ok?: boolean;
+  enabled: boolean;
+  configured_enabled: boolean;
+  persisted_enabled?: boolean | null;
+  updated_at?: string | null;
 }
 
 interface DashboardRow {
@@ -662,7 +708,10 @@ function DashTable({ data }: { data: DashboardRow[] }) {
 }
 
 function App() {
-  const [view, setView] = useState<ViewMode>('search');
+  const [view, setView] = useState<ViewMode>(() => {
+    if (typeof window === 'undefined') return 'search';
+    return readViewFromLocation(window.location) || 'search';
+  });
 
   const [query, setQuery] = useState('');
   const [timeFrom, setTimeFrom] = useState(() => {
@@ -748,6 +797,9 @@ function App() {
   const [adminRoles, setAdminRoles] = useState<RoleRow[]>([]);
   const [adminMappings, setAdminMappings] = useState<GroupRoleMappingRow[]>([]);
   const [auditRows, setAuditRows] = useState<AuditLogRow[]>([]);
+  const [syntheticIngestControl, setSyntheticIngestControl] = useState<SyntheticIngestControl | null>(null);
+  const [syntheticControlLoading, setSyntheticControlLoading] = useState(false);
+  const [adminToast, setAdminToast] = useState<string | null>(null);
 
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRoleIds, setInviteRoleIds] = useState('viewer');
@@ -766,6 +818,10 @@ function App() {
 
   const highlightTerms = useMemo(() => extractHighlightTerms(query), [query]);
   const canOpenAdmin = user?.role === 'admin' || user?.role === 'superadmin';
+  const setAddressableView = useCallback((nextView: ViewMode, options?: { replace?: boolean }) => {
+    setView(nextView);
+    writeViewToLocation(nextView, options);
+  }, []);
 
   const localFacets = useMemo(() => {
     return {
@@ -1205,7 +1261,7 @@ function App() {
       const to = now.toISOString();
       const response = await apiFetch('/search', {
         method: 'POST',
-        body: JSON.stringify({ ppl, from, to, limit: 500 })
+        body: JSON.stringify({ ppl, time: { from, to }, limit: 500 })
       });
       const body = await response.json() as { results?: DashboardRow[]; events?: DashboardRow[] };
       if (response.ok) {
@@ -1268,11 +1324,11 @@ function App() {
 
       setSaveName('');
       await loadSavedSearches();
-      setView('saved');
+      setAddressableView('saved');
     } catch (requestError) {
       setSavedError(String(requestError));
     }
-  }, [apiFetch, loadSavedSearches, query, saveName]);
+  }, [apiFetch, loadSavedSearches, query, saveName, setAddressableView]);
 
   const deleteSavedSearch = useCallback(async (id: string) => {
     try {
@@ -1364,8 +1420,8 @@ function App() {
     setScheduleFormPpl(query);
     setScheduleFormName('');
     setShowScheduleForm(true);
-    setView('scheduled');
-  }, [query]);
+    setAddressableView('scheduled');
+  }, [query, setAddressableView]);
 
   const loadAlerts = useCallback(async () => {
     setAlertsLoading(true);
@@ -1512,17 +1568,19 @@ function App() {
     setAdminLoading(true);
     setAdminError(null);
     try {
-      const [usersRes, rolesRes, mappingsRes, auditRes] = await Promise.all([
+      const [usersRes, rolesRes, mappingsRes, auditRes, syntheticRes] = await Promise.all([
         apiFetch('/users'),
         apiFetch('/roles'),
         apiFetch('/rbac/mappings'),
-        apiFetch('/audit?limit=100')
+        apiFetch('/audit?limit=100'),
+        apiFetch('/admin/synthetic-ingest')
       ]);
 
       const usersBody = await usersRes.json() as AdminUserRow[] | { error?: string };
       const rolesBody = await rolesRes.json() as RoleRow[] | { error?: string };
       const mappingsBody = await mappingsRes.json() as GroupRoleMappingRow[] | { error?: string };
       const auditBody = await auditRes.json() as AuditLogRow[] | { error?: string };
+      const syntheticBody = await syntheticRes.json() as SyntheticIngestControl | { error?: string };
 
       if (!usersRes.ok || ('error' in usersBody && usersBody.error)) {
         throw new Error(('error' in usersBody && usersBody.error) ? usersBody.error : 'Failed to load users');
@@ -1536,17 +1594,77 @@ function App() {
       if (!auditRes.ok || ('error' in auditBody && auditBody.error)) {
         throw new Error(('error' in auditBody && auditBody.error) ? auditBody.error : 'Failed to load audit');
       }
+      if (!syntheticRes.ok || ('error' in syntheticBody && syntheticBody.error)) {
+        throw new Error(('error' in syntheticBody && syntheticBody.error) ? syntheticBody.error : 'Failed to load synthetic ingest control');
+      }
 
       setAdminUsers(usersBody as AdminUserRow[]);
       setAdminRoles(rolesBody as RoleRow[]);
       setAdminMappings(mappingsBody as GroupRoleMappingRow[]);
       setAuditRows(auditBody as AuditLogRow[]);
+      setSyntheticIngestControl(syntheticBody as SyntheticIngestControl);
     } catch (requestError) {
       setAdminError(String(requestError));
     } finally {
       setAdminLoading(false);
     }
   }, [apiFetch]);
+
+  const setSyntheticIngestEnabled = useCallback(async (enabled: boolean) => {
+    setSyntheticControlLoading(true);
+    setAdminError(null);
+    try {
+      const response = await apiFetch('/admin/synthetic-ingest', {
+        method: 'POST',
+        body: JSON.stringify({ enabled, trigger_run: enabled })
+      });
+      const body = await response.json() as {
+        error?: string;
+        control?: SyntheticIngestControl;
+      };
+      if (!response.ok || body.error) {
+        setAdminError(body.error || 'Failed to update synthetic ingest control');
+        return;
+      }
+      if (body.control) {
+        setSyntheticIngestControl(body.control);
+      }
+      await loadAdminData();
+    } catch (requestError) {
+      setAdminError(String(requestError));
+    } finally {
+      setSyntheticControlLoading(false);
+    }
+  }, [apiFetch, loadAdminData]);
+
+  const runSyntheticIngestNow = useCallback(async () => {
+    setSyntheticControlLoading(true);
+    setAdminError(null);
+    try {
+      const response = await apiFetch('/admin/synthetic-ingest/run', {
+        method: 'POST'
+      });
+      const body = await response.json() as {
+        error?: string;
+      };
+      if (!response.ok || body.error) {
+        setAdminError(body.error || 'Failed to trigger synthetic ingest run');
+        return;
+      }
+      setAdminToast('Synthetic ingest run triggered.');
+      await loadAdminData();
+    } catch (requestError) {
+      setAdminError(String(requestError));
+    } finally {
+      setSyntheticControlLoading(false);
+    }
+  }, [apiFetch, loadAdminData]);
+
+  useEffect(() => {
+    if (!adminToast) return;
+    const timeoutId = globalThis.setTimeout(() => setAdminToast(null), 2600);
+    return () => globalThis.clearTimeout(timeoutId);
+  }, [adminToast]);
 
   const createInvite = useCallback(async () => {
     const email = inviteEmail.trim().toLowerCase();
@@ -1695,8 +1813,8 @@ function App() {
 
   const applySavedSearch = useCallback((saved: SavedSearch) => {
     setQuery(saved.query);
-    setView('search');
-  }, []);
+    setAddressableView('search');
+  }, [setAddressableView]);
 
   const applyFacetFilter = useCallback((key: 'indexName' | 'service' | 'level' | 'host' | 'statusCode', value: string) => {
     const nextState: Partial<SearchFilterState> = {};
@@ -1717,20 +1835,36 @@ function App() {
       nextState.statusCode = value;
     }
 
-    setView('search');
+    setAddressableView('search');
     setCursor(null);
     setActiveIndex(-1);
     void runSearch({ append: false, cursor: null, filterOverrides: nextState });
-  }, [runSearch]);
+  }, [runSearch, setAddressableView]);
 
   const runPivot = useCallback((term: string) => {
     const nextQuery = `${query} ${term}`.trim();
     setQuery(nextQuery);
-    setView('search');
+    setAddressableView('search');
     setCursor(null);
     setActiveIndex(-1);
     void runSearch({ append: false, cursor: null, queryOverride: nextQuery });
-  }, [query, runSearch]);
+  }, [query, runSearch, setAddressableView]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const syncViewFromLocation = () => {
+      const nextView = readViewFromLocation(window.location);
+      if (!nextView) return;
+      setView((current) => (current === nextView ? current : nextView));
+    };
+
+    window.addEventListener('popstate', syncViewFromLocation);
+    window.addEventListener('hashchange', syncViewFromLocation);
+    return () => {
+      window.removeEventListener('popstate', syncViewFromLocation);
+      window.removeEventListener('hashchange', syncViewFromLocation);
+    };
+  }, []);
 
   useEffect(() => {
     if (view === 'dashboard') {
@@ -1745,10 +1879,10 @@ function App() {
       if (canOpenAdmin) {
         void loadAdminData();
       } else {
-        setView('search');
+        setAddressableView('search', { replace: true });
       }
     }
-  }, [view, canOpenAdmin, loadAdminData, loadDashboard, loadSavedSearches, loadScheduledSearches, loadAlerts]);
+  }, [view, canOpenAdmin, loadAdminData, loadDashboard, loadSavedSearches, loadScheduledSearches, loadAlerts, setAddressableView]);
 
   useEffect(() => {
     if (selectedDashboardId && view === 'dashboard') {
@@ -1789,9 +1923,9 @@ function App() {
 
   useEffect(() => {
     if (!authLoading && !user && view !== 'search') {
-      setView('search');
+      setAddressableView('search', { replace: true });
     }
-  }, [authLoading, user, view]);
+  }, [authLoading, user, view, setAddressableView]);
 
   useEffect(() => {
     if (resultType !== 'events' || results.length === 0) {
@@ -1862,14 +1996,14 @@ function App() {
       <nav className="nav">
         <div className="nav-brand">EdgeData</div>
         <div className="nav-tabs">
-          <button className={view === 'search' ? 'active' : ''} onClick={() => setView('search')}>Log Explorer</button>
-          <button className={view === 'dashboard' ? 'active' : ''} onClick={() => setView('dashboard')}>Dashboards</button>
-          <button className={view === 'alerts' ? 'active' : ''} onClick={() => setView('alerts')}>Alerts</button>
-          <button className={view === 'saved' ? 'active' : ''} onClick={() => setView('saved')}>Saved Searches</button>
-          <button className={view === 'scheduled' ? 'active' : ''} onClick={() => setView('scheduled')}>Scheduled</button>
-          <button className={view === 'livetail' ? 'active' : ''} onClick={() => setView('livetail')}>Live Tail</button>
+          <button className={view === 'search' ? 'active' : ''} onClick={() => setAddressableView('search')}>Log Explorer</button>
+          <button className={view === 'dashboard' ? 'active' : ''} onClick={() => setAddressableView('dashboard')}>Dashboards</button>
+          <button className={view === 'alerts' ? 'active' : ''} onClick={() => setAddressableView('alerts')}>Alerts</button>
+          <button className={view === 'saved' ? 'active' : ''} onClick={() => setAddressableView('saved')}>Saved Searches</button>
+          <button className={view === 'scheduled' ? 'active' : ''} onClick={() => setAddressableView('scheduled')}>Scheduled</button>
+          <button className={view === 'livetail' ? 'active' : ''} onClick={() => setAddressableView('livetail')}>Live Tail</button>
           {canOpenAdmin && (
-            <button className={view === 'admin' ? 'active' : ''} onClick={() => setView('admin')}>Admin</button>
+            <button className={view === 'admin' ? 'active' : ''} onClick={() => setAddressableView('admin')}>Admin</button>
           )}
         </div>
         <div className="nav-auth">
@@ -2215,64 +2349,9 @@ function App() {
         )}
 
         {view === 'dashboard' && (
-          <div className="dashboard-view">
-            {dashboardError && <div className="error-banner">{dashboardError}</div>}
-            {dashboardLoading && <div className="empty-state"><p>Loading dashboards...</p></div>}
-
-            {!dashboardLoading && (
-              <>
-                <div className="dashboard-toolbar">
-                  <div className="dashboard-tabs">
-                    {pplDashboards.map(d => (
-                      <button
-                        key={d.id}
-                        className={selectedDashboardId === d.id ? 'active' : 'secondary'}
-                        onClick={() => setSelectedDashboardId(d.id)}
-                      >
-                        {d.name}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="dashboard-time-controls">
-                    {[{label: '15m', mins: 15}, {label: '1h', mins: 60}, {label: '4h', mins: 240}, {label: '24h', mins: 1440}, {label: '7d', mins: 10080}].map(opt => (
-                      <button
-                        key={opt.mins}
-                        className={dashboardTimeMinutes === opt.mins ? 'active time-btn' : 'secondary time-btn'}
-                        onClick={() => setDashboardTimeMinutes(opt.mins)}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                    <button className="secondary time-btn" onClick={refreshAllPanels}>Refresh</button>
-                  </div>
-                </div>
-
-                {dashboardPanels.length === 0 && pplDashboards.length === 0 && (
-                  <div className="empty-state"><p>No dashboards configured yet.</p></div>
-                )}
-              </>
-            )}
-
-            {dashboardPanels.length > 0 && (
-              <div className="dashboard-grid">
-                {dashboardPanels.map(panel => (
-                  <div key={panel.id} className={`dash-card ${panel.viz_type === 'counter' ? 'dash-card-sm' : ''}`}>
-                    <div className="dash-card-header">
-                      <h3 className="dash-card-title">{panel.title}</h3>
-                      <button className="dash-refresh-btn" onClick={() => void executePanelQuery(panel.id, panel.ppl, dashboardTimeMinutes)}>↻</button>
-                    </div>
-                    {panelLoading[panel.id] && <div className="dash-card-loading">Loading...</div>}
-                    {!panelLoading[panel.id] && (!panelResults[panel.id] || panelResults[panel.id].length === 0) && (
-                      <div className="dash-card-loading">No data</div>
-                    )}
-                    {!panelLoading[panel.id] && panelResults[panel.id] && panelResults[panel.id].length > 0 && (
-                      <DashPanelContent vizType={panel.viz_type} data={panelResults[panel.id]} />
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          <Suspense fallback={<div className="empty-state"><p>Loading dashboard builder...</p></div>}>
+            <DashboardPage apiFetch={apiFetch} />
+          </Suspense>
         )}
 
         {view === 'alerts' && (
@@ -2361,87 +2440,183 @@ function App() {
 
         {view === 'admin' && (
           <div className="admin-view">
+            <div className="admin-header">
+              <h2>Administration</h2>
+              <span className="admin-subtitle">{adminUsers.length} user{adminUsers.length !== 1 ? 's' : ''} &middot; {adminRoles.length} role{adminRoles.length !== 1 ? 's' : ''}</span>
+            </div>
+
+            {adminToast && <div className="success-banner">{adminToast}</div>}
             {adminError && <div className="error-banner">{adminError}</div>}
             {adminLoading && <div className="empty-state"><p>Loading admin data...</p></div>}
 
             {!adminLoading && (
               <div className="admin-grid">
-                <div className="card">
-                  <h3>Invite User</h3>
-                  <div className="alert-form-grid">
-                    <input
-                      type="email"
-                      value={inviteEmail}
-                      onChange={(event) => setInviteEmail(event.target.value)}
-                      placeholder="user@company.com"
-                    />
-                    <select value={inviteAuthMode} onChange={(event) => setInviteAuthMode(event.target.value as 'access_sso' | 'local_password')}>
-                      <option value="access_sso">Access SSO</option>
-                      <option value="local_password">Local Password</option>
-                    </select>
-                    <input
-                      type="text"
-                      value={inviteRoleIds}
-                      onChange={(event) => setInviteRoleIds(event.target.value)}
-                      placeholder="viewer,analyst"
-                    />
+                <div className="admin-card">
+                  <div className="admin-section-title">
+                    <span className="section-icon synthetic">S</span>
+                    Synthetic Ingest Control
                   </div>
-                  <button className="secondary" onClick={() => void createInvite()}>Create Invite</button>
+                  <div className="admin-form-row">
+                    <div className="admin-form-group">
+                      <label>Current runtime state</label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span className={`status-badge ${syntheticIngestControl?.enabled ? 'active' : 'disabled'}`}>
+                          {syntheticIngestControl?.enabled ? 'enabled' : 'disabled'}
+                        </span>
+                        {syntheticIngestControl?.updated_at && (
+                          <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                            updated {formatDateTime(syntheticIngestControl.updated_at)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      className="admin-submit"
+                      onClick={() => void setSyntheticIngestEnabled(true)}
+                      disabled={syntheticControlLoading || !!syntheticIngestControl?.enabled}
+                    >
+                      {syntheticControlLoading ? 'Updating...' : 'Start Synthetic Ingest'}
+                    </button>
+                    <button
+                      className="secondary"
+                      onClick={() => void runSyntheticIngestNow()}
+                      disabled={syntheticControlLoading}
+                    >
+                      Run Once Now
+                    </button>
+                    <button
+                      className="danger"
+                      onClick={() => void setSyntheticIngestEnabled(false)}
+                      disabled={syntheticControlLoading || !syntheticIngestControl?.enabled}
+                    >
+                      Stop
+                    </button>
+                  </div>
+                  <p style={{ marginTop: 10, fontSize: 12, color: 'var(--muted)' }}>
+                    Start also triggers an immediate synthetic run so Live Tail shows fresh events quickly.
+                  </p>
+                </div>
+
+                <div className="admin-card">
+                  <div className="admin-section-title">
+                    <span className="section-icon invite">+</span>
+                    Invite User
+                  </div>
+                  <div className="admin-form-row">
+                    <div className="admin-form-group">
+                      <label>Email address</label>
+                      <input
+                        type="email"
+                        value={inviteEmail}
+                        onChange={(event) => setInviteEmail(event.target.value)}
+                        placeholder="user@company.com"
+                      />
+                    </div>
+                  </div>
+                  <div className="admin-form-row cols-2">
+                    <div className="admin-form-group">
+                      <label>Auth mode</label>
+                      <select value={inviteAuthMode} onChange={(event) => setInviteAuthMode(event.target.value as 'access_sso' | 'local_password')}>
+                        <option value="access_sso">Access SSO</option>
+                        <option value="local_password">Local Password</option>
+                      </select>
+                    </div>
+                    <div className="admin-form-group">
+                      <label>Roles</label>
+                      <input
+                        type="text"
+                        value={inviteRoleIds}
+                        onChange={(event) => setInviteRoleIds(event.target.value)}
+                        placeholder="viewer, analyst"
+                      />
+                    </div>
+                  </div>
+                  <button className="admin-submit" onClick={() => void createInvite()}>Create Invite</button>
                   {inviteTokenPreview && (
-                    <div className="detail-row" style={{ marginTop: 10 }}>
-                      <strong>One-time Invite Token</strong>
+                    <div className="invite-token-box">
+                      <strong>One-time invite token</strong>
                       <code>{inviteTokenPreview}</code>
                     </div>
                   )}
                 </div>
 
-                <div className="card">
-                  <h3>Create Role</h3>
-                  <div className="alert-form-grid">
-                    <input
-                      type="text"
-                      value={newRoleId}
-                      onChange={(event) => setNewRoleId(event.target.value)}
-                      placeholder="role id (e.g. zeek_viewer)"
-                    />
-                    <input
-                      type="text"
-                      value={newRoleName}
-                      onChange={(event) => setNewRoleName(event.target.value)}
-                      placeholder="Role name"
-                    />
-                    <input
-                      type="text"
-                      value={newRolePermissions}
-                      onChange={(event) => setNewRolePermissions(event.target.value)}
-                      placeholder="search.read,dashboard.read"
-                    />
-                    <textarea
-                      value={newRoleScope}
-                      onChange={(event) => setNewRoleScope(event.target.value)}
-                      placeholder='{"indexes":["*"],"services":["*"],"envs":["*"],"hosts":["*"]}'
-                    />
+                <div className="admin-card">
+                  <div className="admin-section-title">
+                    <span className="section-icon role">R</span>
+                    Create Role
                   </div>
-                  <button className="secondary" onClick={() => void createRole()}>Create Role</button>
+                  <div className="admin-form-row cols-2">
+                    <div className="admin-form-group">
+                      <label>Role ID</label>
+                      <input
+                        type="text"
+                        value={newRoleId}
+                        onChange={(event) => setNewRoleId(event.target.value)}
+                        placeholder="e.g. zeek_viewer"
+                      />
+                    </div>
+                    <div className="admin-form-group">
+                      <label>Display name</label>
+                      <input
+                        type="text"
+                        value={newRoleName}
+                        onChange={(event) => setNewRoleName(event.target.value)}
+                        placeholder="Zeek Viewer"
+                      />
+                    </div>
+                  </div>
+                  <div className="admin-form-row">
+                    <div className="admin-form-group">
+                      <label>Permissions</label>
+                      <input
+                        type="text"
+                        value={newRolePermissions}
+                        onChange={(event) => setNewRolePermissions(event.target.value)}
+                        placeholder="search.read, dashboard.read"
+                      />
+                    </div>
+                  </div>
+                  <div className="admin-form-row">
+                    <div className="admin-form-group">
+                      <label>Data scope (JSON)</label>
+                      <textarea
+                        value={newRoleScope}
+                        onChange={(event) => setNewRoleScope(event.target.value)}
+                        placeholder='{"indexes":["*"],"services":["*"],"envs":["*"],"hosts":["*"]}'
+                      />
+                    </div>
+                  </div>
+                  <button className="admin-submit" onClick={() => void createRole()}>Create Role</button>
                 </div>
 
-                <div className="card">
-                  <h3>Access Group Mapping</h3>
-                  <div className="alert-form-grid">
-                    <input
-                      type="text"
-                      value={newMappingGroup}
-                      onChange={(event) => setNewMappingGroup(event.target.value)}
-                      placeholder="IdP/Access group name"
-                    />
-                    <input
-                      type="text"
-                      value={newMappingRoleId}
-                      onChange={(event) => setNewMappingRoleId(event.target.value)}
-                      placeholder="role id"
-                    />
+                <div className="admin-card">
+                  <div className="admin-section-title">
+                    <span className="section-icon mapping">G</span>
+                    Access Group Mapping
                   </div>
-                  <button className="secondary" onClick={() => void createMapping()}>Add Mapping</button>
+                  <div className="admin-form-row cols-2">
+                    <div className="admin-form-group">
+                      <label>IdP / Access group</label>
+                      <input
+                        type="text"
+                        value={newMappingGroup}
+                        onChange={(event) => setNewMappingGroup(event.target.value)}
+                        placeholder="engineering-team"
+                      />
+                    </div>
+                    <div className="admin-form-group">
+                      <label>Role ID</label>
+                      <input
+                        type="text"
+                        value={newMappingRoleId}
+                        onChange={(event) => setNewMappingRoleId(event.target.value)}
+                        placeholder="analyst"
+                      />
+                    </div>
+                  </div>
+                  <button className="admin-submit" onClick={() => void createMapping()}>Add Mapping</button>
 
                   <div className="table-wrap">
                     <table className="admin-table">
@@ -2455,12 +2630,12 @@ function App() {
                         {adminMappings.map((mapping) => (
                           <tr key={mapping.id}>
                             <td>{mapping.access_group}</td>
-                            <td>{mapping.role_id}</td>
+                            <td><span className="permission-tag">{mapping.role_id}</span></td>
                           </tr>
                         ))}
                         {adminMappings.length === 0 && (
-                          <tr>
-                            <td colSpan={2}>No mappings yet.</td>
+                          <tr className="empty-row">
+                            <td colSpan={2}>No mappings yet</td>
                           </tr>
                         )}
                       </tbody>
@@ -2468,8 +2643,11 @@ function App() {
                   </div>
                 </div>
 
-                <div className="card admin-span-2">
-                  <h3>Users</h3>
+                <div className="admin-card admin-span-2">
+                  <div className="admin-section-title">
+                    <span className="section-icon users">U</span>
+                    Users
+                  </div>
                   <div className="table-wrap">
                     <table className="admin-table">
                       <thead>
@@ -2484,7 +2662,7 @@ function App() {
                       <tbody>
                         {adminUsers.map((row) => (
                           <tr key={row.id}>
-                            <td>{row.email}</td>
+                            <td><strong>{row.email}</strong></td>
                             <td>
                               <form
                                 className="admin-inline-form"
@@ -2504,8 +2682,12 @@ function App() {
                                 <button className="secondary" type="submit">Set</button>
                               </form>
                             </td>
-                            <td>{row.enabled ? 'active' : 'disabled'}</td>
-                            <td>{row.last_login_at ? formatDateTime(row.last_login_at) : 'never'}</td>
+                            <td>
+                              <span className={`status-badge ${row.enabled ? 'active' : 'disabled'}`}>
+                                {row.enabled ? 'Active' : 'Disabled'}
+                              </span>
+                            </td>
+                            <td>{row.last_login_at ? formatDateTime(row.last_login_at) : <span style={{ color: 'var(--muted)', fontStyle: 'italic' }}>never</span>}</td>
                             <td>
                               {row.enabled ? (
                                 <button className="danger" onClick={() => void updateUserEnabled(row, 0)}>Disable</button>
@@ -2516,8 +2698,8 @@ function App() {
                           </tr>
                         ))}
                         {adminUsers.length === 0 && (
-                          <tr>
-                            <td colSpan={5}>No users.</td>
+                          <tr className="empty-row">
+                            <td colSpan={5}>No users</td>
                           </tr>
                         )}
                       </tbody>
@@ -2525,8 +2707,11 @@ function App() {
                   </div>
                 </div>
 
-                <div className="card">
-                  <h3>Roles</h3>
+                <div className="admin-card">
+                  <div className="admin-section-title">
+                    <span className="section-icon roles">R</span>
+                    Roles
+                  </div>
                   <div className="table-wrap">
                     <table className="admin-table">
                       <thead>
@@ -2539,14 +2724,17 @@ function App() {
                       <tbody>
                         {adminRoles.map((role) => (
                           <tr key={role.id}>
-                            <td>{role.id}{role.system_role ? ' (system)' : ''}</td>
-                            <td>{parseStringArray(role.permissions_json).join(', ')}</td>
-                            <td>{role.scope_json}</td>
+                            <td>
+                              <strong>{role.id}</strong>
+                              {role.system_role && <span className="system-badge">system</span>}
+                            </td>
+                            <td>{parseStringArray(role.permissions_json).map((p) => <span key={p} className="permission-tag">{p}</span>)}</td>
+                            <td><span className="scope-cell" title={role.scope_json}>{role.scope_json}</span></td>
                           </tr>
                         ))}
                         {adminRoles.length === 0 && (
-                          <tr>
-                            <td colSpan={3}>No roles.</td>
+                          <tr className="empty-row">
+                            <td colSpan={3}>No roles</td>
                           </tr>
                         )}
                       </tbody>
@@ -2554,8 +2742,11 @@ function App() {
                   </div>
                 </div>
 
-                <div className="card">
-                  <h3>Audit Log</h3>
+                <div className="admin-card">
+                  <div className="admin-section-title">
+                    <span className="section-icon audit">A</span>
+                    Audit Log
+                  </div>
                   <div className="table-wrap">
                     <table className="admin-table">
                       <thead>
@@ -2569,15 +2760,15 @@ function App() {
                       <tbody>
                         {auditRows.map((row) => (
                           <tr key={row.id}>
-                            <td>{formatDateTime(row.created_at)}</td>
-                            <td>{row.actor_email || row.actor_principal || 'system'}</td>
-                            <td>{row.action}</td>
-                            <td>{`${row.target_type || '-'}:${row.target_id || '-'}`}</td>
+                            <td style={{ whiteSpace: 'nowrap' }}>{formatDateTime(row.created_at)}</td>
+                            <td>{row.actor_email || row.actor_principal || <span style={{ color: 'var(--muted)', fontStyle: 'italic' }}>system</span>}</td>
+                            <td><span className="audit-action">{row.action}</span></td>
+                            <td><span className="audit-target">{row.target_type || '-'}:{row.target_id || '-'}</span></td>
                           </tr>
                         ))}
                         {auditRows.length === 0 && (
-                          <tr>
-                            <td colSpan={4}>No audit records.</td>
+                          <tr className="empty-row">
+                            <td colSpan={4}>No audit records</td>
                           </tr>
                         )}
                       </tbody>

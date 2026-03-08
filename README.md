@@ -153,6 +153,8 @@ Query worker:
 - `QUERY_ANALYST_TOKEN` (optional bearer token for analyst role)
 - `QUERY_ADMIN_TOKEN` (optional bearer token for admin role)
 - `OPS_WAE` analytics dataset binding (optional operational metrics)
+- `SYNTHETIC_SERVICE` service binding to `synthetic-worker` (required for admin synthetic ingest controls)
+- Wrangler secret `SYNTHETIC_RUN_SECRET` (must match `synthetic-worker`; used by query worker admin proxy for `/admin/synthetic-ingest`)
 - Wrangler secret `AUTH_BOOTSTRAP_PASSWORD`
 - Wrangler secret `AUTH_BOOTSTRAP_SUPERADMIN_PASSWORD` (preferred; falls back to `AUTH_BOOTSTRAP_PASSWORD`)
 - Wrangler secret `AUTH_SESSION_SECRET`
@@ -178,12 +180,14 @@ Synthetic worker:
 - `INGEST_SERVICE` service binding to `ingest-worker` (preferred)
 - `INGEST_URL` (defaults to deployed ingest-worker URL)
 - `SYNTHETIC_ENABLED` (`"true"`/`"false"`, default `"true"`)
-- `SYNTHETIC_BATCH_SIZE` (default `30`, hard-capped in code)
-- `SYNTHETIC_PROFILE` (`basic` or `realistic`, default `realistic`)
-- `SYNTHETIC_INDEX` (default `default`)
-- `SYNTHETIC_SERVICE` (default `edgedata-demo`)
+- `SYNTHETIC_BATCH_SIZE` (base batch size, default `48`)
+- `SYNTHETIC_BATCH_MIN` (optional lower bound for per-run variability, default derived from base)
+- `SYNTHETIC_BATCH_MAX` (optional upper bound for per-run variability, default derived from base)
+- `SYNTHETIC_PROFILE` (`basic`, `realistic`, or `otel-demo`/`otel`; default `otel-demo`)
+- `SYNTHETIC_INDEX` (default `otel-demo`)
+- `SYNTHETIC_SERVICE` (default `frontend`)
 - `SYNTHETIC_ENV` (default `demo`)
-- `SYNTHETIC_HOST_PREFIX` (default `edgedata-cron`)
+- `SYNTHETIC_HOST_PREFIX` (default `otel-demo-node`)
 - `SYNTHETIC_REGION` (default `us`)
 - Wrangler secret `INGEST_SECRET` (must match ingest-worker auth secret)
 - Wrangler secret `SYNTHETIC_RUN_SECRET` (optional; protects manual `/run`)
@@ -229,6 +233,9 @@ Query worker:
 - `GET /rbac/mappings`
 - `POST /rbac/mappings`
 - `GET /audit`
+- `GET /admin/synthetic-ingest`
+- `POST /admin/synthetic-ingest`
+- `POST /admin/synthetic-ingest/run`
 - `GET /saved-searches`
 - `POST /saved-searches`
 - `PUT /saved-searches/:id`
@@ -263,6 +270,8 @@ Alert worker:
 Synthetic worker:
 
 - `GET /health`
+- `GET /control` (reads runtime synthetic ingest toggle; requires bearer token via `SYNTHETIC_RUN_SECRET`)
+- `POST /control` (updates runtime synthetic ingest toggle; requires bearer token via `SYNTHETIC_RUN_SECRET`)
 - `POST /run` (manual synthetic run; requires bearer token via `SYNTHETIC_RUN_SECRET`)
 - Cron trigger every 15 minutes (default)
 
@@ -305,7 +314,9 @@ Optional manual trigger secret:
 npx wrangler secret put SYNTHETIC_RUN_SECRET --config workers/synthetic-worker/wrangler.toml
 ```
 
-Default schedule is every 15 minutes with small batches (`30` events/run), which is designed to stay comfortably within Workers free-tier request budgets.
+Default schedule is every 30 minutes with small variable batches (`12..48` events/run) to stay safely within free-tier envelopes while still producing realistic traffic swings.
+
+Migration `deploy/migrations/008_otel_saved_scheduled_showcase.sql` seeds OTel-focused saved searches and scheduled searches for a ready-to-demo operational workflow.
 
 ## Optional Terraform Bootstrap
 

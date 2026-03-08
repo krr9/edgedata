@@ -135,6 +135,13 @@ CREATE INDEX IF NOT EXISTS idx_invites_email ON invitations(email);
 CREATE INDEX IF NOT EXISTS idx_invites_status ON invitations(status);
 CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log(created_at DESC);
 
+-- Runtime feature flags and controls
+CREATE TABLE IF NOT EXISTS runtime_flags (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 -- Scheduled searches
 CREATE TABLE IF NOT EXISTS scheduled_searches (
   id TEXT PRIMARY KEY,
@@ -187,6 +194,13 @@ CREATE TABLE IF NOT EXISTS dashboard_panels (
   title TEXT NOT NULL,
   ppl TEXT NOT NULL,
   viz_type TEXT NOT NULL DEFAULT 'table',
+  widget_type TEXT NOT NULL DEFAULT 'table',
+  query_text TEXT NOT NULL DEFAULT '',
+  query_mode TEXT NOT NULL DEFAULT 'ppl',
+  viz_config_json TEXT NOT NULL DEFAULT '{}',
+  layout_json TEXT NOT NULL DEFAULT '{}',
+  bindings_json TEXT NOT NULL DEFAULT '{}',
+  display_options_json TEXT NOT NULL DEFAULT '{}',
   time_window_minutes INTEGER NOT NULL DEFAULT 60,
   refresh_seconds INTEGER NOT NULL DEFAULT 0,
   options_json TEXT NOT NULL DEFAULT '{}',

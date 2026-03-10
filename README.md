@@ -107,19 +107,36 @@ npm run demo:zeek
 Dry-run Worker bundles:
 
 ```bash
-npx wrangler deploy --dry-run --config workers/ingest-worker/wrangler.toml
-npx wrangler deploy --dry-run --config workers/query-worker/wrangler.toml
-npx wrangler deploy --dry-run --config workers/alert-worker/wrangler.toml
-npx wrangler deploy --dry-run --config workers/synthetic-worker/wrangler.toml
+D1_DATABASE_ID=<d1-database-uuid> \
+npm run deploy:all:d1:dry-run
 ```
 
 Deploy workers (first deployment or updates):
 
 ```bash
-npx wrangler deploy --config workers/ingest-worker/wrangler.toml
-npx wrangler deploy --config workers/query-worker/wrangler.toml
-npx wrangler deploy --config workers/alert-worker/wrangler.toml
-npx wrangler deploy --config workers/synthetic-worker/wrangler.toml
+D1_DATABASE_ID=<d1-database-uuid> \
+npm run deploy:all:d1
+```
+
+Production note:
+
+- `deploy:all:d1` now auto-injects `QUERY_WORKER_URL` for `alert-worker`.
+- For production deploys (`-- --env production`), set one of these first:
+
+```bash
+export QUERY_WORKER_URL="https://<query-worker-prod>.<subdomain>.workers.dev"
+# or reuse QUERY_URL only if it is already the query-worker-prod URL
+export QUERY_URL="https://<query-worker-prod>.<subdomain>.workers.dev"
+```
+
+Single-worker deploy examples:
+
+```bash
+D1_DATABASE_ID=<d1-database-uuid> \
+npm run deploy:query:d1
+
+D1_DATABASE_ID=<d1-database-uuid> \
+bash scripts/wrangler-with-d1.sh --config workers/query-worker/wrangler.toml deploy --dry-run
 ```
 
 How to discover worker URLs on first deployment:
@@ -139,17 +156,14 @@ export VITE_QUERY_API_BASE="$QUERY_URL"
 How to discover D1 database ID on first deployment:
 
 - Create the DB once (or list existing DBs) and copy the returned UUID.
-- Set `database_id` in these files before worker deploys:
-  - `wrangler.toml`
-  - `workers/ingest-worker/wrangler.toml`
-  - `workers/query-worker/wrangler.toml`
-  - `workers/alert-worker/wrangler.toml`
-  - `workers/synthetic-worker/wrangler.toml`
+- Export it for deploy commands (the deploy wrappers inject it into temporary wrangler configs).
 
 ```bash
 npx wrangler d1 create edgedata-db
 # or, if it already exists:
 npx wrangler d1 list
+
+export D1_DATABASE_ID="<d1-database-uuid>"
 ```
 
 Run unit tests for query parser/planner internals:
@@ -201,6 +215,10 @@ Schema file: `schema.sql`
 ## Required Secrets/Vars
 
 Set per worker with Wrangler secrets/vars.
+
+Deployment helper:
+
+- `D1_DATABASE_ID` (required for `deploy:*:d1` scripts; not committed to repository files)
 
 Ingest worker:
 

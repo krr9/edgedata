@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { InvestigationPivots } from './types';
 
 export interface WorkspaceState {
@@ -29,6 +29,7 @@ export function SessionShareBar({
   const [copied, setCopied] = useState(false);
   const [loadingSession, setLoadingSession] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const lastLoadedSessionIdRef = useRef<string | null>(null);
 
   const loadSession = useCallback(
     async (id: string) => {
@@ -53,9 +54,9 @@ export function SessionShareBar({
           : {};
         onRestore({
           scope: {
-            index: loadedScope.index || 'default',
-            service: loadedScope.service || 'unknown',
-            env: loadedScope.env || 'prod'
+            index: loadedScope.index || 'otel-demo',
+            service: loadedScope.service || 'frontend',
+            env: loadedScope.env || 'demo'
           },
           ...loadedState
         });
@@ -69,10 +70,11 @@ export function SessionShareBar({
   );
 
   useEffect(() => {
-    if (sessionIdFromUrl && !loadingSession && !loadError) {
-      void loadSession(sessionIdFromUrl);
-    }
-  }, [sessionIdFromUrl]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!sessionIdFromUrl) return;
+    if (lastLoadedSessionIdRef.current === sessionIdFromUrl) return;
+    lastLoadedSessionIdRef.current = sessionIdFromUrl;
+    void loadSession(sessionIdFromUrl);
+  }, [sessionIdFromUrl, loadSession]);
 
   const handleSave = useCallback(async () => {
     setSaving(true);

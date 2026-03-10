@@ -262,10 +262,36 @@ test('buildBootstrapPayload returns empty pivot_chips when no pivots', () => {
   };
   const result = buildBootstrapPayload(body);
   assert.deepEqual(result.pivot_chips, []);
-  assert.equal(result.scope.index, 'default');
+  assert.equal(result.scope.index, 'otel-demo');
   assert.equal(result.scope.service, 'payments');
   assert.equal(result.scope.env, 'staging');
   assert.ok(Array.isArray(result.timeline));
+});
+
+test('buildBootstrapPayload applies bounded defaults when scope is missing', () => {
+  const body = {
+    source: 'workspace',
+    time: { from: '2026-03-07T10:00:00Z', to: '2026-03-07T11:00:00Z' }
+  };
+  const result = buildBootstrapPayload(body);
+  assert.deepEqual(result.scope, {
+    index: 'otel-demo',
+    service: 'frontend',
+    env: 'demo'
+  });
+  assert.ok(result.starter_queries.every((q) => q.ppl.includes('index="otel-demo"')));
+  assert.ok(result.starter_queries.every((q) => q.ppl.includes('service="frontend"')));
+  assert.ok(result.starter_queries.every((q) => q.ppl.includes('env="demo"')));
+});
+
+test('validateBootstrapRequest accepts wildcard scope values', () => {
+  const body = {
+    source: 'workspace',
+    time: { from: '2026-03-07T10:00:00Z', to: '2026-03-07T11:00:00Z' },
+    scope: { index: '*', service: '*', env: 'demo' }
+  };
+  const result = validateBootstrapRequest(body);
+  assert.equal(result.ok, true);
 });
 
 // --- normalizePivots ---

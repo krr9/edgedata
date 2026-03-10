@@ -17,7 +17,7 @@ import {
   executeTransactionPipeline
 } from '../src/search-stream-core.mjs';
 
-test('isIncrementalStreamPipeline accepts search/where/head only', () => {
+test('isIncrementalStreamPipeline allows common stream-safe event pipelines', () => {
   assert.equal(isIncrementalStreamPipeline([
     { command: 'search', expression: 'timeout' },
     { command: 'where', conditions: [{ field: 'status', operator: '>=', value: 500 }] },
@@ -26,7 +26,18 @@ test('isIncrementalStreamPipeline accepts search/where/head only', () => {
 
   assert.equal(isIncrementalStreamPipeline([
     { command: 'search', expression: 'timeout' },
+    { command: 'sort', keys: [{ field: 'ts', direction: 'desc' }] },
+    { command: 'head', count: 200 }
+  ]), true);
+
+  assert.equal(isIncrementalStreamPipeline([
+    { command: 'search', expression: 'timeout' },
     { command: 'sort', keys: [{ field: 'ts', direction: 'desc' }] }
+  ]), true);
+
+  assert.equal(isIncrementalStreamPipeline([
+    { command: 'search', expression: 'timeout' },
+    { command: 'sort', keys: [{ field: 'service', direction: 'asc' }] }
   ]), false);
 });
 

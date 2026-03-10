@@ -11,6 +11,44 @@ const MAX_TIME_WINDOW_DAYS = {
   phrase: 0.25
 };
 
+const GUARDRAIL_EXPLAINERS = [
+  {
+    code: 'phrase_service_required',
+    test: /phrase search requires service filter/i,
+    title: 'Phrase Search Needs Service Scope',
+    reason: 'Phrase scans are intentionally bounded to a single service to keep cost and latency predictable.',
+    suggestion: 'Add a service filter, for example: | where service=\"checkoutservice\"'
+  },
+  {
+    code: 'phrase_window_max_6h',
+    test: /phrase search limited to 6 hours/i,
+    title: 'Phrase Time Window Exceeded',
+    reason: 'Phrase search is capped at 6 hours because it is the most expensive query mode.',
+    suggestion: 'Narrow the time range to 6 hours or less, or switch to token/structured search first.'
+  },
+  {
+    code: 'token_window_max_14d',
+    test: /token search limited to 14 days/i,
+    title: 'Token Time Window Exceeded',
+    reason: 'Token search is bounded to 14 days to keep candidate expansion predictable.',
+    suggestion: 'Reduce the time range to 14 days or less.'
+  },
+  {
+    code: 'structured_window_max_7d',
+    test: /structured search limited to 7 days/i,
+    title: 'Structured Time Window Exceeded',
+    reason: 'Structured search is capped to reduce broad partition scans.',
+    suggestion: 'Reduce the time range to 7 days or less.'
+  },
+  {
+    code: 'scope_restriction_denied',
+    test: /outside role scope/i,
+    title: 'RBAC Scope Restriction Applied',
+    reason: 'Requested filters are outside the role scope enforced by backend authorization.',
+    suggestion: 'Use allowed index/service/env/host values for your role, or request broader scope access.'
+  }
+];
+
 export function tokenize(text) {
   const cleaned = String(text || '').toLowerCase().normalize('NFKD').replace(/[-_]/g, ' ');
   const parts = cleaned.split(/[^a-z0-9]+/).map((token) => token.trim()).filter(Boolean);
@@ -88,6 +126,8 @@ export function mergeFilters(raw, parsed) {
   if (merged.user_id) filters.user_id = merged.user_id;
   if (merged.src_ip) filters.src_ip = merged.src_ip;
   if (merged.trace_id) filters.trace_id = merged.trace_id;
+  if (merged.span_id) filters.span_id = merged.span_id;
+  if (merged.parent_span_id) filters.parent_span_id = merged.parent_span_id;
   if (merged.request_id) filters.request_id = merged.request_id;
   if (merged.msg_hash) filters.msg_hash = merged.msg_hash;
 
@@ -187,4 +227,22 @@ export function enforceTimeGuardrails(fromIso, toIso, mode) {
     }
     throw new Error(`${mode} search limited to ${maxDays} days`);
   }
+}
+
+export function classifyGuardrailError(message) {
+  const text = String(message || '').trim();
+  if (!text) return null;
+
+  for (const explainer of GUARDRAIL_EXPLAINERS) {
+    if (explainer.test.test(text)) {
+      return {
+        code: explainer.code,
+        title: explainer.title,
+        reason: explainer.reason,
+        suggestion: explainer.suggestion
+      };
+    }
+  }
+
+  return null;
 }

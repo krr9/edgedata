@@ -37,8 +37,20 @@ function rowMatchesCondition(row, condition) {
 
 const STREAMING_COMMANDS = new Set(['search', 'where', 'head', 'eval', 'dedup', 'lookup', 'rex', 'rename']);
 
+function isStreamSafeSortStage(stage) {
+  if (!stage || stage.command !== 'sort') return false;
+  const keys = Array.isArray(stage.keys) ? stage.keys : [];
+  if (keys.length === 0) return false;
+  // Keep incremental streaming only for the common "newest first" sort.
+  return keys.every((key) => key?.field === 'ts' && key?.direction === 'desc');
+}
+
 export function isIncrementalStreamPipeline(stages) {
-  return (stages || []).every(s => STREAMING_COMMANDS.has(s.command) || s.command === 'fields');
+  return (stages || []).every((stage) =>
+    STREAMING_COMMANDS.has(stage.command) ||
+    stage.command === 'fields' ||
+    isStreamSafeSortStage(stage)
+  );
 }
 
 export function applyPostPipeline(events, stages) {

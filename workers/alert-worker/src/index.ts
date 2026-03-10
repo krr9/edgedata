@@ -1,4 +1,8 @@
 import { validateAlertAccessJwtConfig } from '../../shared/access-config.mjs';
+import {
+  buildScheduledSearchQueryRequest,
+  resolveQueryWorkerSearchUrl
+} from './scheduled-search-core.mjs';
 
 export interface Env {
   DB: D1Database;
@@ -15,6 +19,7 @@ export interface Env {
   SLACK_WEBHOOK_URL?: string;
   WEBHOOK_URL?: string;
   QUERY_WORKER_URL?: string;
+  QUERY_WORKER_TOKEN?: string;
 }
 
 interface AccessJwtHeader {
@@ -711,6 +716,7 @@ async function processScheduledSearch(search: ScheduledSearch, env: Env): Promis
   const now = new Date();
   const timeTo = now.toISOString();
   const timeFrom = new Date(now.getTime() - search.time_window_minutes * 60 * 1000).toISOString();
+  const queryWorkerSearchUrl = resolveQueryWorkerSearchUrl(env.QUERY_WORKER_URL);
   const resultId = crypto.randomUUID();
   const actions = safeJsonParse<ScheduledSearchAction[]>(search.actions_json, []);
 
@@ -719,23 +725,32 @@ async function processScheduledSearch(search: ScheduledSearch, env: Env): Promis
   let errorMessage: string | null = null;
 
   try {
-    if (env.QUERY_WORKER_URL) {
-      const response = await fetch(`${env.QUERY_WORKER_URL}/search`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Internal-Caller': 'alert-worker' },
-        body: JSON.stringify({
-          ppl: search.ppl,
-          from: timeFrom,
-          to: timeTo,
-          limit: search.max_results
-        })
-      });
-      if (response.ok) {
-        const body = await response.json() as { results?: Record<string, unknown>[]; events?: Record<string, unknown>[] };
-        results = (body.results || body.events || []).slice(0, search.max_results);
-      } else {
-        throw new Error(`Query worker returned ${response.status}`);
-      }
+    const queryWorkerToken = String(env.QUERY_WORKER_TOKEN || '').trim();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-Internal-Caller': 'alert-worker'
+    };
+    if (queryWorkerToken) {
+      headers.Authorization = `Bearer ${queryWorkerToken}`;
+    }
+
+    const response = await fetch(queryWorkerSearchUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(buildScheduledSearchQueryRequest({
+        ppl: search.ppl,
+        maxResults: search.max_results,
+        from: timeFrom,
+        to: timeTo
+      }))
+    });
+    if (response.ok) {
+      const body = await response.json() as { results?: Record<string, unknown>[]; events?: Record<string, unknown>[] };
+      results = (body.results || body.events || []).slice(0, search.max_results);
+    } else {
+      const responseText = (await response.text().catch(() => '')).trim();
+      const detail = responseText ? ` body=${responseText.slice(0, 180)}` : '';
+      throw new Error(`Query worker returned ${response.status} url=${queryWorkerSearchUrl}${detail}`);
     }
   } catch (err) {
     status = 'error';

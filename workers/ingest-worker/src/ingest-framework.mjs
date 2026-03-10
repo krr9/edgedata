@@ -124,6 +124,58 @@ function toMessage(bodyValue, attributes, severityText) {
   ]) || 'otel log record';
 }
 
+function spanKindLabel(kind) {
+  const n = toNumber(kind);
+  if (n === 1) return 'internal';
+  if (n === 2) return 'server';
+  if (n === 3) return 'client';
+  if (n === 4) return 'producer';
+  if (n === 5) return 'consumer';
+  return 'unspecified';
+}
+
+function spanStatusCodeNumber(spanStatus) {
+  const asNumber = toNumber(spanStatus?.code);
+  return asNumber === undefined ? 0 : Math.trunc(asNumber);
+}
+
+function spanLevel(span, attributes) {
+  const spanStatusCode = spanStatusCodeNumber(span?.status);
+  if (spanStatusCode >= 2) return 'error';
+
+  const httpStatus = toNumber(firstText([
+    attributes['http.response.status_code'],
+    attributes['http.status_code']
+  ]));
+  if (httpStatus !== undefined && httpStatus >= 500) return 'error';
+  if (httpStatus !== undefined && httpStatus >= 400) return 'warn';
+  return 'info';
+}
+
+function spanDurationMs(span) {
+  const start = asString(span?.startTimeUnixNano).trim();
+  const end = asString(span?.endTimeUnixNano).trim();
+  if (!start || !end) return undefined;
+  try {
+    const startNs = BigInt(start);
+    const endNs = BigInt(end);
+    if (endNs < startNs) return undefined;
+    const diffMs = Number((endNs - startNs) / 1000000n);
+    return Number.isFinite(diffMs) ? diffMs : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function spanMessage(spanName, attributes, status) {
+  const primary = asString(spanName).trim();
+  if (primary) return primary;
+  const route = firstText([attributes['http.route'], attributes['url.path'], attributes['rpc.method']]);
+  if (route) return route;
+  if (status && status.trim()) return status.trim();
+  return 'otel span';
+}
+
 const edgeDataJsonParser = {
   id: 'edgedata_json',
   description: 'EdgeData JSON payload: array or { events: [...] }',
@@ -226,6 +278,96 @@ const otlpJsonLogsParser = {
   }
 };
 
+const otlpJsonTracesParser = {
+  id: 'otlp_http_json_traces',
+  description: 'OpenTelemetry OTLP/HTTP JSON traces payload',
+  canParse(context) {
+    const payload = asObject(context.parsedBody);
+    if (!payload) return false;
+    if (Array.isArray(payload.resourceSpans)) return true;
+    if (String(context.path || '').includes('/traces')) return true;
+    return false;
+  },
+  parse(context) {
+    const payload = asObject(context.parsedBody);
+    if (!payload) return { events: [] };
+
+    const resourceSpans = asArray(payload.resourceSpans);
+    const events = [];
+    const defaults = {};
+
+    for (const resourceSpan of resourceSpans) {
+      const resource = asObject(resourceSpan?.resource);
+      const resourceAttrs = attributesToObject(resource?.attributes);
+      const scopeSpans = asArray(resourceSpan?.scopeSpans?.length ? resourceSpan.scopeSpans : resourceSpan?.instrumentationLibrarySpans);
+
+      const resourceService = firstText([resourceAttrs['service.name'], resourceAttrs['service.namespace']]);
+      const resourceEnv = firstText([resourceAttrs['deployment.environment'], resourceAttrs['service.namespace']]);
+      const resourceHost = firstText([resourceAttrs['host.name'], resourceAttrs['k8s.pod.name'], resourceAttrs['container.id']]);
+      const resourceIndex = firstText([resourceAttrs['edgedata.index'], resourceAttrs.index]);
+
+      if (!defaults.service && resourceService) defaults.service = resourceService;
+      if (!defaults.env && resourceEnv) defaults.env = resourceEnv;
+      if (!defaults.host && resourceHost) defaults.host = resourceHost;
+      if (!defaults.index && resourceIndex) defaults.index = resourceIndex;
+
+      for (const scopeSpan of scopeSpans) {
+        const scope = asObject(scopeSpan?.scope || scopeSpan?.instrumentationLibrary);
+        const scopeName = firstText([scope?.name]);
+        const scopeVersion = firstText([scope?.version]);
+
+        for (const span of asArray(scopeSpan?.spans)) {
+          const spanAttrs = attributesToObject(span?.attributes);
+          const spanStatus = asObject(span?.status);
+
+          const status = toNumber(firstText([
+            spanAttrs['http.response.status_code'],
+            spanAttrs['http.status_code'],
+            spanStatus?.code
+          ]));
+          const durationMs = toNumber(firstText([
+            spanAttrs.duration_ms,
+            spanAttrs['duration.ms'],
+            spanAttrs['http.server.duration']
+          ])) ?? spanDurationMs(span);
+
+          const mergedAttrs = {
+            ...spanAttrs,
+            otel_resource: resourceAttrs,
+            otel_scope_name: scopeName,
+            otel_scope_version: scopeVersion,
+            otel_span_kind: spanKindLabel(span?.kind),
+            otel_span_status_code: spanStatusCodeNumber(spanStatus),
+            otel_span_status_message: firstText([spanStatus?.message]) || ''
+          };
+
+          const spanStatusMessage = firstText([spanStatus?.message]);
+          events.push({
+            ts: nanosToIso(span?.startTimeUnixNano) || nanosToIso(span?.endTimeUnixNano),
+            index: firstText([spanAttrs['edgedata.index'], spanAttrs.index, resourceIndex]),
+            service: firstText([spanAttrs['service.name'], resourceService]),
+            env: firstText([spanAttrs['deployment.environment'], resourceEnv]),
+            host: firstText([spanAttrs['host.name'], resourceHost]),
+            level: spanLevel(span, spanAttrs),
+            message: spanMessage(span?.name, spanAttrs, spanStatusMessage),
+            trace_id: firstText([span?.traceId, spanAttrs['trace_id'], spanAttrs['trace.id']]),
+            span_id: firstText([span?.spanId, spanAttrs['span_id'], spanAttrs['span.id']]),
+            parent_span_id: firstText([span?.parentSpanId, spanAttrs['parent_span_id'], spanAttrs['parent.span_id']]),
+            request_id: firstText([span?.spanId, spanAttrs['request_id'], spanAttrs['http.request_id']]),
+            status,
+            duration_ms: durationMs,
+            src_ip: firstText([spanAttrs['client.address'], spanAttrs['net.sock.peer.addr'], spanAttrs['source.ip']]),
+            user_id: firstText([spanAttrs['enduser.id'], spanAttrs['user.id'], spanAttrs.user_id]),
+            attrs: mergedAttrs
+          });
+        }
+      }
+    }
+
+    return { events, defaults };
+  }
+};
+
 const ndjsonParser = {
   id: 'ndjson_lines',
   description: 'NDJSON payload with one JSON object per line',
@@ -254,7 +396,7 @@ const ndjsonParser = {
   }
 };
 
-const PARSERS = [otlpJsonLogsParser, edgeDataJsonParser, ndjsonParser];
+const PARSERS = [otlpJsonLogsParser, otlpJsonTracesParser, edgeDataJsonParser, ndjsonParser];
 
 export function listIngestParsers() {
   return PARSERS.map((parser) => ({

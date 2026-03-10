@@ -23,6 +23,8 @@ interface LogEvent {
   message?: string;
   msg?: string;
   trace_id?: string;
+  span_id?: string;
+  parent_span_id?: string;
   request_id?: string;
   status?: number | string;
   duration_ms?: number | string;
@@ -47,6 +49,8 @@ interface NormalizedEvent {
   message_lc: string;
   msg_hash: string;
   trace_id?: string;
+  span_id?: string;
+  parent_span_id?: string;
   request_id?: string;
   status?: number;
   duration_ms?: number;
@@ -254,6 +258,8 @@ function normalizeEvent(
     message_lc,
     msg_hash: hash40(message_lc),
     trace_id: event.trace_id ? clampString(String(event.trace_id), 256) : undefined,
+    span_id: event.span_id ? clampString(String(event.span_id), 256) : undefined,
+    parent_span_id: event.parent_span_id ? clampString(String(event.parent_span_id), 256) : undefined,
     request_id: event.request_id ? clampString(String(event.request_id), 256) : undefined,
     status: toNumber(event.status),
     duration_ms: toNumber(event.duration_ms),
@@ -604,6 +610,8 @@ function normalizeReprocessEvent(
     message_lc: messageLc,
     msg_hash: clampString(String(record.msg_hash || hash40(messageLc)), 40),
     trace_id: record.trace_id ? clampString(String(record.trace_id), 256) : undefined,
+    span_id: record.span_id ? clampString(String(record.span_id), 256) : undefined,
+    parent_span_id: record.parent_span_id ? clampString(String(record.parent_span_id), 256) : undefined,
     request_id: record.request_id ? clampString(String(record.request_id), 256) : undefined,
     status: toNumber(record.status),
     duration_ms: toNumber(record.duration_ms),
@@ -670,7 +678,11 @@ function normalizeMetricSuffix(value: string): string {
 }
 
 function isIngestEndpoint(pathname: string): boolean {
-  return pathname === '/ingest' || pathname === '/v1/logs' || pathname === '/otlp/v1/logs';
+  return pathname === '/ingest'
+    || pathname === '/v1/logs'
+    || pathname === '/otlp/v1/logs'
+    || pathname === '/v1/traces'
+    || pathname === '/otlp/v1/traces';
 }
 
 async function reprocessRawRange(env: Env, request: ReprocessRequest): Promise<ReprocessSummary> {

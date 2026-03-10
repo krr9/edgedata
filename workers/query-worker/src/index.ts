@@ -1,6 +1,7 @@
 export { TailHub } from './tail-hub.js';
 export { DashboardCache } from './dashboard-cache.js';
 import {
+  classifyGuardrailError,
   enforceTimeGuardrails,
   getDateRange,
   inferSearchMode,
@@ -154,6 +155,8 @@ interface SearchEvent {
   message_lc?: string;
   msg_hash?: string;
   trace_id?: string;
+  span_id?: string;
+  parent_span_id?: string;
   request_id?: string;
   status?: number;
   duration_ms?: number;
@@ -185,6 +188,13 @@ interface PplSearchResponse {
   warning?: string;
 }
 
+interface GuardrailExplanation {
+  code: string;
+  title: string;
+  reason: string;
+  suggestion: string;
+}
+
 interface FacetCount {
   value: string;
   count: number;
@@ -199,6 +209,8 @@ interface SearchSummaryResponse {
   top_terms: FacetCount[];
   field_presence: {
     trace_id: number;
+    span_id: number;
+    parent_span_id: number;
     request_id: number;
     user_id: number;
     src_ip: number;
@@ -236,6 +248,8 @@ interface SearchFilters {
   user_id?: string;
   src_ip?: string;
   trace_id?: string;
+  span_id?: string;
+  parent_span_id?: string;
   request_id?: string;
   msg_hash?: string;
   duration_gt?: number;
@@ -491,6 +505,8 @@ const PPL_PREFILTER_EQ_FIELDS = new Set([
   'user_id',
   'src_ip',
   'trace_id',
+  'span_id',
+  'parent_span_id',
   'request_id',
   'msg_hash'
 ]);
@@ -1205,6 +1221,8 @@ function eventMatchesFilters(event: SearchEvent, filters: SearchFilters): boolea
   if (filters.user_id && event.user_id !== filters.user_id) return false;
   if (filters.src_ip && event.src_ip !== filters.src_ip) return false;
   if (filters.trace_id && event.trace_id !== filters.trace_id) return false;
+  if (filters.span_id && event.span_id !== filters.span_id) return false;
+  if (filters.parent_span_id && event.parent_span_id !== filters.parent_span_id) return false;
   if (filters.request_id && event.request_id !== filters.request_id) return false;
   if (filters.msg_hash && event.msg_hash !== filters.msg_hash) return false;
 
@@ -1641,6 +1659,8 @@ function buildTopTerms(events: SearchEvent[], limit = 20): FacetCount[] {
 function buildFieldPresence(events: SearchEvent[]): SearchSummaryResponse['field_presence'] {
   const result = {
     trace_id: 0,
+    span_id: 0,
+    parent_span_id: 0,
     request_id: 0,
     user_id: 0,
     src_ip: 0,
@@ -1651,6 +1671,8 @@ function buildFieldPresence(events: SearchEvent[]): SearchSummaryResponse['field
 
   for (const event of events) {
     if (event.trace_id) result.trace_id += 1;
+    if (event.span_id) result.span_id += 1;
+    if (event.parent_span_id) result.parent_span_id += 1;
     if (event.request_id) result.request_id += 1;
     if (event.user_id) result.user_id += 1;
     if (event.src_ip) result.src_ip += 1;
@@ -2531,7 +2553,8 @@ async function streamPplSearch(
     } catch (error) {
       await writeNdjsonLine(writer, encoder, {
         type: 'error',
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
+        guardrail: classifyGuardrailError(error instanceof Error ? error.message : String(error)) || undefined
       }).catch(() => undefined);
     } finally {
       await writer.close().catch(() => undefined);
@@ -4534,7 +4557,15 @@ function errorResponse(
 ): Response {
   const status = statusFromError(error, fallback);
   const message = error instanceof Error ? error.message : String(error);
-  return jsonResponse({ error: message }, status, requestCorsHeaders);
+  const guardrail = classifyGuardrailError(message);
+  return jsonResponse(
+    {
+      error: message,
+      ...(guardrail ? { guardrail: guardrail as GuardrailExplanation } : {})
+    },
+    status,
+    requestCorsHeaders
+  );
 }
 
 export default {
@@ -4760,35 +4791,35 @@ export default {
         const scenarios = [
           {
             id: 'synthetic-errors',
-            label: 'Synthetic errors (edgedata-demo)',
-            scope: { index: 'default', service: 'edgedata-demo', env: 'demo' },
+            label: 'Synthetic errors (frontend)',
+            scope: { index: 'otel-demo', service: 'frontend', env: 'demo' },
             time: timeRange,
             pivot_chips: [],
             starter_queries: [
-              { id: 'errors', title: 'Errors', ppl: 'search * | where level="error" | where index="default" and service="edgedata-demo" and env="demo" | head 50' },
-              { id: 'volume', title: 'Volume', ppl: 'search * | where index="default" and service="edgedata-demo" and env="demo" | timechart span=5m count() | head 100' }
+              { id: 'errors', title: 'Errors', ppl: 'search * | where level="error" | where index="otel-demo" and service="frontend" and env="demo" | head 50' },
+              { id: 'volume', title: 'Volume', ppl: 'search * | where index="otel-demo" and service="frontend" and env="demo" | timechart span=5m count() | head 100' }
             ]
           },
           {
-            id: 'zeek-conn',
-            label: 'Zeek connection anomalies',
-            scope: { index: 'default', service: 'zeek-conn', env: 'demo' },
+            id: 'checkout-service',
+            label: 'Checkout service anomalies',
+            scope: { index: 'otel-checkout', service: 'checkoutservice', env: 'demo' },
             time: timeRange,
             pivot_chips: [],
             starter_queries: [
-              { id: 'conn', title: 'Conn anomalies', ppl: 'search s0 rej rst | where index="default" and service="zeek-conn" and env="demo" | head 50' },
-              { id: 'volume', title: 'Volume', ppl: 'search * | where index="default" and service="zeek-conn" and env="demo" | timechart span=5m count() | head 100' }
+              { id: 'errors', title: 'Errors', ppl: 'search * | where level="error" | where index="otel-checkout" and service="checkoutservice" and env="demo" | head 50' },
+              { id: 'volume', title: 'Volume', ppl: 'search * | where index="otel-checkout" and service="checkoutservice" and env="demo" | timechart span=5m count() | head 100' }
             ]
           },
           {
-            id: 'zeek-http',
-            label: 'Zeek HTTP failures',
-            scope: { index: 'default', service: 'zeek-http', env: 'demo' },
+            id: 'payment-service',
+            label: 'Payment service failures',
+            scope: { index: 'otel-payments', service: 'paymentservice', env: 'demo' },
             time: timeRange,
             pivot_chips: [],
             starter_queries: [
-              { id: 'http-errors', title: 'HTTP errors', ppl: 'search * | where index="default" and service="zeek-http" and env="demo" and status>=400 | head 50' },
-              { id: 'volume', title: 'Volume', ppl: 'search * | where index="default" and service="zeek-http" and env="demo" | timechart span=5m count() | head 100' }
+              { id: 'http-errors', title: 'HTTP 4xx/5xx', ppl: 'search * | where index="otel-payments" and service="paymentservice" and env="demo" and status>=400 | head 50' },
+              { id: 'volume', title: 'Volume', ppl: 'search * | where index="otel-payments" and service="paymentservice" and env="demo" | timechart span=5m count() | head 100' }
             ]
           }
         ];

@@ -11,8 +11,8 @@ const RELATED_EVENTS_MAX_CANDIDATES = 100;
 const SESSION_STATE_MAX_BYTES = 65536; // 64KB
 const SESSION_SCOPE_MAX_BYTES = 65536; // 64KB
 
-/** Safe pattern for PPL interpolation: alphanumeric, dot, underscore, hyphen. Max 64 chars. */
-const SCOPE_VALUE_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
+/** Safe pattern for PPL interpolation: alphanumeric, dot, underscore, hyphen, wildcard. Max 64 chars. */
+const SCOPE_VALUE_PATTERN = /^[a-zA-Z0-9._*-]{1,64}$/;
 
 /**
  * Validates a scope value for safe use in PPL string interpolation.
@@ -25,7 +25,7 @@ function validateScopeValue(value, fieldName) {
   const s = String(value || '').trim();
   if (!s) return { ok: false, error: `${fieldName} is required` };
   if (!SCOPE_VALUE_PATTERN.test(s)) {
-    return { ok: false, error: `${fieldName} contains invalid characters (allowed: a-z, A-Z, 0-9, ., _, -)` };
+    return { ok: false, error: `${fieldName} contains invalid characters (allowed: a-z, A-Z, 0-9, ., _, -, *)` };
   }
   return { ok: true };
 }
@@ -113,9 +113,9 @@ export function buildBootstrapPayload(body) {
   const scope = body.scope && typeof body.scope === 'object' && !Array.isArray(body.scope)
     ? body.scope
     : {};
-  const index = String(scope.index || 'default').trim() || 'default';
-  const service = String(scope.service || '').trim() || 'unknown';
-  const env = String(scope.env || '').trim() || 'prod';
+  const index = String(scope.index || 'otel-demo').trim() || 'otel-demo';
+  const service = String(scope.service || '').trim() || 'frontend';
+  const env = String(scope.env || '').trim() || 'demo';
 
   const normalizedScope = { index, service, env };
 
@@ -125,10 +125,15 @@ export function buildBootstrapPayload(body) {
     if (value) pivotChips.push({ key, value });
   }
 
+  const whereConditions = [];
+  if (index && index !== 'default' && index !== '*') whereConditions.push(`index="${index}"`);
+  if (service && service !== 'unknown' && service !== '*') whereConditions.push(`service="${service}"`);
+  if (env && env !== '*') whereConditions.push(`env="${env}"`);
+  const scopedWhere = whereConditions.length > 0 ? ` | where ${whereConditions.join(' and ')}` : '';
   const starterQueries = [
-    { id: 'errors', title: 'Errors', ppl: `search * | where level="error" | where index="${index}" and service="${service}" and env="${env}" | head 50` },
-    { id: 'latency', title: 'Latency', ppl: `search * | where duration_ms>0 | where index="${index}" and service="${service}" and env="${env}" | stats avg(duration_ms) by host | sort -avg_duration_ms | head 20` },
-    { id: 'volume', title: 'Volume', ppl: `search * | where index="${index}" and service="${service}" and env="${env}" | timechart span=5m count() | head 100` }
+    { id: 'errors', title: 'Errors', ppl: `search * | where level="error"${scopedWhere} | head 50` },
+    { id: 'latency', title: 'Latency', ppl: `search * | where duration_ms>0${scopedWhere} | stats avg(duration_ms) by host | sort -avg_duration_ms | head 20` },
+    { id: 'volume', title: 'Volume', ppl: `search *${scopedWhere} | timechart span=5m count() | head 100` }
   ];
 
   const timeline = buildBootstrapTimeline(body.time);

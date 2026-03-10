@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  classifyGuardrailError,
   enforceTimeGuardrails,
   getDateRange,
   inferSearchMode,
@@ -29,8 +30,8 @@ test('parseQueryInput extracts phrase, comparators, filters, and free-text token
 
 test('mergeFilters applies raw filters and lets parsed filters override', () => {
   const merged = mergeFilters(
-    { index: 'SECURITY', service: 'payments', env: 'prod', status: 200 },
-    { service: 'api', status__gte: '500', duration_ms__lt: '1500' }
+    { index: 'SECURITY', service: 'payments', env: 'prod', status: 200, span_id: 'aaa', parent_span_id: 'bbb' },
+    { service: 'api', status__gte: '500', duration_ms__lt: '1500', span_id: 'ccc' }
   );
 
   assert.equal(merged.index, 'security');
@@ -39,6 +40,8 @@ test('mergeFilters applies raw filters and lets parsed filters override', () => 
   assert.equal(merged.status, 200);
   assert.equal(merged.status_gte, 500);
   assert.equal(merged.duration_lt, 1500);
+  assert.equal(merged.span_id, 'ccc');
+  assert.equal(merged.parent_span_id, 'bbb');
 });
 
 test('inferSearchMode chooses phrase > token > structured', () => {
@@ -71,4 +74,16 @@ test('enforceTimeGuardrails enforces phrase/token/structured windows', () => {
   assert.doesNotThrow(() =>
     enforceTimeGuardrails('2026-02-16T00:00:00Z', '2026-02-16T05:59:59Z', 'phrase')
   );
+});
+
+test('classifyGuardrailError returns explainability metadata for common guardrail failures', () => {
+  const phraseService = classifyGuardrailError('Phrase search requires service filter');
+  assert.equal(phraseService?.code, 'phrase_service_required');
+  assert.match(String(phraseService?.suggestion || ''), /service/i);
+
+  const phraseWindow = classifyGuardrailError('Phrase search limited to 6 hours');
+  assert.equal(phraseWindow?.code, 'phrase_window_max_6h');
+
+  const none = classifyGuardrailError('Unknown parser stage');
+  assert.equal(none, null);
 });

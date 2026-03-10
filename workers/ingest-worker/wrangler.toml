@@ -5,6 +5,25 @@ compatibility_date = "2026-02-16"
 [env.production]
 name = "ingest-worker-prod"
 
+[[env.production.r2_buckets]]
+binding = "RAW_BUCKET"
+bucket_name = "edgedata-raw"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[env.production.analytics_engine_datasets]]
+binding = "WAE"
+dataset = "log_metrics"
+
+[env.production.vars]
+INGEST_RATE_LIMIT_PER_MIN = "2400"
+
+[[env.production.services]]
+binding = "QUERY_SERVICE"
+service = "query-worker-prod"
+
 [[r2_buckets]]
 binding = "RAW_BUCKET"
 bucket_name = "edgedata-raw"

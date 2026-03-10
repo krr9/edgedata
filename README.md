@@ -136,6 +136,22 @@ export ALERT_URL="https://<alert-worker>.<subdomain>.workers.dev"
 export VITE_QUERY_API_BASE="$QUERY_URL"
 ```
 
+How to discover D1 database ID on first deployment:
+
+- Create the DB once (or list existing DBs) and copy the returned UUID.
+- Set `database_id` in these files before worker deploys:
+  - `wrangler.toml`
+  - `workers/ingest-worker/wrangler.toml`
+  - `workers/query-worker/wrangler.toml`
+  - `workers/alert-worker/wrangler.toml`
+  - `workers/synthetic-worker/wrangler.toml`
+
+```bash
+npx wrangler d1 create edgedata-db
+# or, if it already exists:
+npx wrangler d1 list
+```
+
 Run unit tests for query parser/planner internals:
 
 ```bash

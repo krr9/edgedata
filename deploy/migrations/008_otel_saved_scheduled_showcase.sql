@@ -43,9 +43,9 @@ INSERT OR IGNORE INTO scheduled_searches (
 VALUES
   (
     'seed-sched-otel-error-rollup',
-    'OTel Demo: 15m Error Rollup',
-    'search * | where index="otel-demo" and level="error" | stats count() by service | sort -count | head 25',
-    30,
+    'OTel Demo: Activity Heartbeat',
+    'search * | stats count() by index, service, env | sort -count | head 50',
+    1440,
     '*/30 * * * *',
     1,
     '[{"type":"summary","retain_days":21}]',
@@ -56,9 +56,9 @@ VALUES
   ),
   (
     'seed-sched-otel-latency-watch',
-    'OTel Demo: 30m Latency Watch',
-    'search * | where index="otel-demo" and duration_ms>=900 | fields ts, service, duration_ms, status, trace_id, message | sort -duration_ms | head 100',
-    60,
+    'OTel Demo: Recent Events Sampler',
+    'search * | fields ts, index, service, env, level, status, duration_ms, message | sort -ts | head 100',
+    1440,
     '0 * * * *',
     1,
     '[{"type":"summary","retain_days":21}]',

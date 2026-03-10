@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-const INGEST_URL = process.env.INGEST_URL || 'https://ingest-worker.example.workers.dev';
-const QUERY_URL = process.env.QUERY_URL || 'https://query-worker.example.workers.dev';
+const INGEST_URL = process.env.INGEST_URL || '';
+const QUERY_URL = process.env.QUERY_URL || '';
 const INGEST_SECRET = process.env.INGEST_SECRET || '';
 const QUERY_AUTH_TOKEN = process.env.QUERY_AUTH_TOKEN || '';
 
@@ -18,6 +18,14 @@ const MIN_QUERY_SUCCESS_RATE = Number(process.env.LOADTEST_MIN_QUERY_SUCCESS_RAT
 
 if (!INGEST_SECRET) {
   console.error('Missing INGEST_SECRET');
+  process.exit(1);
+}
+if (!INGEST_URL) {
+  console.error('Missing INGEST_URL');
+  process.exit(1);
+}
+if (!QUERY_URL) {
+  console.error('Missing QUERY_URL');
   process.exit(1);
 }
 

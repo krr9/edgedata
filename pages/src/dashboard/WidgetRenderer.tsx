@@ -1,7 +1,22 @@
-import ReactECharts from 'echarts-for-react';
-import { Table } from 'antd';
+import ReactEChartsCore from 'echarts-for-react/lib/core';
+import * as echarts from 'echarts/core';
+import { BarChart, LineChart, PieChart } from 'echarts/charts';
+import { GridComponent, LegendComponent, TitleComponent, TooltipComponent } from 'echarts/components';
+import { CanvasRenderer } from 'echarts/renderers';
+import type { EChartsOption } from 'echarts';
 import ReactMarkdown from 'react-markdown';
 import type { DashboardRow, DashboardWidget, WidgetType } from './types';
+
+echarts.use([
+  BarChart,
+  LineChart,
+  PieChart,
+  GridComponent,
+  LegendComponent,
+  TitleComponent,
+  TooltipComponent,
+  CanvasRenderer
+]);
 
 function parseObject(input: string): Record<string, unknown> {
   try {
@@ -44,7 +59,7 @@ function renderChart(widgetType: WidgetType, data: DashboardRow[], title: string
     },
     animationDuration: 240
   };
-  const option =
+  const option: EChartsOption =
     widgetType === 'pie'
       ? {
           title: { text: title, left: 'left', top: 0, textStyle: { fontSize: 12, fontWeight: 600 } },
@@ -54,7 +69,26 @@ function renderChart(widgetType: WidgetType, data: DashboardRow[], title: string
               type: 'pie',
               radius: ['36%', '70%'],
               data: categories.map((name, idx) => ({ name, value: values[idx] })),
-              label: { formatter: '{b}: {d}%' }
+              avoidLabelOverlap: true,
+              minShowLabelAngle: 2,
+              labelLine: {
+                show: true,
+                length: 14,
+                length2: 16,
+                lineStyle: {
+                  color: '#8fb2d6',
+                  width: 1.5
+                }
+              },
+              label: {
+                show: true,
+                formatter: '{b}: {d}%',
+                fontSize: 12,
+                fontWeight: 600,
+                color: '#edf4ff',
+                textBorderColor: 'rgba(8, 20, 44, 0.95)',
+                textBorderWidth: 3
+              }
             }
           ]
         }
@@ -105,7 +139,7 @@ function renderChart(widgetType: WidgetType, data: DashboardRow[], title: string
             }
           ]
         };
-  return <ReactECharts option={option} style={{ height: 230, width: '100%' }} notMerge />;
+  return <ReactEChartsCore echarts={echarts} option={option} style={{ height: 230, width: '100%' }} notMerge />;
 }
 
 function renderKpi(data: DashboardRow[]): JSX.Element {
@@ -123,21 +157,29 @@ function renderKpi(data: DashboardRow[]): JSX.Element {
 
 function renderTable(data: DashboardRow[]): JSX.Element {
   if (data.length === 0) return <div className="widget-empty">No rows.</div>;
-  const columns = Object.keys(data[0]).map((key) => ({
-    title: key.replace(/_/g, ' '),
-    dataIndex: key,
-    key
-  }));
-  const rows = data.slice(0, 50).map((row, index) => ({ ...row, __rowid: `${index}` }));
+  const columns = Object.keys(data[0]);
+  const rows = data.slice(0, 50);
   return (
-    <Table
-      size="small"
-      pagination={false}
-      rowKey="__rowid"
-      columns={columns}
-      dataSource={rows}
-      scroll={{ y: 260 }}
-    />
+    <div className="widget-table-wrap">
+      <table className="widget-table">
+        <thead>
+          <tr>
+            {columns.map((column) => (
+              <th key={column}>{column.replace(/_/g, ' ')}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={`row-${rowIndex}`}>
+              {columns.map((column) => (
+                <td key={`${rowIndex}-${column}`}>{String(row[column] ?? '')}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

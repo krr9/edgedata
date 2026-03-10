@@ -5,6 +5,53 @@ compatibility_date = "2026-02-16"
 [env.production]
 name = "query-worker-prod"
 
+[[env.production.d1_databases]]
+binding = "DB"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_name = "edgedata-db"
+
+[[env.production.r2_buckets]]
+binding = "RAW_BUCKET"
+bucket_name = "edgedata-raw"
+
+[[env.production.analytics_engine_datasets]]
+binding = "WAE"
+dataset = "log_metrics"
+
+[[env.production.services]]
+binding = "SYNTHETIC_SERVICE"
+service = "synthetic-worker"
+
+[env.production.vars]
+CF_ACCOUNT_ID = ""
+REQUIRE_ACCESS_JWT = "true"
+# Replace with your Cloudflare Access application AUD for this environment.
+ACCESS_AUD = "edgedata-query-aud"
+ACCESS_ISSUER = "https://edgedata.cloudflareaccess.com"
+ACCESS_JWKS_URL = ""
+# Replace with your real Access/IdP group names for role mapping.
+ACCESS_SUPERADMIN_GROUPS = "edgedata-superadmins"
+ACCESS_VIEWER_GROUPS = "edgedata-viewers"
+ACCESS_ANALYST_GROUPS = "edgedata-analysts"
+ACCESS_ADMIN_GROUPS = "edgedata-admins"
+ACCESS_ADMIN_EMAILS = ""
+AUTH_ENABLE_LOCAL_LOGIN = "true"
+AUTH_BOOTSTRAP_SUPERADMIN_EMAIL = ""
+AUTH_BOOTSTRAP_EMAIL = ""
+AUTH_INVITE_TTL_HOURS = "48"
+SESSION_TTL_SECONDS = "43200"
+QUERY_RATE_LIMIT_PER_MIN = "600"
+AUTH_LOGIN_RATE_LIMIT_PER_MIN = "60"
+CORS_ORIGINS = "https://edgedata-1fo.pages.dev,https://*.edgedata-1fo.pages.dev"
+# Set to "true" for demo deployments to enable scenario picker in Incident Workspace.
+DEMO_SCENARIOS_ENABLED = "false"
+
+[env.production.durable_objects]
+bindings = [
+  { name = "TAIL_HUB", class_name = "TailHub" },
+  { name = "DASHBOARD_CACHE", class_name = "DashboardCache" }
+]
+
 [[d1_databases]]
 binding = "DB"
 database_id = "REPLACE_WITH_D1_DATABASE_ID"
@@ -34,10 +81,10 @@ ACCESS_SUPERADMIN_GROUPS = "edgedata-superadmins"
 ACCESS_VIEWER_GROUPS = "edgedata-viewers"
 ACCESS_ANALYST_GROUPS = "edgedata-analysts"
 ACCESS_ADMIN_GROUPS = "edgedata-admins"
-ACCESS_ADMIN_EMAILS = "example-team@gmail.com"
+ACCESS_ADMIN_EMAILS = ""
 AUTH_ENABLE_LOCAL_LOGIN = "true"
-AUTH_BOOTSTRAP_SUPERADMIN_EMAIL = "example-team@gmail.com"
-AUTH_BOOTSTRAP_EMAIL = "example-team@gmail.com"
+AUTH_BOOTSTRAP_SUPERADMIN_EMAIL = ""
+AUTH_BOOTSTRAP_EMAIL = ""
 AUTH_INVITE_TTL_HOURS = "48"
 SESSION_TTL_SECONDS = "43200"
 QUERY_RATE_LIMIT_PER_MIN = "600"

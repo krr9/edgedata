@@ -10,6 +10,16 @@ EdgeData is a Cloudflare-operations control layer, not a replacement for Cloudfl
 - Optimize for MTTR reduction, explainable investigations, and repeatable incident response.
 - Keep storage/query backend choices implementation-level and swappable.
 
+## Evidence Pack
+
+Launch-readiness proof artifacts are tracked in [`docs/evidence`](docs/evidence/README.md):
+
+- Benchmark scorecard: [`docs/evidence/benchmark-scorecard-2026-03-09.md`](docs/evidence/benchmark-scorecard-2026-03-09.md)
+- Design-partner outcomes tracker: [`docs/evidence/design-partner-outcomes.md`](docs/evidence/design-partner-outcomes.md)
+- Case-study artifact: [`docs/evidence/case-study-synthetic-alert-to-investigation.md`](docs/evidence/case-study-synthetic-alert-to-investigation.md)
+
+Current design-partner status: `pending` (tracked in `docs/evidence/design-partner-outcomes.md`).
+
 ## Components
 
 - `workers/ingest-worker`: pluggable ingest framework that accepts batched log events (EdgeData JSON, OTLP/HTTP JSON logs, NDJSON), authenticates (Bearer or HMAC), normalizes payloads, writes raw NDJSON to R2, then asynchronously writes WAE metrics and token index shards.
@@ -64,19 +74,34 @@ npm -C pages run build
 Run the public Zeek demo (downloads Zeek baseline logs from the Zeek GitHub repository, ingests, then runs search/dashboard/alert showcase calls):
 
 ```bash
+INGEST_URL=<ingest-worker-url> \
+QUERY_URL=<query-worker-url> \
+ALERT_URL=<alert-worker-url> \
+INGEST_SECRET=<secret> \
 npm run demo:zeek
 ```
 
 If `ALERT_RUN_SECRET` is configured on `alert-worker`, set it before running the demo script:
 
 ```bash
-ALERT_RUN_SECRET=<secret> npm run demo:zeek
+INGEST_URL=<ingest-worker-url> \
+QUERY_URL=<query-worker-url> \
+ALERT_URL=<alert-worker-url> \
+INGEST_SECRET=<secret> \
+ALERT_RUN_SECRET=<secret> \
+npm run demo:zeek
 ```
 
 If query authentication is enabled, include a query bearer token:
 
 ```bash
-QUERY_AUTH_TOKEN=<token> ALERT_RUN_SECRET=<secret> npm run demo:zeek
+INGEST_URL=<ingest-worker-url> \
+QUERY_URL=<query-worker-url> \
+ALERT_URL=<alert-worker-url> \
+INGEST_SECRET=<secret> \
+QUERY_AUTH_TOKEN=<token> \
+ALERT_RUN_SECRET=<secret> \
+npm run demo:zeek
 ```
 
 Dry-run Worker bundles:
@@ -86,6 +111,29 @@ npx wrangler deploy --dry-run --config workers/ingest-worker/wrangler.toml
 npx wrangler deploy --dry-run --config workers/query-worker/wrangler.toml
 npx wrangler deploy --dry-run --config workers/alert-worker/wrangler.toml
 npx wrangler deploy --dry-run --config workers/synthetic-worker/wrangler.toml
+```
+
+Deploy workers (first deployment or updates):
+
+```bash
+npx wrangler deploy --config workers/ingest-worker/wrangler.toml
+npx wrangler deploy --config workers/query-worker/wrangler.toml
+npx wrangler deploy --config workers/alert-worker/wrangler.toml
+npx wrangler deploy --config workers/synthetic-worker/wrangler.toml
+```
+
+How to discover worker URLs on first deployment:
+
+- You do not need to know URLs ahead of time.
+- `wrangler deploy` prints the published `https://<worker-name>.<account-subdomain>.workers.dev` URL.
+- You can also copy the URL from Cloudflare Dashboard -> Workers & Pages -> Worker.
+- Export the URLs for scripts/UI:
+
+```bash
+export QUERY_URL="https://<query-worker>.<subdomain>.workers.dev"
+export INGEST_URL="https://<ingest-worker>.<subdomain>.workers.dev"
+export ALERT_URL="https://<alert-worker>.<subdomain>.workers.dev"
+export VITE_QUERY_API_BASE="$QUERY_URL"
 ```
 
 Run unit tests for query parser/planner internals:
@@ -103,13 +151,19 @@ npm run test:access-config
 Run load-test automation (ingest + query):
 
 ```bash
-INGEST_SECRET=<secret> QUERY_AUTH_TOKEN=<token-if-required> npm run test:load
+INGEST_URL=<ingest-worker-url> \
+QUERY_URL=<query-worker-url> \
+INGEST_SECRET=<secret> \
+QUERY_AUTH_TOKEN=<token-if-required> \
+npm run test:load
 ```
 
 Run raw-to-index reprocessing (dry-run by default):
 
 ```bash
-REPROCESS_SECRET=<secret> npm run ops:reprocess -- --from 2026-02-16 --to 2026-02-18 --service zeek-conn --env demo
+INGEST_URL=<ingest-worker-url> \
+REPROCESS_SECRET=<secret> \
+npm run ops:reprocess -- --from 2026-02-16 --to 2026-02-18 --service zeek-conn --env demo
 ```
 
 Apply reprocessing writes with `--apply`.
@@ -189,9 +243,9 @@ Alert worker:
 Synthetic worker:
 
 - `INGEST_SERVICE` service binding to `ingest-worker` (preferred)
-- `INGEST_URL` (defaults to deployed ingest-worker URL)
+- `INGEST_URL` (required if `INGEST_SERVICE` binding is not used)
 - `SYNTHETIC_ENABLED` (`"true"`/`"false"`, default `"true"`)
-- `SYNTHETIC_BATCH_SIZE` (base batch size, runtime fallback `24`; deployed default `24`)
+- `SYNTHETIC_BATCH_SIZE` (base batch size, runtime fallback `24`; deployed default `48`)
 - `SYNTHETIC_BATCH_MIN` (optional lower bound for per-run variability, default derived from base)
 - `SYNTHETIC_BATCH_MAX` (optional upper bound for per-run variability, default derived from base)
 - `SYNTHETIC_PROFILE` (`basic`, `realistic`, `mixed`, or `otel-demo`/`otel`; deployed default `otel-demo`)
@@ -206,7 +260,7 @@ Synthetic worker:
 
 Pages:
 
-- `VITE_QUERY_API_BASE` (optional, defaults to deployed query worker URL)
+- `VITE_QUERY_API_BASE` (required; set to deployed query-worker URL)
 
 ## API Endpoints
 
@@ -216,6 +270,8 @@ Ingest worker:
 - `POST /ingest`
 - `POST /v1/logs` (OTLP/HTTP JSON logs compatible)
 - `POST /otlp/v1/logs` (OTLP/HTTP JSON logs compatible)
+- `POST /v1/traces` (OTLP/HTTP JSON traces compatible)
+- `POST /otlp/v1/traces` (OTLP/HTTP JSON traces compatible)
 - `POST /reprocess` (rebuild `events/` and `tokens/` from `raw/` date partitions)
 
 Ingest payload formats (`/ingest`, `/v1/logs`, `/otlp/v1/logs`):
@@ -223,6 +279,7 @@ Ingest payload formats (`/ingest`, `/v1/logs`, `/otlp/v1/logs`):
 - EdgeData JSON array: `[{"ts":"...","service":"...","message":"..."}]`
 - EdgeData wrapped JSON: `{"events":[...]}`
 - OpenTelemetry OTLP/HTTP JSON logs: `{"resourceLogs":[...]}`
+- OpenTelemetry OTLP/HTTP JSON traces: `{"resourceSpans":[...]}`
 - NDJSON: one JSON event object per line
 
 Query worker:
@@ -290,7 +347,7 @@ Synthetic worker:
 - `GET /control` (reads runtime synthetic ingest toggle; requires bearer token via `SYNTHETIC_RUN_SECRET`)
 - `POST /control` (updates runtime synthetic ingest toggle; requires bearer token via `SYNTHETIC_RUN_SECRET`)
 - `POST /run` (manual synthetic run; requires bearer token via `SYNTHETIC_RUN_SECRET`)
-- Cron trigger every 15 minutes (default)
+- Cron trigger every 5 minutes (default)
 
 ## AuthZ Model
 
@@ -308,7 +365,29 @@ Authentication is SSO-first (Cloudflare Access JWT) with optional local password
 Run auth + query guardrail integration checks:
 
 ```bash
+QUERY_URL=<query-worker-url> \
+QUERY_AUTH_TOKEN=<token-or-use-email-password> \
 npm run test:prd
+```
+
+Alternative auth mode for `test:prd`:
+
+```bash
+QUERY_URL=<query-worker-url> \
+EMAIL=<admin-email> PASSWORD=<admin-password> \
+npm run test:prd
+```
+
+Run the end-to-end golden activation path (deploy-ready stack):
+
+```bash
+QUERY_URL=<query-worker-url> \
+ALERT_URL=<alert-worker-url> \
+DEEP_LINK_BASE=<pages-url> \
+RUNBOOK_BASE_URL=<runbook-base-url> \
+ALERT_RUN_SECRET=<alert-run-secret> \
+EMAIL=<admin-email> PASSWORD=<admin-password> \
+npm run test:golden-path
 ```
 
 ## Synthetic Data Seeder (Free-Tier-Friendly)
@@ -331,7 +410,7 @@ Optional manual trigger secret:
 npx wrangler secret put SYNTHETIC_RUN_SECRET --config workers/synthetic-worker/wrangler.toml
 ```
 
-Default schedule is every 30 minutes with small variable batches (`12..48` events/run) to stay safely within free-tier envelopes while still producing realistic traffic swings.
+Default schedule is every 5 minutes with variable batches (`24..96` events/run) to keep demo data fresher while maintaining bounded synthetic volume.
 
 Migration `deploy/migrations/008_otel_saved_scheduled_showcase.sql` seeds OTel-focused saved searches and scheduled searches for a ready-to-demo operational workflow.
 

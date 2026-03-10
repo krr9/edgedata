@@ -7,6 +7,33 @@ triggers = { crons = ["* * * * *"] }
 [env.production]
 name = "alert-worker-prod"
 
+[[env.production.d1_databases]]
+binding = "DB"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_name = "edgedata-db"
+
+[[env.production.r2_buckets]]
+binding = "RAW_BUCKET"
+bucket_name = "edgedata-raw"
+
+[[env.production.analytics_engine_datasets]]
+binding = "WAE"
+dataset = "log_metrics"
+
+[env.production.vars]
+CF_ACCOUNT_ID = ""
+REQUIRE_ACCESS_JWT = "true"
+# Replace with your Cloudflare Access application AUD for this environment.
+ACCESS_AUD = "edgedata-alert-aud"
+ACCESS_ISSUER = "https://edgedata.cloudflareaccess.com"
+ACCESS_JWKS_URL = ""
+# Replace with your real Access/IdP admin group name(s).
+ACCESS_ADMIN_GROUPS = "edgedata-admins"
+# Replace with your real admin email allowlist (comma-separated).
+ACCESS_ADMIN_EMAILS = ""
+# Set to your deployed query-worker URL.
+QUERY_WORKER_URL = ""
+
 [[d1_databases]]
 binding = "DB"
 database_id = "REPLACE_WITH_D1_DATABASE_ID"
@@ -29,5 +56,7 @@ ACCESS_ISSUER = "https://edgedata.cloudflareaccess.com"
 ACCESS_JWKS_URL = ""
 # Replace with your real Access/IdP admin group name(s).
 ACCESS_ADMIN_GROUPS = "edgedata-admins"
-ACCESS_ADMIN_EMAILS = "example-team@gmail.com"
+# Replace with your real admin email allowlist (comma-separated).
+ACCESS_ADMIN_EMAILS = ""
+# Set to your deployed query-worker URL.
 QUERY_WORKER_URL = ""

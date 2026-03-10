@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 
-const INGEST_URL = process.env.INGEST_URL || 'https://ingest-worker.example.workers.dev';
-const QUERY_URL = process.env.QUERY_URL || 'https://query-worker.example.workers.dev';
-const ALERT_URL = process.env.ALERT_URL || 'https://alert-worker.example.workers.dev';
+const INGEST_URL = process.env.INGEST_URL || '';
+const QUERY_URL = process.env.QUERY_URL || '';
+const ALERT_URL = process.env.ALERT_URL || '';
 const INGEST_SECRET = process.env.INGEST_SECRET || 'edgedata-test-secret';
 const ALERT_RUN_SECRET = process.env.ALERT_RUN_SECRET || '';
 const QUERY_AUTH_TOKEN = process.env.QUERY_AUTH_TOKEN || '';
+
+if (!INGEST_URL || !QUERY_URL || !ALERT_URL) {
+  console.error('Missing required URLs. Set INGEST_URL, QUERY_URL, and ALERT_URL.');
+  process.exit(1);
+}
 
 const MAX_FILES = Number(process.env.ZEEK_MAX_FILES || 75);
 const MAX_EVENTS = Number(process.env.ZEEK_MAX_EVENTS || 1800);

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-QUERY_URL="${QUERY_URL:-https://query-worker.example.workers.dev}"
-EMAIL="${EMAIL:-example-team@gmail.com}"
-PASSWORD="${PASSWORD:-REDACTED_PASSWORD}"
+QUERY_URL="${QUERY_URL:-}"
+QUERY_AUTH_TOKEN="${QUERY_AUTH_TOKEN:-}"
+EMAIL="${EMAIL:-}"
+PASSWORD="${PASSWORD:-}"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -28,18 +29,32 @@ post_json() {
   fi
 }
 
-echo "[1/5] Login"
-LOGIN_CODE=$(post_json "$QUERY_URL/auth/login" "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" "" "$TMP_DIR/login.json")
-if [[ "$LOGIN_CODE" != "200" ]]; then
-  echo "Login failed (status=$LOGIN_CODE):"
-  cat "$TMP_DIR/login.json"
+TOKEN="$QUERY_AUTH_TOKEN"
+if [[ -z "$QUERY_URL" ]]; then
+  echo "Set QUERY_URL to your deployed query-worker URL."
   exit 1
 fi
-TOKEN=$(/opt/homebrew/bin/node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(j.token||"");' "$TMP_DIR/login.json")
 if [[ -z "$TOKEN" ]]; then
-  echo "Login returned no token"
-  cat "$TMP_DIR/login.json"
-  exit 1
+  if [[ -z "$EMAIL" || -z "$PASSWORD" ]]; then
+    echo "Set QUERY_AUTH_TOKEN or EMAIL+PASSWORD before running this script."
+    exit 1
+  fi
+
+  echo "[1/5] Login"
+  LOGIN_CODE=$(post_json "$QUERY_URL/auth/login" "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" "" "$TMP_DIR/login.json")
+  if [[ "$LOGIN_CODE" != "200" ]]; then
+    echo "Login failed (status=$LOGIN_CODE):"
+    cat "$TMP_DIR/login.json"
+    exit 1
+  fi
+  TOKEN=$(node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(j.token||"");' "$TMP_DIR/login.json")
+  if [[ -z "$TOKEN" ]]; then
+    echo "Login returned no token"
+    cat "$TMP_DIR/login.json"
+    exit 1
+  fi
+else
+  echo "[1/5] Using QUERY_AUTH_TOKEN from environment"
 fi
 
 echo "[2/5] Auth me"

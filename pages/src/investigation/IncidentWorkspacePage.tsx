@@ -6,8 +6,8 @@ import { DemoScenarioPicker, type DemoScenarioSelection } from './DemoScenarioPi
 import type { InvestigationPivots, PivotKey } from './types';
 
 const API_BASE =
-  (import.meta as { env?: Record<string, string> }).env?.VITE_QUERY_API_BASE ||
-  'https://query-worker.example.workers.dev';
+  ((import.meta as { env?: Record<string, string> }).env?.VITE_QUERY_API_BASE || '').trim();
+const API_BASE_MISSING_ERROR = 'Missing VITE_QUERY_API_BASE. Configure your deployed query-worker URL.';
 
 interface BootstrapPayload {
   scope: { index: string; service: string; env: string };
@@ -16,9 +16,60 @@ interface BootstrapPayload {
   timeline?: Array<{ minute: string; count: number }>;
 }
 
+function escapePplValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function buildTimelinePpl(
+  scope: { index: string; service: string; env: string },
+  pivots: InvestigationPivots
+): string {
+  const conditions: string[] = [];
+  if (scope.index && scope.index !== 'default' && scope.index !== '*') {
+    conditions.push(`index="${escapePplValue(scope.index)}"`);
+  }
+  if (scope.service && scope.service !== 'unknown' && scope.service !== '*') {
+    conditions.push(`service="${escapePplValue(scope.service)}"`);
+  }
+  if (scope.env && scope.env !== '*') {
+    conditions.push(`env="${escapePplValue(scope.env)}"`);
+  }
+  if (pivots.trace_id) conditions.push(`trace_id="${escapePplValue(pivots.trace_id)}"`);
+  if (pivots.request_id) conditions.push(`request_id="${escapePplValue(pivots.request_id)}"`);
+  if (pivots.user_id) conditions.push(`user_id="${escapePplValue(pivots.user_id)}"`);
+  if (pivots.msg_hash) conditions.push(`msg_hash="${escapePplValue(pivots.msg_hash)}"`);
+  return `search * | where ${conditions.join(' and ')} | sort -ts | head 500`;
+}
+
+function buildTraceContextPpl(
+  scope: { index: string; service: string; env: string },
+  traceId: string
+): string {
+  const conditions: string[] = [`trace_id="${escapePplValue(traceId)}"`];
+  if (scope.index && scope.index !== 'default' && scope.index !== '*') {
+    conditions.push(`index="${escapePplValue(scope.index)}"`);
+  }
+  if (scope.service && scope.service !== 'unknown' && scope.service !== '*') {
+    conditions.push(`service="${escapePplValue(scope.service)}"`);
+  }
+  if (scope.env && scope.env !== '*') {
+    conditions.push(`env="${escapePplValue(scope.env)}"`);
+  }
+  return `search * | where ${conditions.join(' and ')} | transaction trace_id maxspan=5m maxevents=200 | sort -ts | head 200`;
+}
+
 interface IncidentWorkspacePageProps {
   apiToken: string;
   sessionIdFromUrl: string | null;
+  onRunStarterQuery?: (selection: WorkspaceStarterSelection) => void;
+}
+
+export interface WorkspaceStarterSelection {
+  title: string;
+  ppl: string;
+  scope: { index: string; service: string; env: string };
+  time: { from: string; to: string };
+  pivots: InvestigationPivots;
 }
 
 function defaultTimeRange(): { from: string; to: string } {
@@ -32,14 +83,15 @@ function defaultTimeRange(): { from: string; to: string } {
 
 export function IncidentWorkspacePage({
   apiToken,
-  sessionIdFromUrl
+  sessionIdFromUrl,
+  onRunStarterQuery
 }: IncidentWorkspacePageProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [scope, setScope] = useState<{ index: string; service: string; env: string }>({
-    index: 'default',
-    service: 'unknown',
-    env: 'prod'
+    index: 'otel-demo',
+    service: 'frontend',
+    env: 'demo'
   });
   const [time, setTime] = useState<{ from: string; to: string }>(defaultTimeRange);
   const [pivots, setPivots] = useState<InvestigationPivots>({});
@@ -49,6 +101,9 @@ export function IncidentWorkspacePage({
 
   const apiFetch = useCallback(
     (path: string, init?: RequestInit) => {
+      if (!API_BASE) {
+        return Promise.reject(new Error(API_BASE_MISSING_ERROR));
+      }
       const headers = new Headers(init?.headers);
       if (apiToken) headers.set('Authorization', `Bearer ${apiToken}`);
       return fetch(`${API_BASE}${path}`, { ...init, headers });
@@ -57,9 +112,12 @@ export function IncidentWorkspacePage({
   );
 
   const loadBootstrap = useCallback(
-    async (scopeOverride?: { index: string; service: string; env: string }) => {
+    async (
+      scopeOverride?: { index: string; service: string; env: string },
+      timeOverride?: { from: string; to: string }
+    ) => {
       const s = scopeOverride || scope;
-      const t = time;
+      const t = timeOverride || time;
       setLoading(true);
       setError(null);
       try {
@@ -93,21 +151,23 @@ export function IncidentWorkspacePage({
         setLoading(false);
       }
     },
-    [apiFetch, scope, time]
+    [apiFetch]
   );
 
   const loadSummary = useCallback(
     async (
       scopeOverride?: { index: string; service: string; env: string },
-      timeOverride?: { from: string; to: string }
+      timeOverride?: { from: string; to: string },
+      pivotsOverride?: InvestigationPivots
     ) => {
       const s = scopeOverride || scope;
       const t = timeOverride || time;
+      const p = pivotsOverride || pivots;
       setTimelineLoading(true);
       try {
         const payload = {
           time: { from: t.from, to: t.to },
-          ppl: `search * | where index="${s.index}" and service="${s.service}" and env="${s.env}" | sort -ts | head 500`,
+          ppl: buildTimelinePpl(s, p),
           limit: 500,
           cursor: null
         };
@@ -131,7 +191,7 @@ export function IncidentWorkspacePage({
         setTimelineLoading(false);
       }
     },
-    [apiFetch, scope, time]
+    [apiFetch, pivots, scope, time]
   );
 
 
@@ -141,7 +201,7 @@ export function IncidentWorkspacePage({
       return;
     }
     void loadBootstrap();
-  }, [sessionIdFromUrl]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionIdFromUrl, loadBootstrap]);
 
   useEffect(() => {
     if (!sessionIdFromUrl && !loading && !error && timeline.length === 0) {
@@ -154,7 +214,7 @@ export function IncidentWorkspacePage({
       if (restored.scope) setScope(restored.scope);
       if (restored.time) setTime(restored.time);
       if (restored.pivots) setPivots(restored.pivots);
-      void loadBootstrap(restored.scope);
+      void loadBootstrap(restored.scope, restored.time);
     },
     [loadBootstrap]
   );
@@ -163,9 +223,10 @@ export function IncidentWorkspacePage({
     setPivots((prev) => {
       const next = { ...prev };
       delete next[key];
+      void loadSummary(scope, time, next);
       return next;
     });
-  }, []);
+  }, [loadSummary, scope, time]);
 
   const handleSelectScenario = useCallback(
     (selection: DemoScenarioSelection) => {
@@ -214,17 +275,83 @@ export function IncidentWorkspacePage({
             <p className="empty-card">No starter queries. Run a bootstrap or load a session.</p>
           )}
           <ul className="workspace-starter-list">
-            {starterQueries.map((q) => (
-              <li key={q.id}>
-                <strong>{q.title}</strong>
-                <code className="workspace-ppl">{q.ppl}</code>
-              </li>
-            ))}
+            {starterQueries.map((q) => {
+              const handleOpen = () => {
+                if (!onRunStarterQuery) return;
+                onRunStarterQuery({
+                  title: q.title,
+                  ppl: q.ppl,
+                  scope,
+                  time,
+                  pivots
+                });
+              };
+              return (
+                <li
+                  key={q.id}
+                  className={onRunStarterQuery ? 'interactive' : ''}
+                  role={onRunStarterQuery ? 'button' : undefined}
+                  tabIndex={onRunStarterQuery ? 0 : undefined}
+                  onClick={onRunStarterQuery ? handleOpen : undefined}
+                  onKeyDown={
+                    onRunStarterQuery
+                      ? (event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            handleOpen();
+                          }
+                        }
+                      : undefined
+                  }
+                >
+                  <strong>{q.title}</strong>
+                  <code className="workspace-ppl">{q.ppl}</code>
+                </li>
+              );
+            })}
           </ul>
         </div>
 
         {Object.keys(pivots).length > 0 && (
-          <PivotChips pivots={pivots} onPivotClick={handlePivotClick} />
+          <>
+            <PivotChips pivots={pivots} onPivotClick={handlePivotClick} />
+            {onRunStarterQuery && (
+              <div className="workspace-pivot-actions">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => {
+                    onRunStarterQuery({
+                      title: 'Pivot context',
+                      ppl: buildTimelinePpl(scope, pivots),
+                      scope,
+                      time,
+                      pivots
+                    });
+                  }}
+                >
+                  Open pivots in Search
+                </button>
+                {pivots.trace_id && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => {
+                      onRunStarterQuery({
+                        title: 'Trace context',
+                        ppl: buildTraceContextPpl(scope, pivots.trace_id as string),
+                        scope,
+                        time,
+                        pivots
+                      });
+                    }}
+                  >
+                    Open trace context
+                  </button>
+                )}
+              </div>
+            )}
+          </>
         )}
 
         <InvestigationTimeline

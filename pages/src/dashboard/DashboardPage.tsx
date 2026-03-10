@@ -1,10 +1,13 @@
-import { Button, Segmented, Space, Switch, message } from 'antd';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { WidgetGrid } from './WidgetGrid';
-import { WidgetEditorDrawer } from './WidgetEditorDrawer';
 import type { DashboardSummary, DashboardWidget, DashboardRow, WidgetType } from './types';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
+
+const WidgetEditorDrawer = lazy(async () => {
+  const mod = await import('./WidgetEditorDrawer');
+  return { default: mod.WidgetEditorDrawer };
+});
 
 const TIME_PRESETS = [
   { label: '15m', value: 15 },
@@ -69,8 +72,13 @@ export function DashboardPage({
   const [drawerMode, setDrawerMode] = useState<'create' | 'edit'>('create');
   const [activeWidgetId, setActiveWidgetId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [flashMessage, setFlashMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const inFlightRef = useRef<Map<string, Promise<void>>>(new Map());
   const snapshotRef = useRef<Map<string, DashboardWidget[]>>(new Map());
+
+  const showFlash = useCallback((kind: 'success' | 'error', text: string) => {
+    setFlashMessage({ kind, text });
+  }, []);
 
   const selectedWidget = useMemo(
     () => widgets.find((widget) => widget.id === activeWidgetId) || null,
@@ -190,16 +198,16 @@ export function DashboardPage({
         })
       });
       if (!response.ok) throw new Error('Failed to save layout');
-      message.success('Layout saved');
+      showFlash('success', 'Layout saved');
       clearDashboardWidgetCache(selectedDashboardId);
       await loadWidgets(selectedDashboardId);
       await refreshAll();
     } catch (requestError) {
-      message.error(String(requestError));
+      showFlash('error', String(requestError));
     } finally {
       setSaving(false);
     }
-  }, [apiFetch, dirtyLayout, loadWidgets, refreshAll, selectedDashboardId]);
+  }, [apiFetch, dirtyLayout, loadWidgets, refreshAll, selectedDashboardId, showFlash]);
 
   const openCreateDrawer = () => {
     setDrawerMode('create');
@@ -251,11 +259,11 @@ export function DashboardPage({
       await loadWidgets(selectedDashboardId);
       await refreshAll();
     } catch (requestError) {
-      message.error(String(requestError));
+      showFlash('error', String(requestError));
     } finally {
       setSaving(false);
     }
-  }, [apiFetch, drawerMode, loadWidgets, refreshAll, selectedDashboardId, selectedWidget]);
+  }, [apiFetch, drawerMode, loadWidgets, refreshAll, selectedDashboardId, selectedWidget, showFlash]);
 
   const deleteActiveWidget = useCallback(async () => {
     if (!selectedDashboardId || !selectedWidget) return;
@@ -270,11 +278,11 @@ export function DashboardPage({
       await loadWidgets(selectedDashboardId);
       await refreshAll();
     } catch (requestError) {
-      message.error(String(requestError));
+      showFlash('error', String(requestError));
     } finally {
       setSaving(false);
     }
-  }, [apiFetch, loadWidgets, refreshAll, selectedDashboardId, selectedWidget]);
+  }, [apiFetch, loadWidgets, refreshAll, selectedDashboardId, selectedWidget, showFlash]);
 
   const duplicateWidget = useCallback(async (widgetId: string) => {
     if (!selectedDashboardId) return;
@@ -301,11 +309,11 @@ export function DashboardPage({
       await loadWidgets(selectedDashboardId);
       await refreshAll();
     } catch (requestError) {
-      message.error(String(requestError));
+      showFlash('error', String(requestError));
     } finally {
       setSaving(false);
     }
-  }, [apiFetch, loadWidgets, refreshAll, selectedDashboardId, widgets]);
+  }, [apiFetch, loadWidgets, refreshAll, selectedDashboardId, showFlash, widgets]);
 
   const deleteWidgetFromGrid = useCallback(async (widgetId: string) => {
     if (!selectedDashboardId) return;
@@ -317,11 +325,11 @@ export function DashboardPage({
       await loadWidgets(selectedDashboardId);
       await refreshAll();
     } catch (requestError) {
-      message.error(String(requestError));
+      showFlash('error', String(requestError));
     } finally {
       setSaving(false);
     }
-  }, [apiFetch, loadWidgets, refreshAll, selectedDashboardId]);
+  }, [apiFetch, loadWidgets, refreshAll, selectedDashboardId, showFlash]);
 
   useEffect(() => {
     void loadDashboards();
@@ -341,43 +349,68 @@ export function DashboardPage({
     void refreshAll();
   }, [widgets, dashboardMinutes, refreshAll]);
 
+  useEffect(() => {
+    if (!flashMessage || typeof window === 'undefined') return;
+    const timer = window.setTimeout(() => setFlashMessage(null), 2800);
+    return () => window.clearTimeout(timer);
+  }, [flashMessage]);
+
   return (
     <div className="dashboard-builder">
       {error && <div className="error-banner">{error}</div>}
+      {flashMessage && (
+        <div className={flashMessage.kind === 'success' ? 'success-banner' : 'error-banner'}>
+          {flashMessage.text}
+        </div>
+      )}
       <div className="dashboard-builder-toolbar card">
-        <Space wrap>
-          <Segmented
-            options={dashboards.map((dashboard) => ({ label: dashboard.name, value: dashboard.id }))}
-            value={selectedDashboardId || undefined}
-            onChange={(value) => setSelectedDashboardId(String(value))}
-          />
-          <Segmented
-            options={TIME_PRESETS.map((preset) => ({ label: preset.label, value: preset.value }))}
-            value={dashboardMinutes}
-            onChange={(value) => {
-              const mins = Number(value);
-              setDashboardMinutes(mins);
-              void refreshAll(mins);
-            }}
-          />
-          <Button onClick={() => void refreshAll()}>Refresh All</Button>
-          <Space size="small">
+        <div className="dashboard-toolbar-controls">
+          <select
+            className="dashboard-toolbar-select"
+            value={selectedDashboardId || ''}
+            onChange={(event) => setSelectedDashboardId(event.target.value)}
+          >
+            {dashboards.map((dashboard) => (
+              <option key={dashboard.id} value={dashboard.id}>{dashboard.name}</option>
+            ))}
+          </select>
+          <div className="dashboard-toolbar-presets">
+            {TIME_PRESETS.map((preset) => (
+              <button
+                key={preset.value}
+                type="button"
+                className={`secondary ${dashboardMinutes === preset.value ? 'active' : ''}`}
+                onClick={() => {
+                  setDashboardMinutes(preset.value);
+                  void refreshAll(preset.value);
+                }}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+          <button type="button" className="secondary" onClick={() => void refreshAll()}>
+            Refresh All
+          </button>
+          <label className="dashboard-edit-toggle">
+            <input type="checkbox" checked={editMode} onChange={(event) => setEditMode(event.target.checked)} />
             <span>Edit</span>
-            <Switch checked={editMode} onChange={setEditMode} />
-          </Space>
+          </label>
           {editMode && (
             <>
-              <Button type="primary" onClick={openCreateDrawer}>Add Widget</Button>
-              <Button loading={saving} onClick={() => void saveLayout()}>Save Layout</Button>
+              <button type="button" className="secondary" onClick={openCreateDrawer}>Add Widget</button>
+              <button type="button" className="secondary" disabled={saving} onClick={() => void saveLayout()}>
+                {saving ? 'Saving...' : 'Save Layout'}
+              </button>
             </>
           )}
-        </Space>
+        </div>
       </div>
       {loading && widgets.length === 0 && <div className="empty-state"><p>Loading dashboard…</p></div>}
       {!loading && widgets.length === 0 && (
         <div className="empty-state">
           <p>No widgets configured yet.</p>
-          {editMode && <Button type="primary" onClick={openCreateDrawer}>Add First Widget</Button>}
+          {editMode && <button type="button" className="secondary" onClick={openCreateDrawer}>Add First Widget</button>}
         </div>
       )}
       {widgets.length > 0 && (
@@ -406,15 +439,19 @@ export function DashboardPage({
           }}
         />
       )}
-      <WidgetEditorDrawer
-        open={drawerOpen}
-        mode={drawerMode}
-        widget={selectedWidget}
-        saving={saving}
-        onClose={() => setDrawerOpen(false)}
-        onSave={createOrUpdateWidget}
-        onDelete={deleteActiveWidget}
-      />
+      {drawerOpen && (
+        <Suspense fallback={null}>
+          <WidgetEditorDrawer
+            open={drawerOpen}
+            mode={drawerMode}
+            widget={selectedWidget}
+            saving={saving}
+            onClose={() => setDrawerOpen(false)}
+            onSave={createOrUpdateWidget}
+            onDelete={deleteActiveWidget}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

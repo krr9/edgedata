@@ -36,7 +36,8 @@ export function useAuth(): AuthContextValue {
   return context;
 }
 
-const API_BASE = (import.meta as { env?: Record<string, string> }).env?.VITE_QUERY_API_BASE || 'https://query-worker.example.workers.dev';
+const API_BASE = ((import.meta as { env?: Record<string, string> }).env?.VITE_QUERY_API_BASE || '').trim();
+const API_BASE_MISSING_ERROR = 'Missing VITE_QUERY_API_BASE. Configure your deployed query-worker URL.';
 
 const STORAGE_KEY = 'edgedata_auth';
 
@@ -66,6 +67,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   const fetchCurrentUser = useCallback(async (token: string) => {
+    if (!API_BASE) {
+      localStorage.removeItem(STORAGE_KEY);
+      setState({ user: null, token: null, expiresAt: null, loading: false });
+      return false;
+    }
     try {
       const response = await fetch(`${API_BASE}/auth/me`, {
         headers: { Authorization: `Bearer ${token}` }
@@ -92,6 +98,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [state.token, state.user, fetchCurrentUser]);
 
   const login = useCallback(async (email: string, password: string): Promise<{ error?: string }> => {
+    if (!API_BASE) {
+      return { error: API_BASE_MISSING_ERROR };
+    }
     try {
       const response = await fetch(`${API_BASE}/auth/login`, {
         method: 'POST',

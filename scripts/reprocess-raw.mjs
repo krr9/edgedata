@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 
-const INGEST_URL = process.env.INGEST_URL || 'https://ingest-worker.example.workers.dev';
+const INGEST_URL = process.env.INGEST_URL || '';
 const REPROCESS_SECRET = process.env.REPROCESS_SECRET || process.env.INGEST_SECRET || '';
+
+if (!INGEST_URL) {
+  console.error('Missing INGEST_URL');
+  process.exit(1);
+}
 
 if (!REPROCESS_SECRET) {
   console.error('Missing REPROCESS_SECRET (or INGEST_SECRET)');

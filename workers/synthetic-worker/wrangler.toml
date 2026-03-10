@@ -2,10 +2,34 @@ name = "synthetic-worker"
 main = "src/index.ts"
 compatibility_date = "2026-02-16"
 
-triggers = { crons = ["*/30 * * * *"] }
+triggers = { crons = ["*/5 * * * *"] }
 
 [env.production]
 name = "synthetic-worker-prod"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_name = "edgedata-db"
+
+[[env.production.services]]
+binding = "INGEST_SERVICE"
+service = "ingest-worker-prod"
+
+[env.production.vars]
+SYNTHETIC_ENABLED = "true"
+SYNTHETIC_BATCH_SIZE = "48"
+SYNTHETIC_BATCH_MIN = "24"
+SYNTHETIC_BATCH_MAX = "96"
+SYNTHETIC_PROFILE = "otel-demo"
+SYNTHETIC_INDEX = "otel-demo"
+SYNTHETIC_SERVICE = "frontend"
+SYNTHETIC_ENV = "demo"
+SYNTHETIC_HOST_PREFIX = "otel-demo-node"
+SYNTHETIC_REGION = "us"
+SYNTHETIC_EXTRA_TARGETS = "otel-checkout,checkoutservice,otel-demo;otel-payments,paymentservice,otel-demo"
+# Set to your deployed ingest-worker /ingest endpoint.
+INGEST_URL = ""
 
 [[d1_databases]]
 binding = "DB"
@@ -18,9 +42,9 @@ service = "ingest-worker"
 
 [vars]
 SYNTHETIC_ENABLED = "true"
-SYNTHETIC_BATCH_SIZE = "24"
-SYNTHETIC_BATCH_MIN = "12"
-SYNTHETIC_BATCH_MAX = "48"
+SYNTHETIC_BATCH_SIZE = "48"
+SYNTHETIC_BATCH_MIN = "24"
+SYNTHETIC_BATCH_MAX = "96"
 SYNTHETIC_PROFILE = "otel-demo"
 SYNTHETIC_INDEX = "otel-demo"
 SYNTHETIC_SERVICE = "frontend"
@@ -28,4 +52,5 @@ SYNTHETIC_ENV = "demo"
 SYNTHETIC_HOST_PREFIX = "otel-demo-node"
 SYNTHETIC_REGION = "us"
 SYNTHETIC_EXTRA_TARGETS = "otel-checkout,checkoutservice,otel-demo;otel-payments,paymentservice,otel-demo"
-INGEST_URL = "https://ingest-worker.example.workers.dev/ingest"
+# Set to your deployed ingest-worker /ingest endpoint.
+INGEST_URL = ""

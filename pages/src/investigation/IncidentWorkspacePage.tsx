@@ -106,7 +106,7 @@ export function IncidentWorkspacePage({
       }
       const headers = new Headers(init?.headers);
       if (apiToken) headers.set('Authorization', `Bearer ${apiToken}`);
-      return fetch(`${API_BASE}${path}`, { ...init, headers });
+      return fetch(`${API_BASE}${path}`, { ...init, headers, credentials: init?.credentials ?? 'include' });
     },
     [apiToken]
   );

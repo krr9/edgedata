@@ -22,7 +22,7 @@ import {
   executeRenamePipeline,
   executeTransactionPipeline
 } from './search-stream-core.mjs';
-import { resolveCorsOriginFromPatterns } from './cors-utils.mjs';
+import { allowsCredentialedCors, resolveCorsOriginFromPatterns } from './cors-utils.mjs';
 import {
   buildStarterAlertPackDefinitions,
   extractStarterIdFromParamsJson
@@ -458,6 +458,18 @@ interface InvitationRow {
   accepted_at?: string | null;
 }
 
+interface InvitationViewRow {
+  id: string;
+  email: string;
+  auth_mode: AuthMode;
+  role_ids_json: string;
+  expires_at: string;
+  invited_by: string;
+  status: string;
+  created_at: string;
+  accepted_at?: string | null;
+}
+
 interface AuditLogRow {
   id: string;
   actor_principal?: string | null;
@@ -700,8 +712,10 @@ function resolveCorsOrigin(request: Request, env: Env): string {
 }
 
 function corsHeaders(request: Request, env: Env): Record<string, string> {
+  const origin = resolveCorsOrigin(request, env);
   return {
-    'access-control-allow-origin': resolveCorsOrigin(request, env),
+    'access-control-allow-origin': origin,
+    ...(allowsCredentialedCors(origin) ? { 'access-control-allow-credentials': 'true' } : {}),
     ...BASE_CORS_HEADERS
   };
 }
@@ -3096,8 +3110,8 @@ function normalizeDashboardPanelRow(row: DashboardPanelRow): Record<string, unkn
   };
 }
 
-const DASHBOARD_QUERY_CACHE_TTL_SECONDS = 60;
-const DASHBOARD_QUERY_CACHE_BUCKET_SECONDS = 60;
+const DASHBOARD_QUERY_CACHE_TTL_SECONDS = 120;
+const DASHBOARD_QUERY_CACHE_BUCKET_SECONDS = 120;
 
 function buildScopeCacheKey(scope: DataScope): string {
   const parts = [
@@ -4035,6 +4049,71 @@ async function setUserRoles(env: Env, userId: string, roleIds: string[], actor: 
   }
 }
 
+function parseInvitationRoleIds(roleIdsJson: string): string[] {
+  return Array.from(new Set(parseJsonArray(roleIdsJson, []).map((roleId) => ensureRoleId(String(roleId))).filter(Boolean)));
+}
+
+async function expirePendingInvitations(env: Env): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE invitations
+     SET status = 'expired'
+     WHERE status = 'pending' AND expires_at < ?`
+  ).bind(new Date().toISOString()).run();
+}
+
+async function ensureInvitedUser(env: Env, email: string, authMode: AuthMode): Promise<string> {
+  const existing = await env.DB.prepare(
+    `SELECT id, email, password_hash, role, enabled, created_at, updated_at, last_login_at
+     FROM users
+     WHERE email = ?`
+  ).bind(email).first<UserRow>();
+
+  const now = new Date().toISOString();
+  let userId = existing?.id || crypto.randomUUID();
+  if (!existing) {
+    const placeholderHash = authMode === 'local_password' ? '!invite-pending!' : '!access-sso-only!';
+    const enabled = authMode === 'access_sso' ? 1 : 0;
+    await env.DB.prepare(
+      `INSERT INTO users (id, email, password_hash, role, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, 'viewer', ?, ?, ?)`
+    ).bind(userId, email, placeholderHash, enabled, now, now).run();
+  } else if (authMode === 'access_sso' && existing.enabled !== 1) {
+    await env.DB.prepare('UPDATE users SET enabled = 1, updated_at = ? WHERE id = ?').bind(now, existing.id).run();
+    userId = existing.id;
+  }
+
+  return userId;
+}
+
+async function createInvitation(
+  env: Env,
+  email: string,
+  authMode: AuthMode,
+  roleIds: string[],
+  invitedBy: string
+): Promise<{ invitationId: string; expiresAt: string; inviteToken: string }> {
+  const inviteToken = `${crypto.randomUUID()}.${crypto.randomUUID()}`;
+  const tokenHash = await sha256Hex(inviteToken);
+  const now = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + (asInviteTtlHours(env.AUTH_INVITE_TTL_HOURS) * 60 * 60 * 1000)).toISOString();
+  const invitationId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO invitations (
+      id, email, auth_mode, token_hash, role_ids_json, expires_at, invited_by, status, created_at, accepted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL)`
+  ).bind(
+    invitationId,
+    email,
+    authMode,
+    tokenHash,
+    JSON.stringify(roleIds.map(ensureRoleId)),
+    expiresAt,
+    invitedBy,
+    now
+  ).run();
+  return { invitationId, expiresAt, inviteToken };
+}
+
 async function handleUsers(
   request: Request,
   env: Env,
@@ -4427,6 +4506,47 @@ async function handleAuth(
     }
   }
 
+  if (request.method === 'GET' && pathname === '/auth/invites') {
+    const auth = await authenticateRequest(request, env);
+    assertPermission(auth, 'user.invite');
+    await expirePendingInvitations(env);
+
+    const url = new URL(request.url);
+    const limit = clampLimit(Number(url.searchParams.get('limit') || 200), 500);
+    const requestedStatus = String(url.searchParams.get('status') || 'pending').trim().toLowerCase();
+    const allowedStatuses = new Set(['pending', 'accepted', 'revoked', 'expired', 'all']);
+    const status = allowedStatuses.has(requestedStatus) ? requestedStatus : 'pending';
+
+    const rows = status === 'all'
+      ? await env.DB.prepare(
+        `SELECT id, email, auth_mode, role_ids_json, expires_at, invited_by, status, created_at, accepted_at
+         FROM invitations
+         ORDER BY created_at DESC
+         LIMIT ?`
+      ).bind(limit).all<InvitationViewRow>()
+      : await env.DB.prepare(
+        `SELECT id, email, auth_mode, role_ids_json, expires_at, invited_by, status, created_at, accepted_at
+         FROM invitations
+         WHERE status = ?
+         ORDER BY created_at DESC
+         LIMIT ?`
+      ).bind(status, limit).all<InvitationViewRow>();
+
+    const out = (rows.results || []).map((row) => ({
+      id: row.id,
+      email: row.email,
+      auth_mode: row.auth_mode,
+      role_ids: parseInvitationRoleIds(row.role_ids_json),
+      expires_at: row.expires_at,
+      invited_by: row.invited_by,
+      status: row.status,
+      created_at: row.created_at,
+      accepted_at: row.accepted_at || null
+    }));
+
+    return jsonResponse(out, 200, requestCorsHeaders);
+  }
+
   if (request.method === 'POST' && pathname === '/auth/invite') {
     const auth = await authenticateRequest(request, env);
     assertPermission(auth, 'user.invite');
@@ -4439,57 +4559,124 @@ async function handleAuth(
       return jsonResponse({ error: 'email is required' }, 400, requestCorsHeaders);
     }
 
-    const existing = await env.DB.prepare(
-      `SELECT id, email, password_hash, role, enabled, created_at, updated_at, last_login_at
-       FROM users
-       WHERE email = ?`
-    ).bind(email).first<UserRow>();
-
-    const now = new Date().toISOString();
-    let userId = existing?.id || crypto.randomUUID();
-    if (!existing) {
-      const placeholderHash = authMode === 'local_password' ? '!invite-pending!' : '!access-sso-only!';
-      const enabled = authMode === 'access_sso' ? 1 : 0;
-      await env.DB.prepare(
-        `INSERT INTO users (id, email, password_hash, role, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, 'viewer', ?, ?, ?)`
-      ).bind(userId, email, placeholderHash, enabled, now, now).run();
-    } else if (authMode === 'access_sso' && existing.enabled !== 1) {
-      await env.DB.prepare('UPDATE users SET enabled = 1, updated_at = ? WHERE id = ?').bind(now, existing.id).run();
-      userId = existing.id;
-    }
-
+    const userId = await ensureInvitedUser(env, email, authMode);
     await setUserRoles(env, userId, roleIds, auth.email || auth.principal);
-
-    const rawToken = `${crypto.randomUUID()}.${crypto.randomUUID()}`;
-    const tokenHash = await sha256Hex(rawToken);
-    const expiresAt = new Date(Date.now() + (asInviteTtlHours(env.AUTH_INVITE_TTL_HOURS) * 60 * 60 * 1000)).toISOString();
     await env.DB.prepare(
-      `INSERT INTO invitations (
-        id, email, auth_mode, token_hash, role_ids_json, expires_at, invited_by, status, created_at, accepted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL)`
-    ).bind(
-      crypto.randomUUID(),
-      email,
-      authMode,
-      tokenHash,
-      JSON.stringify(roleIds.map(ensureRoleId)),
-      expiresAt,
-      auth.email || auth.principal,
-      now
-    ).run();
+      `UPDATE invitations
+       SET status = 'revoked'
+       WHERE email = ? AND status = 'pending'`
+    ).bind(email).run();
+    const invite = await createInvitation(env, email, authMode, roleIds, auth.email || auth.principal);
 
     await writeAuditLog(env, auth, 'auth.invite.created', 'user', userId, { email, auth_mode: authMode, role_ids: roleIds }).catch(() => undefined);
     return jsonResponse({
       email,
       auth_mode: authMode,
       role_ids: roleIds,
-      expires_at: expiresAt,
-      invite_token: rawToken
+      expires_at: invite.expiresAt,
+      invite_token: invite.inviteToken
     }, 201, requestCorsHeaders);
   }
 
+  if (request.method === 'POST' && pathname === '/auth/invite/resend') {
+    const auth = await authenticateRequest(request, env);
+    assertPermission(auth, 'user.invite');
+    await expirePendingInvitations(env);
+
+    const body = await request.json() as { id?: string; auth_mode?: AuthMode; role_ids?: string[] };
+    const invitationId = String(body.id || '').trim();
+    if (!invitationId) {
+      return jsonResponse({ error: 'id is required' }, 400, requestCorsHeaders);
+    }
+
+    const existingInvite = await env.DB.prepare(
+      `SELECT id, email, auth_mode, token_hash, role_ids_json, expires_at, invited_by, status, created_at, accepted_at
+       FROM invitations
+       WHERE id = ?`
+    ).bind(invitationId).first<InvitationRow>();
+    if (!existingInvite) {
+      return jsonResponse({ error: 'Invitation not found' }, 404, requestCorsHeaders);
+    }
+    if (existingInvite.status === 'accepted') {
+      return jsonResponse({ error: 'Invitation already accepted' }, 400, requestCorsHeaders);
+    }
+
+    const authMode = body.auth_mode === 'local_password' ? 'local_password' : existingInvite.auth_mode;
+    let roleIds = Array.isArray(body.role_ids) && body.role_ids.length > 0
+      ? body.role_ids.map(ensureRoleId).filter(Boolean)
+      : parseInvitationRoleIds(existingInvite.role_ids_json);
+    if (roleIds.length === 0) {
+      const user = await env.DB.prepare(
+        `SELECT id, email, password_hash, role, enabled, created_at, updated_at, last_login_at
+         FROM users
+         WHERE email = ?`
+      ).bind(existingInvite.email).first<UserRow>();
+      roleIds = user ? await getUserRoleIds(env, user.id) : ['viewer'];
+    }
+
+    const userId = await ensureInvitedUser(env, existingInvite.email, authMode);
+    await setUserRoles(env, userId, roleIds, auth.email || auth.principal);
+    await env.DB.prepare(
+      `UPDATE invitations
+       SET status = 'revoked'
+       WHERE email = ? AND status = 'pending'`
+    ).bind(existingInvite.email).run();
+
+    const invite = await createInvitation(env, existingInvite.email, authMode, roleIds, auth.email || auth.principal);
+    await writeAuditLog(env, auth, 'auth.invite.resent', 'user', userId, {
+      email: existingInvite.email,
+      auth_mode: authMode,
+      role_ids: roleIds,
+      previous_invitation_id: existingInvite.id
+    }).catch(() => undefined);
+
+    return jsonResponse({
+      id: invite.invitationId,
+      email: existingInvite.email,
+      auth_mode: authMode,
+      role_ids: roleIds,
+      expires_at: invite.expiresAt,
+      invite_token: invite.inviteToken
+    }, 201, requestCorsHeaders);
+  }
+
+  if (request.method === 'POST' && pathname === '/auth/invite/revoke') {
+    const auth = await authenticateRequest(request, env);
+    assertPermission(auth, 'user.invite');
+    await expirePendingInvitations(env);
+
+    const body = await request.json() as { id?: string };
+    const invitationId = String(body.id || '').trim();
+    if (!invitationId) {
+      return jsonResponse({ error: 'id is required' }, 400, requestCorsHeaders);
+    }
+
+    const invitation = await env.DB.prepare(
+      `SELECT id, email, auth_mode, token_hash, role_ids_json, expires_at, invited_by, status, created_at, accepted_at
+       FROM invitations
+       WHERE id = ?`
+    ).bind(invitationId).first<InvitationRow>();
+    if (!invitation) {
+      return jsonResponse({ error: 'Invitation not found' }, 404, requestCorsHeaders);
+    }
+    if (invitation.status !== 'pending') {
+      return jsonResponse({ error: `Invitation is already ${invitation.status}` }, 400, requestCorsHeaders);
+    }
+
+    await env.DB.prepare(
+      `UPDATE invitations
+       SET status = 'revoked'
+       WHERE id = ?`
+    ).bind(invitation.id).run();
+    await writeAuditLog(env, auth, 'auth.invite.revoked', 'user', undefined, {
+      invitation_id: invitation.id,
+      email: invitation.email
+    }).catch(() => undefined);
+    return jsonResponse({ ok: true, id: invitation.id, status: 'revoked' }, 200, requestCorsHeaders);
+  }
+
   if (request.method === 'POST' && pathname === '/auth/invite/accept') {
+    await expirePendingInvitations(env);
     const body = await request.json() as { token?: string; password?: string };
     const token = String(body.token || '').trim();
     if (!token) {
@@ -4538,6 +4725,11 @@ async function handleAuth(
        SET status = 'accepted', accepted_at = ?
        WHERE id = ?`
     ).bind(now, invitation.id).run();
+    await env.DB.prepare(
+      `UPDATE invitations
+       SET status = 'revoked'
+       WHERE email = ? AND status = 'pending' AND id != ?`
+    ).bind(invitation.email, invitation.id).run();
 
     await writeAuditLog(env, null, 'auth.invite.accepted', 'user', user.id, { email: invitation.email }).catch(() => undefined);
     return jsonResponse({ ok: true, email: invitation.email }, 200, requestCorsHeaders);

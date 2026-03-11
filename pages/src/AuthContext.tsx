@@ -22,6 +22,7 @@ interface AuthState {
 
 interface AuthContextValue extends AuthState {
   login: (email: string, password: string) => Promise<{ error?: string }>;
+  refresh: () => Promise<{ authenticated: boolean; error?: string }>;
   logout: () => void;
   hasRole: (roles: AuthUser['role'][]) => boolean;
 }
@@ -66,36 +67,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { ...stored, loading: true };
   });
 
-  const fetchCurrentUser = useCallback(async (token: string) => {
+  const fetchCurrentUser = useCallback(async (token: string | null): Promise<boolean> => {
     if (!API_BASE) {
       localStorage.removeItem(STORAGE_KEY);
       setState({ user: null, token: null, expiresAt: null, loading: false });
       return false;
     }
     try {
+      const headers = new Headers();
+      if (token) {
+        headers.set('Authorization', `Bearer ${token}`);
+      }
       const response = await fetch(`${API_BASE}/auth/me`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers,
+        credentials: 'include'
       });
       if (response.ok) {
         const body = await response.json() as { user: AuthUser };
-        setState({ user: body.user, token, expiresAt: null, loading: false });
+        setState({ user: body.user, token: token || null, expiresAt: null, loading: false });
         return true;
       }
     } catch {
       // ignore
     }
-    localStorage.removeItem(STORAGE_KEY);
+    if (token) {
+      localStorage.removeItem(STORAGE_KEY);
+    }
     setState({ user: null, token: null, expiresAt: null, loading: false });
     return false;
   }, []);
 
   useEffect(() => {
-    if (state.token && !state.user) {
-      void fetchCurrentUser(state.token);
-    } else {
+    if (!state.loading) return;
+    if (state.user) {
       setState((prev) => ({ ...prev, loading: false }));
+      return;
     }
-  }, [state.token, state.user, fetchCurrentUser]);
+    void fetchCurrentUser(state.token);
+  }, [state.loading, state.token, state.user, fetchCurrentUser]);
 
   const login = useCallback(async (email: string, password: string): Promise<{ error?: string }> => {
     if (!API_BASE) {
@@ -105,7 +114,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const response = await fetch(`${API_BASE}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
+        body: JSON.stringify({ email, password }),
+        credentials: 'include'
       });
 
       const body = await response.json() as { token?: string; expires_at?: string; user?: AuthUser; error?: string };
@@ -126,6 +136,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const refresh = useCallback(async (): Promise<{ authenticated: boolean; error?: string }> => {
+    setState((prev) => ({ ...prev, loading: true }));
+    const ok = await fetchCurrentUser(state.token);
+    if (ok) return { authenticated: true };
+    return { authenticated: false, error: 'Not authenticated' };
+  }, [fetchCurrentUser, state.token]);
+
   const logout = useCallback(() => {
     localStorage.removeItem(STORAGE_KEY);
     setState({ user: null, token: null, expiresAt: null, loading: false });
@@ -137,7 +154,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [state.user]);
 
   return (
-    <AuthContext.Provider value={{ ...state, login, logout, hasRole }}>
+    <AuthContext.Provider value={{ ...state, login, refresh, logout, hasRole }}>
       {children}
     </AuthContext.Provider>
   );

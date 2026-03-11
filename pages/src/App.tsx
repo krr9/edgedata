@@ -404,6 +404,25 @@ interface GroupRoleMappingRow {
   updated_at?: string | null;
 }
 
+interface AdminInviteRow {
+  id: string;
+  email: string;
+  auth_mode: 'access_sso' | 'local_password';
+  role_ids: string[];
+  expires_at: string;
+  invited_by: string;
+  status: 'pending' | 'accepted' | 'revoked' | 'expired';
+  created_at: string;
+  accepted_at?: string | null;
+}
+
+interface OnboardingChecklistItem {
+  key: string;
+  title: string;
+  done: boolean;
+  detail: string;
+}
+
 interface AuditLogRow {
   id: string;
   actor_principal?: string | null;
@@ -1300,6 +1319,7 @@ function App() {
   const [adminUsers, setAdminUsers] = useState<AdminUserRow[]>([]);
   const [adminRoles, setAdminRoles] = useState<RoleRow[]>([]);
   const [adminMappings, setAdminMappings] = useState<GroupRoleMappingRow[]>([]);
+  const [adminInvites, setAdminInvites] = useState<AdminInviteRow[]>([]);
   const [auditRows, setAuditRows] = useState<AuditLogRow[]>([]);
   const [syntheticIngestControl, setSyntheticIngestControl] = useState<SyntheticIngestControl | null>(null);
   const [syntheticControlLoading, setSyntheticControlLoading] = useState(false);
@@ -1354,6 +1374,75 @@ function App() {
     }
     return items;
   }, [canOpenAdmin]);
+  const onboardingChecklist = useMemo<OnboardingChecklistItem[]>(() => {
+    const parseJsonObject = (raw: string): Record<string, unknown> => {
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+      } catch {
+        return {};
+      }
+    };
+
+    let starterCount = 0;
+    let governedStarterCount = 0;
+    for (const alert of alerts) {
+      const params = parseJsonObject(alert.params_json);
+      if (!params._starter_id) continue;
+      starterCount += 1;
+      const notify = parseJsonObject(alert.notify_json);
+      if (
+        String(notify.deep_link || '').trim() &&
+        String(notify.runbook_url || '').trim() &&
+        String(notify.owner_team || '').trim()
+      ) {
+        governedStarterCount += 1;
+      }
+    }
+
+    const activeUsers = adminUsers.filter((row) => row.enabled === 1).length;
+    const hasPendingInvite = adminInvites.length > 0;
+    const hasStarterCoverage = starterCount >= 3 && governedStarterCount >= 3;
+
+    return [
+      {
+        key: 'mappings',
+        title: 'Access group mappings configured',
+        done: adminMappings.length > 0,
+        detail: adminMappings.length > 0
+          ? `${adminMappings.length} mapping(s) active`
+          : 'Add at least one IdP/Access group mapping'
+      },
+      {
+        key: 'users',
+        title: 'Users onboarded',
+        done: activeUsers >= 2 || hasPendingInvite,
+        detail: activeUsers >= 2
+          ? `${activeUsers} active users`
+          : hasPendingInvite
+            ? `${adminInvites.length} pending invite(s)`
+            : 'Invite at least one additional operator'
+      },
+      {
+        key: 'alerts',
+        title: 'Starter alerts with governance metadata',
+        done: hasStarterCoverage,
+        detail: hasStarterCoverage
+          ? `${governedStarterCount}/${starterCount} starter alerts governed`
+          : 'Apply starter pack and include runbook/deep-link/team metadata'
+      },
+      {
+        key: 'synthetic',
+        title: 'Synthetic ingest enabled',
+        done: Boolean(syntheticIngestControl?.enabled),
+        detail: syntheticIngestControl?.enabled ? 'Enabled' : 'Enable synthetic ingest to validate search and alerts'
+      }
+    ];
+  }, [adminInvites, adminMappings, adminUsers, alerts, syntheticIngestControl?.enabled]);
+  const onboardingDoneCount = useMemo(
+    () => onboardingChecklist.filter((item) => item.done).length,
+    [onboardingChecklist]
+  );
   const resolvedTheme: ThemeMode = themePreference === 'system'
     ? (systemPrefersDark ? 'dark' : 'light')
     : themePreference;
@@ -1619,7 +1708,7 @@ function App() {
     if (apiToken) {
       headers.set('Authorization', `Bearer ${apiToken}`);
     }
-    return fetch(`${API_BASE}${path}`, { ...init, headers });
+    return fetch(`${API_BASE}${path}`, { ...init, headers, credentials: init.credentials ?? 'include' });
   }, [apiToken]);
 
   const closeQuerySuggestions = useCallback(() => {
@@ -2627,19 +2716,23 @@ function App() {
     setAdminLoading(true);
     setAdminError(null);
     try {
-      const [usersRes, rolesRes, mappingsRes, auditRes, syntheticRes] = await Promise.all([
+      const [usersRes, rolesRes, mappingsRes, invitesRes, auditRes, syntheticRes, alertsRes] = await Promise.all([
         apiFetch('/users'),
         apiFetch('/roles'),
         apiFetch('/rbac/mappings'),
+        apiFetch('/auth/invites?status=pending&limit=200'),
         apiFetch('/audit?limit=100'),
-        apiFetch('/admin/synthetic-ingest')
+        apiFetch('/admin/synthetic-ingest'),
+        apiFetch('/alerts')
       ]);
 
       const usersBody = await usersRes.json() as AdminUserRow[] | { error?: string };
       const rolesBody = await rolesRes.json() as RoleRow[] | { error?: string };
       const mappingsBody = await mappingsRes.json() as GroupRoleMappingRow[] | { error?: string };
+      const invitesBody = await invitesRes.json() as AdminInviteRow[] | { error?: string };
       const auditBody = await auditRes.json() as AuditLogRow[] | { error?: string };
       const syntheticBody = await syntheticRes.json() as SyntheticIngestControl | { error?: string };
+      const alertsBody = await alertsRes.json() as AlertDefinition[] | { error?: string };
 
       if (!usersRes.ok || ('error' in usersBody && usersBody.error)) {
         throw new Error(('error' in usersBody && usersBody.error) ? usersBody.error : 'Failed to load users');
@@ -2650,18 +2743,26 @@ function App() {
       if (!mappingsRes.ok || ('error' in mappingsBody && mappingsBody.error)) {
         throw new Error(('error' in mappingsBody && mappingsBody.error) ? mappingsBody.error : 'Failed to load mappings');
       }
+      if (!invitesRes.ok || ('error' in invitesBody && invitesBody.error)) {
+        throw new Error(('error' in invitesBody && invitesBody.error) ? invitesBody.error : 'Failed to load invites');
+      }
       if (!auditRes.ok || ('error' in auditBody && auditBody.error)) {
         throw new Error(('error' in auditBody && auditBody.error) ? auditBody.error : 'Failed to load audit');
       }
       if (!syntheticRes.ok || ('error' in syntheticBody && syntheticBody.error)) {
         throw new Error(('error' in syntheticBody && syntheticBody.error) ? syntheticBody.error : 'Failed to load synthetic ingest control');
       }
+      if (!alertsRes.ok || ('error' in alertsBody && alertsBody.error)) {
+        throw new Error(('error' in alertsBody && alertsBody.error) ? alertsBody.error : 'Failed to load alerts');
+      }
 
       setAdminUsers(usersBody as AdminUserRow[]);
       setAdminRoles(rolesBody as RoleRow[]);
       setAdminMappings(mappingsBody as GroupRoleMappingRow[]);
+      setAdminInvites(invitesBody as AdminInviteRow[]);
       setAuditRows(auditBody as AuditLogRow[]);
       setSyntheticIngestControl(syntheticBody as SyntheticIngestControl);
+      setAlerts(alertsBody as AlertDefinition[]);
     } catch (requestError) {
       setAdminError(String(requestError));
     } finally {
@@ -2755,11 +2856,49 @@ function App() {
       }
       setInviteTokenPreview(body.invite_token || '');
       setInviteEmail('');
+      setAdminToast(`Invite created for ${email}.`);
       await loadAdminData();
     } catch (requestError) {
       setAdminError(String(requestError));
     }
   }, [apiFetch, inviteAuthMode, inviteEmail, inviteRoleIds, loadAdminData]);
+
+  const resendInvite = useCallback(async (invite: AdminInviteRow) => {
+    try {
+      const response = await apiFetch('/auth/invite/resend', {
+        method: 'POST',
+        body: JSON.stringify({ id: invite.id })
+      });
+      const body = await response.json() as { error?: string; invite_token?: string };
+      if (!response.ok || body.error) {
+        setAdminError(body.error || 'Failed to resend invite');
+        return;
+      }
+      setInviteTokenPreview(body.invite_token || '');
+      setAdminToast(`Invite resent for ${invite.email}.`);
+      await loadAdminData();
+    } catch (requestError) {
+      setAdminError(String(requestError));
+    }
+  }, [apiFetch, loadAdminData]);
+
+  const revokeInvite = useCallback(async (invite: AdminInviteRow) => {
+    try {
+      const response = await apiFetch('/auth/invite/revoke', {
+        method: 'POST',
+        body: JSON.stringify({ id: invite.id })
+      });
+      const body = await response.json() as { error?: string };
+      if (!response.ok || body.error) {
+        setAdminError(body.error || 'Failed to revoke invite');
+        return;
+      }
+      setAdminToast(`Invite revoked for ${invite.email}.`);
+      await loadAdminData();
+    } catch (requestError) {
+      setAdminError(String(requestError));
+    }
+  }, [apiFetch, loadAdminData]);
 
   const updateUserEnabled = useCallback(async (userRow: AdminUserRow, enabled: number) => {
     try {
@@ -3060,9 +3199,7 @@ function App() {
   }, [cancelOngoingSearch, loading, runSearch, streaming]);
 
   useEffect(() => {
-    if (view === 'dashboard') {
-      void loadDashboard();
-    } else if (view === 'saved') {
+    if (view === 'saved') {
       void loadSavedSearches();
     } else if (view === 'scheduled') {
       void loadScheduledSearches();
@@ -3075,25 +3212,7 @@ function App() {
         setAddressableView('search', { replace: true });
       }
     }
-  }, [view, canOpenAdmin, loadAdminData, loadDashboard, loadSavedSearches, loadScheduledSearches, loadAlerts, setAddressableView]);
-
-  useEffect(() => {
-    if (selectedDashboardId && view === 'dashboard') {
-      void loadDashboardPanels(selectedDashboardId);
-    }
-  }, [selectedDashboardId, view, loadDashboardPanels]);
-
-  useEffect(() => {
-    if (view === 'dashboard' && dashboardPanels.length > 0) {
-      refreshAllPanels();
-    }
-  }, [view, dashboardPanels.length, refreshAllPanels]);
-
-  useEffect(() => {
-    if (view === 'dashboard' && dashboardPanels.length > 0) {
-      refreshAllPanels();
-    }
-  }, [dashboardTimeMinutes, view, dashboardPanels.length, refreshAllPanels]);
+  }, [view, canOpenAdmin, loadAdminData, loadSavedSearches, loadScheduledSearches, loadAlerts, setAddressableView]);
 
   useEffect(() => {
     if (!workspaceLaunchInfo) return;
@@ -4389,6 +4508,70 @@ function App() {
                       <code>{inviteTokenPreview}</code>
                     </div>
                   )}
+                </div>
+
+                <div className="admin-card admin-span-2">
+                  <div className="admin-section-title">
+                    <span className="section-icon onboarding">O</span>
+                    Onboarding Checklist
+                  </div>
+                  <div className="onboarding-summary">
+                    <strong>{onboardingDoneCount}/{onboardingChecklist.length}</strong> steps complete
+                  </div>
+                  <div className="onboarding-checklist">
+                    {onboardingChecklist.map((item) => (
+                      <div key={item.key} className={`onboarding-check ${item.done ? 'done' : 'todo'}`}>
+                        <span className={`status-badge ${item.done ? 'active' : 'disabled'}`}>
+                          {item.done ? 'Done' : 'Pending'}
+                        </span>
+                        <div className="onboarding-check-copy">
+                          <strong>{item.title}</strong>
+                          <span>{item.detail}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="admin-card">
+                  <div className="admin-section-title">
+                    <span className="section-icon invite">I</span>
+                    Invite Queue
+                  </div>
+                  <div className="table-wrap">
+                    <table className="admin-table">
+                      <thead>
+                        <tr>
+                          <th>Email</th>
+                          <th>Auth Mode</th>
+                          <th>Roles</th>
+                          <th>Expires</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {adminInvites.map((invite) => (
+                          <tr key={invite.id}>
+                            <td><strong>{invite.email}</strong></td>
+                            <td>{invite.auth_mode === 'access_sso' ? 'Access SSO' : 'Local Password'}</td>
+                            <td>{invite.role_ids.map((roleId) => <span key={roleId} className="permission-tag">{roleId}</span>)}</td>
+                            <td style={{ whiteSpace: 'nowrap' }}>{formatDateTime(invite.expires_at)}</td>
+                            <td>
+                              <div className="invite-actions">
+                                <button className="secondary" onClick={() => void resendInvite(invite)}>Resend</button>
+                                <button className="danger" onClick={() => void revokeInvite(invite)}>Revoke</button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                        {adminInvites.length === 0 && (
+                          <tr className="empty-row">
+                            <td colSpan={5}>No pending invites</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
 
                 <div className="admin-card">

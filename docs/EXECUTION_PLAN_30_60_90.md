@@ -37,6 +37,12 @@ Critical gaps from current checklist:
 - Alert-to-investigation loop and runbook governance still under-instrumented for proof-grade outcomes.
 - Product activation path not yet codified as a single guided flow.
 
+Update as of 2026-03-10:
+- Access audience/group pinning checks are now enforced by config validation tests.
+- Golden activation is codified via `npm run test:golden-path`.
+- Alert workflow and runbook governance are surfaced in Alerts UI with direct Investigate/Deep Link/Runbook actions.
+- Search guardrail explainability is surfaced as structured guardrail reasons in API + UI.
+
 ## 4) Priority Order (Non-Negotiable)
 
 1. Reliability/security baseline (auth config correctness, access mapping hardening).  

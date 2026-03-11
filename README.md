@@ -322,7 +322,10 @@ Query worker:
 - `POST /auth/login`
 - `GET /auth/me`
 - `POST /auth/logout`
+- `GET /auth/invites`
 - `POST /auth/invite`
+- `POST /auth/invite/resend`
+- `POST /auth/invite/revoke`
 - `POST /auth/invite/accept`
 - `POST /search`
 - `POST /search/stream` (NDJSON streaming: `meta`, `event`/`row`, `progress`, `final`, `error`)
@@ -393,6 +396,19 @@ Synthetic worker:
 Saved searches are owner-scoped (`created_by`) for non-admin users.
 
 Authentication is SSO-first (Cloudflare Access JWT) with optional local password login (`AUTH_ENABLE_LOCAL_LOGIN=true`).
+
+## Onboarding Checklist
+
+Use the in-app **Settings -> Onboarding Checklist** card and the canonical checklist doc:
+
+- `docs/ONBOARDING_CHECKLIST.md`
+
+Checklist completion is tied to runtime state:
+
+- Access group mappings configured
+- Users onboarded (active users or pending invites)
+- Starter alerts applied with runbook/deep-link/team metadata
+- Synthetic ingest enabled
 
 ## PRD Smoke Tests
 

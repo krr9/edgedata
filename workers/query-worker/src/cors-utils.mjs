@@ -40,3 +40,7 @@ export function resolveCorsOriginFromPatterns(origin, patterns) {
   return allowed[0];
 }
 
+export function allowsCredentialedCors(origin) {
+  const normalized = String(origin || '').trim();
+  return normalized.length > 0 && normalized !== '*';
+}

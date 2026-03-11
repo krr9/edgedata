@@ -1,6 +1,6 @@
 # PRD Closure Checklist
 
-Last updated: 2026-02-18
+Last updated: 2026-03-10
 Source PRD: `docs/PRD.md`
 
 ## P0 (must-have for production readiness)
@@ -20,9 +20,9 @@ Source PRD: `docs/PRD.md`
 
 - [x] Canonical normalization at ingest (`ts,date,hour,service,env,host,level,message,msg_hash,...`)
 - [x] Tri-write pattern (raw + hot metrics + token/event indexes)
-- [ ] Golden activation path codified and validated (`deploy -> ingest -> search -> alert -> deep-link investigation <= 60 min`)
-- [ ] Operator workflow differentiation complete (`alert -> context -> investigation -> runbook` in <= 2 clicks)
-- [ ] Query transparency and explainability complete (mode, candidates, guardrail reasons visible)
+- [x] Golden activation path codified and validated (`deploy -> ingest -> search -> alert -> deep-link investigation <= 60 min`) via `npm run test:golden-path`
+- [x] Operator workflow differentiation complete (`alert -> context -> investigation -> runbook` in <= 2 clicks) via alert governance/quick actions in Pages alerts view
+- [x] Query transparency and explainability complete (mode, candidates, guardrail reasons visible) via search stats + guardrail explanation payloads/UI
 - [ ] Optional provider-managed query-store integration hook available behind non-default toggle
 - [x] Token-candidate planner with guardrails (window/candidate caps)
 
@@ -40,3 +40,4 @@ Source PRD: `docs/PRD.md`
 - Query worker currently performs deep search by scanning R2 objects for `events/` and `tokens/` partitions.
 - This is acceptable for differentiation-focused execution; backend integration with provider-managed query stores remains optional and non-core.
 - Current auth mode is hybrid-safe: Access JWT required by default, with bearer session tokens used by traditional login.
+- Golden-path verification now includes health checks, synthetic ingest trigger, search confirmation, starter alert governance checks, alert evaluation run, and investigation bootstrap checks.

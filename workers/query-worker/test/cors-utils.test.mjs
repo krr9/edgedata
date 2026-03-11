@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  allowsCredentialedCors,
   originMatchesPattern,
   resolveCorsOriginFromPatterns
 } from '../src/cors-utils.mjs';
@@ -49,4 +50,10 @@ test('resolveCorsOriginFromPatterns falls back to first allowlist value', () => 
     'https://*.edgedata-1fo.pages.dev'
   ]);
   assert.equal(resolved, 'https://edgedata-1fo.pages.dev');
+});
+
+test('allowsCredentialedCors only permits concrete origins', () => {
+  assert.equal(allowsCredentialedCors('https://edgedata-1fo.pages.dev'), true);
+  assert.equal(allowsCredentialedCors('*'), false);
+  assert.equal(allowsCredentialedCors(''), false);
 });

@@ -56,6 +56,8 @@ import { statusFromError } from './error-utils.mjs';
 import { seedStarterDashboards } from './starter-dashboards.mjs';
 import { mergePermissionsWithDefaults } from './rbac-core.mjs';
 import { validateQueryAccessJwtConfig } from '../../shared/access-config.mjs';
+import { timingSafeTokenCompare } from '../../shared/timing-safe.mjs';
+import { sanitizeErrorMessage } from '../../shared/sanitize-error.mjs';
 
 export interface Env {
   DB: D1Database;
@@ -677,7 +679,7 @@ const BASE_CORS_HEADERS = {
 
 let jwksCache: { expiresAt: number; keysByKid: Map<string, JsonWebKey> } | null = null;
 
-const PBKDF2_ITERATIONS = 100_000;
+const PBKDF2_ITERATIONS = 600_000;
 const SESSION_TTL_SECONDS = 12 * 60 * 60;
 const DEFAULT_INVITE_TTL_HOURS = 48;
 const DEFAULT_SCOPE: DataScope = { indexes: ['*'], services: ['*'], envs: ['*'], hosts: ['*'] };
@@ -1234,6 +1236,32 @@ function hasPermission(auth: AuthContext, permission: string): boolean {
 function assertPermission(auth: AuthContext, permission: string): void {
   if (!hasPermission(auth, permission)) {
     throw new Error('Forbidden');
+  }
+}
+
+const PRIVILEGED_ROLES = new Set(['superadmin', 'admin']);
+
+function assertCanAssignRoles(auth: AuthContext, roleIds: string[]): void {
+  const requestsPrivileged = roleIds.some((id) => PRIVILEGED_ROLES.has(ensureRoleId(id)));
+  if (!requestsPrivileged) return;
+  if (auth.role !== 'superadmin') {
+    throw new Error('Forbidden: only superadmin can assign admin or superadmin roles');
+  }
+}
+
+async function assertNotLastSuperadmin(env: Env, userId: string): Promise<void> {
+  const superadminCount = await env.DB.prepare(
+    `SELECT COUNT(*) AS cnt FROM user_roles ur
+     JOIN users u ON u.id = ur.user_id
+     WHERE ur.role_id = 'superadmin' AND u.enabled = 1`
+  ).first<{ cnt: number }>();
+  if (!superadminCount || superadminCount.cnt <= 1) {
+    const userHasSuperadmin = await env.DB.prepare(
+      `SELECT 1 FROM user_roles WHERE user_id = ? AND role_id = 'superadmin' LIMIT 1`
+    ).bind(userId).first();
+    if (userHasSuperadmin) {
+      throw new Error('Cannot disable or demote the last superadmin');
+    }
   }
 }
 
@@ -2231,13 +2259,13 @@ async function authenticateWithBearerToken(request: Request, env: Env): Promise<
   const token = authHeader.slice(7).trim();
   if (!token) return null;
 
-  if (env.QUERY_ADMIN_TOKEN && token === env.QUERY_ADMIN_TOKEN) {
+  if (env.QUERY_ADMIN_TOKEN && timingSafeTokenCompare(token, env.QUERY_ADMIN_TOKEN)) {
     return resolveAuthFromRoleIds(env, 'token:admin', undefined, [], ['admin'], 'local_password');
   }
-  if (env.QUERY_ANALYST_TOKEN && token === env.QUERY_ANALYST_TOKEN) {
+  if (env.QUERY_ANALYST_TOKEN && timingSafeTokenCompare(token, env.QUERY_ANALYST_TOKEN)) {
     return resolveAuthFromRoleIds(env, 'token:analyst', undefined, [], ['analyst'], 'local_password');
   }
-  if (env.QUERY_VIEWER_TOKEN && token === env.QUERY_VIEWER_TOKEN) {
+  if (env.QUERY_VIEWER_TOKEN && timingSafeTokenCompare(token, env.QUERY_VIEWER_TOKEN)) {
     return resolveAuthFromRoleIds(env, 'token:viewer', undefined, [], ['viewer'], 'local_password');
   }
 
@@ -4035,6 +4063,7 @@ async function handleAlerts(
   requestCorsHeaders: Record<string, string>
 ): Promise<Response> {
   const principal = auth.email || auth.principal;
+  const isAlertAdmin = auth.role === 'admin' || auth.role === 'superadmin';
 
   if (request.method === 'GET' && pathname === '/alerts/starter-pack') {
     assertPermission(auth, 'alert.read');
@@ -4176,6 +4205,7 @@ async function handleAlerts(
       now
     ).run();
 
+    await writeAuditLog(env, auth, 'alert.created', 'alert', id, { name, type }).catch(() => undefined);
     return jsonResponse({
       id,
       name,
@@ -4204,6 +4234,7 @@ async function handleAlerts(
       if (!existing) {
         return jsonResponse({ error: 'Alert not found' }, 404, requestCorsHeaders);
       }
+      if (!isAlertAdmin && existing.created_by && existing.created_by !== principal) throw new Error('Forbidden');
 
       const now = new Date().toISOString();
       const name = String(body.name ?? existing.name).trim();
@@ -4246,6 +4277,7 @@ async function handleAlerts(
         id
       ).run();
 
+      await writeAuditLog(env, auth, 'alert.updated', 'alert', id, { name }).catch(() => undefined);
       return jsonResponse({
         id,
         name,
@@ -4264,8 +4296,11 @@ async function handleAlerts(
 
     if (request.method === 'DELETE') {
       assertPermission(auth, 'alert.delete');
+      const existing = await env.DB.prepare('SELECT id, created_by FROM alerts WHERE id = ?').bind(id).first<{ id: string; created_by?: string | null }>();
+      if (existing && !isAlertAdmin && existing.created_by && existing.created_by !== principal) throw new Error('Forbidden');
       await env.DB.prepare('DELETE FROM alerts WHERE id = ?').bind(id).run();
       await env.DB.prepare('DELETE FROM alert_state WHERE alert_id = ?').bind(id).run();
+      await writeAuditLog(env, auth, 'alert.deleted', 'alert', id).catch(() => undefined);
       return new Response(null, { status: 204, headers: requestCorsHeaders });
     }
   }
@@ -4881,6 +4916,7 @@ async function handleDashboards(
       .bind(dashboardId).first<{ id: string; is_default: number; created_by?: string | null }>();
     if (!existing) return jsonResponse({ error: 'Not found' }, 404, requestCorsHeaders);
     if (existing.is_default && !isAdmin) throw new Error('Forbidden');
+    if (!isAdmin && existing.created_by && existing.created_by !== principal) throw new Error('Forbidden');
     const body = await request.json() as Record<string, unknown>;
     const now = new Date().toISOString();
     const updates: string[] = [];
@@ -4900,10 +4936,11 @@ async function handleDashboards(
 
   if (request.method === 'DELETE') {
     assertPermission(auth, 'dashboard.delete');
-    const existing = await env.DB.prepare('SELECT id, is_default FROM dashboards WHERE id = ?')
-      .bind(dashboardId).first<{ id: string; is_default: number }>();
+    const existing = await env.DB.prepare('SELECT id, is_default, created_by FROM dashboards WHERE id = ?')
+      .bind(dashboardId).first<{ id: string; is_default: number; created_by?: string | null }>();
     if (!existing) return new Response(null, { status: 204, headers: requestCorsHeaders });
     if (existing.is_default) return jsonResponse({ error: 'Cannot delete default dashboard' }, 403, requestCorsHeaders);
+    if (!isAdmin && existing.created_by && existing.created_by !== principal) throw new Error('Forbidden');
     await env.DB.prepare('DELETE FROM dashboard_panels WHERE dashboard_id = ?').bind(dashboardId).run();
     await env.DB.prepare('DELETE FROM dashboards WHERE id = ?').bind(dashboardId).run();
     return new Response(null, { status: 204, headers: requestCorsHeaders });
@@ -4922,6 +4959,8 @@ async function handleLookupTables(
   auth: AuthContext,
   requestCorsHeaders: Record<string, string>
 ): Promise<Response> {
+  const lookupPrincipal = auth.email || auth.principal;
+  const isLookupAdmin = auth.role === 'admin' || auth.role === 'superadmin';
   if (request.method === 'GET' && pathname === '/lookup-tables') {
     assertPermission(auth, 'lookup.read');
     const rows = await env.DB.prepare('SELECT * FROM lookup_tables ORDER BY created_at DESC LIMIT 100').all<LookupTableRow>();
@@ -5013,8 +5052,9 @@ async function handleLookupTables(
 
   if (request.method === 'PUT') {
     assertPermission(auth, 'lookup.write');
-    const existing = await env.DB.prepare('SELECT id FROM lookup_tables WHERE id = ?').bind(tableId).first<{ id: string }>();
+    const existing = await env.DB.prepare('SELECT id, created_by FROM lookup_tables WHERE id = ?').bind(tableId).first<{ id: string; created_by?: string | null }>();
     if (!existing) return jsonResponse({ error: 'Not found' }, 404, requestCorsHeaders);
+    if (!isLookupAdmin && existing.created_by && existing.created_by !== lookupPrincipal) throw new Error('Forbidden');
     const body = await request.json() as Record<string, unknown>;
     const now = new Date().toISOString();
     const updates: string[] = [];
@@ -5031,6 +5071,8 @@ async function handleLookupTables(
 
   if (request.method === 'DELETE') {
     assertPermission(auth, 'lookup.delete');
+    const existing = await env.DB.prepare('SELECT id, created_by FROM lookup_tables WHERE id = ?').bind(tableId).first<{ id: string; created_by?: string | null }>();
+    if (existing && !isLookupAdmin && existing.created_by && existing.created_by !== lookupPrincipal) throw new Error('Forbidden');
     await env.DB.prepare('DELETE FROM lookup_rows WHERE lookup_id = ?').bind(tableId).run();
     await env.DB.prepare('DELETE FROM lookup_tables WHERE id = ?').bind(tableId).run();
     return new Response(null, { status: 204, headers: requestCorsHeaders });
@@ -5183,15 +5225,29 @@ async function handleUsers(
 
     const body = await request.json() as { enabled?: number; role_ids?: string[] };
     const enabled = body.enabled === undefined ? existing.enabled : (body.enabled === 0 ? 0 : 1);
+
+    if (enabled === 0 && existing.enabled === 1) {
+      await assertNotLastSuperadmin(env, id);
+    }
+
+    if (Array.isArray(body.role_ids)) {
+      if (!hasPermission(auth, 'role.write')) {
+        throw new Error('Forbidden');
+      }
+      assertCanAssignRoles(auth, body.role_ids);
+      const currentRoles = await getUserRoleIds(env, id);
+      const removingSuperadmin = currentRoles.includes('superadmin') && !body.role_ids.map(ensureRoleId).includes('superadmin');
+      if (removingSuperadmin) {
+        await assertNotLastSuperadmin(env, id);
+      }
+    }
+
     const now = new Date().toISOString();
     await env.DB.prepare('UPDATE users SET enabled = ?, updated_at = ? WHERE id = ?')
       .bind(enabled, now, id)
       .run();
 
     if (Array.isArray(body.role_ids)) {
-      if (!hasPermission(auth, 'role.write')) {
-        throw new Error('Forbidden');
-      }
       await setUserRoles(env, id, body.role_ids, auth.email || auth.principal);
     }
 
@@ -5661,6 +5717,7 @@ async function handleAuth(
     if (!email) {
       return jsonResponse({ error: 'email is required' }, 400, requestCorsHeaders);
     }
+    assertCanAssignRoles(auth, roleIds);
 
     const userId = await ensureInvitedUser(env, email, authMode);
     await setUserRoles(env, userId, roleIds, auth.email || auth.principal);
@@ -5716,6 +5773,7 @@ async function handleAuth(
       ).bind(existingInvite.email).first<UserRow>();
       roleIds = user ? await getUserRoleIds(env, user.id) : ['viewer'];
     }
+    assertCanAssignRoles(auth, roleIds);
 
     const userId = await ensureInvitedUser(env, existingInvite.email, authMode);
     await setUserRoles(env, userId, roleIds, auth.email || auth.principal);
@@ -5779,6 +5837,11 @@ async function handleAuth(
   }
 
   if (request.method === 'POST' && pathname === '/auth/invite/accept') {
+    try {
+      await enforceRateLimit(env, 'invite_accept', clientIp(request), 10);
+    } catch {
+      return jsonResponse({ error: 'Too many attempts. Please try again later.' }, 429, requestCorsHeaders);
+    }
     await expirePendingInvitations(env);
     const body = await request.json() as { token?: string; password?: string };
     const token = String(body.token || '').trim();
@@ -5851,8 +5914,9 @@ function errorResponse(
   fallback = 500
 ): Response {
   const status = statusFromError(error, fallback);
-  const message = error instanceof Error ? error.message : String(error);
-  const guardrail = classifyGuardrailError(message);
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const guardrail = classifyGuardrailError(rawMessage);
+  const message = status >= 500 ? sanitizeErrorMessage(error) : rawMessage;
   return jsonResponse(
     {
       error: message,
@@ -5912,6 +5976,10 @@ export default {
     }
 
     if (url.pathname === '/internal/tail-push' && request.method === 'POST') {
+      const internalCaller = request.headers.get('X-Internal-Caller') || '';
+      if (!internalCaller) {
+        return Response.json({ error: 'Forbidden' }, { status: 403, headers: requestCorsHeaders });
+      }
       try {
         const id = env.TAIL_HUB.idFromName('global');
         const stub = env.TAIL_HUB.get(id);
@@ -5923,7 +5991,7 @@ export default {
         return stub.fetch(doRequest);
       } catch (error) {
         return Response.json(
-          { error: error instanceof Error ? error.message : 'Push failed' },
+          { error: 'Push failed' },
           { status: 500 }
         );
       }

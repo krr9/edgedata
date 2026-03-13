@@ -9,6 +9,8 @@ import {
   buildScheduledSearchRunSummary,
   resolveQueryWorkerSearchUrl
 } from './scheduled-search-core.mjs';
+import { timingSafeTokenCompare } from '../../shared/timing-safe.mjs';
+import { sanitizeWaeSqlValue } from '../../shared/wae-sql-sanitize.mjs';
 
 export interface Env {
   DB: D1Database;
@@ -285,7 +287,7 @@ async function authorizeManualRun(request: Request, env: Env): Promise<boolean> 
   const authHeader = request.headers.get('authorization') || '';
   if (env.ALERT_RUN_SECRET && authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice(7);
-    if (token && token === env.ALERT_RUN_SECRET) return true;
+    if (timingSafeTokenCompare(token, env.ALERT_RUN_SECRET)) return true;
   }
 
   const requireJwt = (env.REQUIRE_ACCESS_JWT || '').toLowerCase() === 'true';
@@ -332,7 +334,9 @@ async function executeWAESQL(sql: string, env: Env): Promise<WAERow[]> {
 
 function maybeFilter(field: string, value?: string): string {
   if (!value) return '';
-  return ` AND ${field} = '${value.replace(/'/g, "''")}'`;
+  const sanitized = sanitizeWaeSqlValue(value);
+  if (!sanitized) return '';
+  return ` AND ${field} = '${sanitized}'`;
 }
 
 function resolveAlertSQL(alert: Alert, params: Record<string, unknown>): string {
@@ -1006,6 +1010,19 @@ async function runScheduledSearches(env: Env): Promise<{ ran: number; failed: nu
   return { ran, failed };
 }
 
+async function cleanupStaleRateLimits(env: Env): Promise<void> {
+  const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
+  await env.DB.prepare(
+    'DELETE FROM rate_limits WHERE window_start_ms < ?'
+  ).bind(cutoffMs).run();
+}
+
+async function cleanupExpiredMaterializations(env: Env): Promise<void> {
+  await env.DB.prepare(
+    `DELETE FROM materialized_results WHERE expires_at < ?`
+  ).bind(new Date().toISOString()).run();
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -1079,6 +1096,12 @@ export default {
           }
         }).catch((err) => {
           console.error('scheduled search cycle failed', err);
+        }),
+        cleanupStaleRateLimits(env).catch((err) => {
+          console.error('rate_limits cleanup failed', err);
+        }),
+        cleanupExpiredMaterializations(env).catch((err) => {
+          console.error('materialization cleanup failed', err);
         })
       ])
     );

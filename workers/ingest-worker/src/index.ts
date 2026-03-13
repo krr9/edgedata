@@ -1,4 +1,5 @@
 import { listIngestParsers, parseIngestPayload, normalizeLogpushRecord } from './ingest-framework.mjs';
+import { timingSafeTokenCompare } from '../../shared/timing-safe.mjs';
 
 export interface Env {
   DB: D1Database;
@@ -331,7 +332,7 @@ async function authenticate(request: Request, env: Env, rawBody: string): Promis
 
   if (auth.startsWith('Bearer ')) {
     const token = auth.slice(7);
-    if (token && token === env.INGEST_SECRET) return { ok: true, agentId };
+    if (timingSafeTokenCompare(token, env.INGEST_SECRET)) return { ok: true, agentId };
   }
 
   const timestamp = request.headers.get('X-Timestamp');
@@ -360,7 +361,7 @@ async function authenticate(request: Request, env: Env, rawBody: string): Promis
   const signed = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${timestamp}.${rawBody}`));
   const expected = Array.from(new Uint8Array(signed), (b) => b.toString(16).padStart(2, '0')).join('');
 
-  return { ok: signature === expected, agentId };
+  return { ok: timingSafeTokenCompare(signature, expected), agentId };
 }
 
 async function writeRawR2(events: NormalizedEvent[], env: Env): Promise<void> {
@@ -499,7 +500,10 @@ async function pushToTailHub(events: NormalizedEvent[], env: Env): Promise<void>
   await env.QUERY_SERVICE.fetch(
     new Request('https://internal/internal/tail-push', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Internal-Caller': 'ingest-worker'
+      },
       body: JSON.stringify(events)
     })
   );
@@ -776,7 +780,7 @@ function isReprocessAuthorized(request: Request, env: Env): boolean {
   const token = auth.slice(7).trim();
   if (!token) return false;
   const expected = env.REPROCESS_SECRET || env.INGEST_SECRET;
-  return token === expected;
+  return timingSafeTokenCompare(token, expected);
 }
 
 export default {
@@ -850,15 +854,15 @@ export default {
       return Response.json({ error: 'Payload too large', request_id: requestId }, { status: 413 });
     }
 
-    // Logpush sends this payload during destination validation -- accept it without ingesting.
-    if (rawBody.trim() === '{"content":"tests"}') {
-      return Response.json({ status: 'ok', logpush_validation: true, request_id: requestId });
-    }
-
     const auth = await authenticate(request, env, rawBody);
     if (!auth.ok) {
       ctx.waitUntil(writeOpsMetric(env, 'ingest_auth_failures', 1).catch(() => undefined));
       return Response.json({ error: 'Unauthorized', request_id: requestId }, { status: 401 });
+    }
+
+    // Logpush sends this payload during destination validation -- accept it after auth.
+    if (rawBody.trim() === '{"content":"tests"}') {
+      return Response.json({ status: 'ok', logpush_validation: true, request_id: requestId });
     }
 
     try {

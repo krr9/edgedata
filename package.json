@@ -35,7 +35,7 @@
     "d1:migrate:performance": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/013_performance_policies_and_materializations.sql",
     "test:prd": "bash ./scripts/run-prd-smoke-tests.sh",
     "test:golden-path": "bash ./scripts/run-golden-activation.sh",
-    "test:unit": "node --test workers/query-worker/test/*.test.mjs workers/synthetic-worker/test/*.test.mjs workers/ingest-worker/test/*.test.mjs workers/alert-worker/test/*.test.mjs workers/materialize-worker/test/*.test.mjs",
+    "test:unit": "node --test workers/query-worker/test/*.test.mjs workers/synthetic-worker/test/*.test.mjs workers/ingest-worker/test/*.test.mjs workers/alert-worker/test/*.test.mjs workers/materialize-worker/test/*.test.mjs workers/shared/test/*.test.mjs",
     "test:load": "node ./scripts/load-test.mjs",
     "test:access-config": "bash ./scripts/test-access-config.sh && bash ./scripts/check-access-config.sh",
     "test:migrations": "bash ./scripts/check-migrations.sh",

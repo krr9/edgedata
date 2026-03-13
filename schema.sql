@@ -152,6 +152,14 @@ CREATE TABLE IF NOT EXISTS scheduled_searches (
   enabled INTEGER NOT NULL DEFAULT 1,
   actions_json TEXT NOT NULL DEFAULT '[]',
   max_results INTEGER NOT NULL DEFAULT 500,
+  execution_mode TEXT NOT NULL DEFAULT 'live',
+  cache_ttl_seconds INTEGER NOT NULL DEFAULT 120,
+  materialize_enabled INTEGER NOT NULL DEFAULT 0,
+  materialize_interval_seconds INTEGER NOT NULL DEFAULT 300,
+  max_staleness_seconds INTEGER NOT NULL DEFAULT 600,
+  last_materialized_at TEXT,
+  last_materialization_status TEXT,
+  last_materialization_error TEXT,
   created_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT
@@ -166,13 +174,27 @@ CREATE TABLE IF NOT EXISTS scheduled_search_results (
   status TEXT NOT NULL DEFAULT 'success',
   result_count INTEGER NOT NULL DEFAULT 0,
   results_json TEXT NOT NULL DEFAULT '[]',
+  trigger_type TEXT NOT NULL DEFAULT 'schedule',
+  requested_by TEXT,
+  query_request_json TEXT NOT NULL DEFAULT '{}',
+  preview_json TEXT NOT NULL DEFAULT '[]',
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  materialized_result_id TEXT,
+  comparison_json TEXT NOT NULL DEFAULT '{}',
   stats_json TEXT NOT NULL DEFAULT '{}',
   error_message TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  baseline_run_id TEXT,
   created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_sched_results_search_run
   ON scheduled_search_results(scheduled_search_id, run_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sched_results_status_run
+  ON scheduled_search_results(scheduled_search_id, status, run_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sched_results_materialized
+  ON scheduled_search_results(materialized_result_id);
 CREATE INDEX IF NOT EXISTS idx_sched_searches_enabled
   ON scheduled_searches(enabled);
 
@@ -183,6 +205,8 @@ CREATE TABLE IF NOT EXISTS dashboards (
   description TEXT,
   layout_json TEXT NOT NULL DEFAULT '[]',
   is_default INTEGER NOT NULL DEFAULT 0,
+  performance_profile TEXT NOT NULL DEFAULT 'economy',
+  default_execution_mode TEXT NOT NULL DEFAULT 'live',
   created_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT
@@ -203,6 +227,15 @@ CREATE TABLE IF NOT EXISTS dashboard_panels (
   display_options_json TEXT NOT NULL DEFAULT '{}',
   time_window_minutes INTEGER NOT NULL DEFAULT 60,
   refresh_seconds INTEGER NOT NULL DEFAULT 0,
+  execution_mode TEXT NOT NULL DEFAULT 'live',
+  cache_ttl_seconds INTEGER NOT NULL DEFAULT 120,
+  materialize_enabled INTEGER NOT NULL DEFAULT 0,
+  materialize_interval_seconds INTEGER NOT NULL DEFAULT 300,
+  max_staleness_seconds INTEGER NOT NULL DEFAULT 600,
+  priority INTEGER NOT NULL DEFAULT 0,
+  last_materialized_at TEXT,
+  last_materialization_status TEXT,
+  last_materialization_error TEXT,
   options_json TEXT NOT NULL DEFAULT '{}',
   position INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
@@ -235,6 +268,44 @@ CREATE TABLE IF NOT EXISTS lookup_rows (
 
 CREATE INDEX IF NOT EXISTS idx_lookup_tables_name
   ON lookup_tables(name);
+
+-- Performance materialization storage
+CREATE TABLE IF NOT EXISTS materialized_results (
+  id TEXT PRIMARY KEY,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  scope_key TEXT NOT NULL,
+  query_hash TEXT NOT NULL,
+  time_bucket_start TEXT NOT NULL,
+  time_bucket_end TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'success',
+  result_count INTEGER NOT NULL DEFAULT 0,
+  payload_r2_key TEXT,
+  payload_inline_json TEXT,
+  stats_json TEXT NOT NULL DEFAULT '{}',
+  computed_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_materialized_lookup
+  ON materialized_results(entity_type, entity_id, scope_key, query_hash, time_bucket_end DESC);
+
+CREATE TABLE IF NOT EXISTS materialization_runs (
+  id TEXT PRIMARY KEY,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  scope_key TEXT NOT NULL,
+  query_hash TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  result_count INTEGER NOT NULL DEFAULT 0,
+  stats_json TEXT NOT NULL DEFAULT '{}',
+  error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_materialization_runs_entity
+  ON materialization_runs(entity_type, entity_id, started_at DESC);
 
 -- Investigation sessions for investigation acceleration pack
 CREATE TABLE IF NOT EXISTS investigation_sessions (

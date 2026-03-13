@@ -368,6 +368,246 @@ const otlpJsonTracesParser = {
   }
 };
 
+// ---------------------------------------------------------------------------
+// Cloudflare Logpush normalization
+// ---------------------------------------------------------------------------
+
+function cfTimestampToIso(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) return new Date(parsed).toISOString();
+    try {
+      const millis = Number(BigInt(value) / 1000000n);
+      if (Number.isFinite(millis) && millis > 0) return new Date(millis).toISOString();
+    } catch { /* not a nanosecond string */ }
+  }
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    if (value > 1e15) return new Date(value / 1e6).toISOString();
+    if (value > 1e12) return new Date(value / 1e3).toISOString();
+    if (value > 1e9) return new Date(value).toISOString();
+    return new Date(value * 1000).toISOString();
+  }
+  return undefined;
+}
+
+function httpStatusToLevel(status) {
+  const s = toNumber(status);
+  if (s === undefined) return 'info';
+  if (s >= 500) return 'error';
+  if (s >= 400) return 'warn';
+  return 'info';
+}
+
+function firewallActionToLevel(action) {
+  const a = String(action || '').toLowerCase();
+  if (a === 'block' || a === 'drop') return 'error';
+  if (a === 'challenge' || a === 'js_challenge' || a === 'managed_challenge') return 'warn';
+  return 'info';
+}
+
+function workersOutcomeToLevel(outcome) {
+  const o = String(outcome || '').toLowerCase();
+  if (o === 'exception' || o === 'exceededcpu' || o === 'exceededmemory' || o === 'killswitch') return 'error';
+  if (o === 'canceled') return 'warn';
+  return 'info';
+}
+
+function collectExtraAttrs(record, knownFields) {
+  const attrs = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (knownFields.has(key) || value === undefined || value === null || value === '') continue;
+    attrs[key] = value;
+  }
+  return Object.keys(attrs).length > 0 ? attrs : undefined;
+}
+
+const LOGPUSH_HTTP_KNOWN = new Set([
+  'ClientIP', 'ClientRequestHost', 'ClientRequestMethod', 'ClientRequestURI',
+  'EdgeStartTimestamp', 'EdgeEndTimestamp', 'EdgeResponseStatus',
+  'OriginResponseTime', 'RayID'
+]);
+
+function isLogpushHttpEvent(record) {
+  return !!(record && (record.RayID || record.rayId) &&
+    (record.EdgeStartTimestamp !== undefined || record.EdgeEndTimestamp !== undefined));
+}
+
+function normalizeLogpushHttpEvent(record) {
+  const method = asString(record.ClientRequestMethod);
+  const uri = asString(record.ClientRequestURI);
+  const status = toNumber(record.EdgeResponseStatus);
+  const rayId = asString(record.RayID);
+  const host = asString(record.ClientRequestHost);
+  const originTimeNs = toNumber(record.OriginResponseTime);
+  const durationMs = originTimeNs !== undefined ? Math.round(originTimeNs / 1e6 * 100) / 100 : undefined;
+  const durationLabel = durationMs !== undefined ? Math.round(durationMs) + 'ms' : '-';
+
+  return {
+    ts: cfTimestampToIso(record.EdgeStartTimestamp ?? record.EdgeEndTimestamp),
+    index: 'cf-http-requests',
+    service: host || 'cloudflare-http',
+    host: host || undefined,
+    level: httpStatusToLevel(status),
+    message: `${method || 'GET'} ${uri || '/'} ${status || '-'} ${durationLabel} ray=${rayId || '-'}`,
+    request_id: rayId || undefined,
+    status,
+    duration_ms: durationMs,
+    src_ip: asString(record.ClientIP) || undefined,
+    attrs: collectExtraAttrs(record, LOGPUSH_HTTP_KNOWN)
+  };
+}
+
+const LOGPUSH_FW_KNOWN = new Set([
+  'Action', 'ClientIP', 'ClientRequestHost', 'ClientRequestMethod',
+  'ClientRequestURI', 'Datetime', 'RayID', 'RuleId', 'Source'
+]);
+
+function isLogpushFirewallEvent(record) {
+  return !!(record && record.Action && record.RuleId &&
+    (record.RayID || record.rayId) && record.Source);
+}
+
+function normalizeLogpushFirewallEvent(record) {
+  const action = asString(record.Action);
+  const method = asString(record.ClientRequestMethod);
+  const uri = asString(record.ClientRequestURI);
+  const clientIp = asString(record.ClientIP);
+  const ruleId = asString(record.RuleId);
+  const source = asString(record.Source);
+  const rayId = asString(record.RayID);
+  const host = asString(record.ClientRequestHost);
+
+  return {
+    ts: cfTimestampToIso(record.Datetime),
+    index: 'cf-firewall-events',
+    service: host || 'cloudflare-firewall',
+    host: host || undefined,
+    level: firewallActionToLevel(action),
+    message: `${action}: ${method || 'GET'} ${uri || '/'} from ${clientIp || '-'} (rule=${ruleId || '-'}, source=${source || '-'})`,
+    request_id: rayId || undefined,
+    src_ip: clientIp || undefined,
+    attrs: collectExtraAttrs(record, LOGPUSH_FW_KNOWN)
+  };
+}
+
+const LOGPUSH_WT_KNOWN = new Set([
+  'ScriptName', 'Outcome', 'EventTimestampMs', 'EventType', 'Event',
+  'Logs', 'Exceptions', 'DispatchNamespace'
+]);
+
+function isLogpushWorkersTraceEvent(record) {
+  return !!(record && record.ScriptName &&
+    (record.EventTimestampMs !== undefined || record.EventType !== undefined));
+}
+
+function normalizeLogpushWorkersTraceEvents(record) {
+  const scriptName = asString(record.ScriptName);
+  const outcome = asString(record.Outcome);
+  const event = asObject(record.Event) || {};
+  const request = asObject(event.Request) || {};
+  const response = asObject(event.Response) || {};
+  const rayId = asString(event.RayID);
+  const method = asString(request.Method);
+  const url = asString(request.URL);
+  const status = toNumber(response.Status);
+  const baseTsMs = toNumber(record.EventTimestampMs);
+  const baseTs = baseTsMs !== undefined ? new Date(baseTsMs).toISOString() : undefined;
+  const namespace = asString(record.DispatchNamespace);
+
+  const results = [];
+
+  results.push({
+    ts: baseTs,
+    index: 'cf-workers-trace',
+    service: scriptName || 'cloudflare-workers',
+    host: namespace || scriptName || undefined,
+    level: workersOutcomeToLevel(outcome),
+    message: `${outcome}: ${method || '-'} ${url || '-'} ${status || '-'} (script=${scriptName})`,
+    request_id: rayId || undefined,
+    status,
+    attrs: collectExtraAttrs(record, LOGPUSH_WT_KNOWN)
+  });
+
+  for (const logEntry of asArray(record.Logs)) {
+    const entryMsg = asArray(logEntry?.Message).map(asString).join(' ') || asString(logEntry?.Message);
+    if (!entryMsg) continue;
+    const entryTsMs = toNumber(logEntry?.TimestampMs);
+    results.push({
+      ts: entryTsMs !== undefined ? new Date(entryTsMs).toISOString() : baseTs,
+      index: 'cf-workers-trace',
+      service: scriptName || 'cloudflare-workers',
+      host: namespace || scriptName || undefined,
+      level: asString(logEntry?.Level) === 'error' ? 'error'
+        : asString(logEntry?.Level) === 'warning' ? 'warn'
+        : asString(logEntry?.Level) === 'debug' ? 'debug' : 'info',
+      message: entryMsg,
+      request_id: rayId || undefined
+    });
+  }
+
+  for (const exc of asArray(record.Exceptions)) {
+    const excMsg = `${asString(exc?.Name) || 'Error'}: ${asString(exc?.Message) || 'unknown'}`;
+    const excTsMs = toNumber(exc?.TimestampMs);
+    results.push({
+      ts: excTsMs !== undefined ? new Date(excTsMs).toISOString() : baseTs,
+      index: 'cf-workers-trace',
+      service: scriptName || 'cloudflare-workers',
+      host: namespace || scriptName || undefined,
+      level: 'error',
+      message: excMsg,
+      request_id: rayId || undefined
+    });
+  }
+
+  return results;
+}
+
+function isLogpushEvent(record) {
+  if (!record || typeof record !== 'object') return false;
+  return isLogpushHttpEvent(record) || isLogpushFirewallEvent(record) || isLogpushWorkersTraceEvent(record);
+}
+
+function normalizeLogpushRecord(record) {
+  if (isLogpushHttpEvent(record)) return [normalizeLogpushHttpEvent(record)];
+  if (isLogpushFirewallEvent(record)) return [normalizeLogpushFirewallEvent(record)];
+  if (isLogpushWorkersTraceEvent(record)) return normalizeLogpushWorkersTraceEvents(record);
+  return null;
+}
+
+const cloudflareLogpushParser = {
+  id: 'cloudflare_logpush',
+  description: 'Cloudflare Logpush NDJSON (HTTP Requests, Firewall Events, Workers Trace Events)',
+  canParse(context) {
+    const body = asString(context.rawBody).trim();
+    if (!body) return false;
+    const firstLine = body.split('\n').find((l) => l.trim());
+    if (!firstLine) return false;
+    try {
+      return isLogpushEvent(JSON.parse(firstLine.trim()));
+    } catch {
+      return false;
+    }
+  },
+  parse(context) {
+    const events = [];
+    for (const line of asString(context.rawBody).split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed);
+        const normalized = normalizeLogpushRecord(parsed);
+        if (normalized) events.push(...normalized);
+      } catch { /* skip malformed lines */ }
+    }
+    const firstIndex = events.length > 0 ? events[0].index : 'cf-logpush';
+    return {
+      events,
+      defaults: { index: firstIndex, service: 'cloudflare', env: 'prod' }
+    };
+  }
+};
+
 const ndjsonParser = {
   id: 'ndjson_lines',
   description: 'NDJSON payload with one JSON object per line',
@@ -396,7 +636,7 @@ const ndjsonParser = {
   }
 };
 
-const PARSERS = [otlpJsonLogsParser, otlpJsonTracesParser, edgeDataJsonParser, ndjsonParser];
+const PARSERS = [otlpJsonLogsParser, otlpJsonTracesParser, cloudflareLogpushParser, edgeDataJsonParser, ndjsonParser];
 
 export function listIngestParsers() {
   return PARSERS.map((parser) => ({
@@ -404,6 +644,8 @@ export function listIngestParsers() {
     description: parser.description
   }));
 }
+
+export { normalizeLogpushRecord };
 
 export function parseIngestPayload(context) {
   const normalizedContext = {

@@ -73,7 +73,6 @@ export function DashboardPage({
   const [activeWidgetId, setActiveWidgetId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [flashMessage, setFlashMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
-  const inFlightRef = useRef<Map<string, Promise<void>>>(new Map());
   const snapshotRef = useRef<Map<string, DashboardWidget[]>>(new Map());
 
   const showFlash = useCallback((kind: 'success' | 'error', text: string) => {
@@ -121,69 +120,102 @@ export function DashboardPage({
     }
   }, [apiFetch]);
 
-  const runWidget = useCallback(async (widget: DashboardWidget, minutesOverride?: number) => {
+  const refreshAll = useCallback(async (minutesOverride?: number) => {
     const effectiveMinutes = minutesOverride ?? dashboardMinutes;
-    const key = `${widget.id}:${effectiveMinutes}:${widget.query_text}`;
-    const dashboardId = selectedDashboardId || widget.dashboard_id || '_';
-    const cacheKey = buildFrontendWidgetCacheKey(dashboardId, widget, effectiveMinutes);
-    const cached = dashboardWidgetResultCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      setWidgetData((prev) => ({ ...prev, [widget.id]: cached.rows }));
-      setWidgetErrors((prev) => ({ ...prev, [widget.id]: null }));
-      setWidgetLoading((prev) => ({ ...prev, [widget.id]: false }));
-      return;
-    }
-    const existing = inFlightRef.current.get(key);
-    if (existing) return existing;
-    const promise = (async () => {
-      if (widget.widget_type !== 'markdown' && !widget.query_text.trim()) {
-        setWidgetErrors((prev) => ({ ...prev, [widget.id]: 'Widget query is empty.' }));
-        return;
+    const now = new Date();
+    const from = new Date(now.getTime() - effectiveMinutes * 60 * 1000).toISOString();
+    const to = now.toISOString();
+    const dashboardId = selectedDashboardId || '_';
+    const pending: DashboardWidget[] = [];
+
+    for (const widget of widgets) {
+      if (widget.widget_type === 'markdown') {
+        setWidgetData((prev) => ({ ...prev, [widget.id]: [] }));
+        setWidgetErrors((prev) => ({ ...prev, [widget.id]: null }));
+        setWidgetLoading((prev) => ({ ...prev, [widget.id]: false }));
+        continue;
       }
-      setWidgetLoading((prev) => ({ ...prev, [widget.id]: true }));
-      setWidgetErrors((prev) => ({ ...prev, [widget.id]: null }));
-      try {
-        if (widget.widget_type === 'markdown') {
-          setWidgetData((prev) => ({ ...prev, [widget.id]: [] }));
-          return;
-        }
-        const now = new Date();
-        const from = new Date(now.getTime() - effectiveMinutes * 60 * 1000).toISOString();
-        const to = now.toISOString();
-        const response = await apiFetch('/dashboards/widgets/query', {
-          method: 'POST',
-          body: JSON.stringify({
+      if (!widget.query_text.trim()) {
+        setWidgetErrors((prev) => ({ ...prev, [widget.id]: 'Widget query is empty.' }));
+        setWidgetLoading((prev) => ({ ...prev, [widget.id]: false }));
+        continue;
+      }
+      const cacheKey = buildFrontendWidgetCacheKey(dashboardId, widget, effectiveMinutes);
+      const cached = dashboardWidgetResultCache.get(cacheKey);
+      if (cached && cached.expiresAt > Date.now()) {
+        setWidgetData((prev) => ({ ...prev, [widget.id]: cached.rows }));
+        setWidgetErrors((prev) => ({ ...prev, [widget.id]: null }));
+        setWidgetLoading((prev) => ({ ...prev, [widget.id]: false }));
+        continue;
+      }
+      pending.push(widget);
+    }
+
+    if (pending.length === 0) return;
+
+    setWidgetLoading((prev) => {
+      const next = { ...prev };
+      for (const widget of pending) next[widget.id] = true;
+      return next;
+    });
+    setWidgetErrors((prev) => {
+      const next = { ...prev };
+      for (const widget of pending) next[widget.id] = null;
+      return next;
+    });
+
+    try {
+      const response = await apiFetch('/dashboards/widgets/query-batch', {
+        method: 'POST',
+        body: JSON.stringify({
+          time: { from, to },
+          widgets: pending.map((widget) => ({
             widget_id: widget.id,
             ppl: widget.query_text,
-            time: { from, to },
             limit: 500
-          })
-        });
-        const body = await response.json() as { results?: DashboardRow[]; error?: string };
-        if (!response.ok || body.error) {
-          throw new Error(body.error || 'Widget query failed');
+          }))
+        })
+      });
+      const body = await response.json() as {
+        widgets?: Record<string, { response?: { results?: DashboardRow[]; error?: string }; error?: string }>;
+        error?: string;
+      };
+      if (!response.ok || body.error) {
+        throw new Error(body.error || 'Widget batch query failed');
+      }
+      const resultMap = body.widgets || {};
+      for (const widget of pending) {
+        const result = resultMap[widget.id];
+        if (!result) {
+          setWidgetErrors((prev) => ({ ...prev, [widget.id]: 'Widget result missing.' }));
+          continue;
         }
-        const rows = body.results || [];
+        if (result.error || result.response?.error) {
+          setWidgetErrors((prev) => ({ ...prev, [widget.id]: String(result.error || result.response?.error || 'Widget query failed') }));
+          continue;
+        }
+        const rows = result.response?.results || [];
         setWidgetData((prev) => ({ ...prev, [widget.id]: rows }));
-        dashboardWidgetResultCache.set(cacheKey, {
+        dashboardWidgetResultCache.set(buildFrontendWidgetCacheKey(dashboardId, widget, effectiveMinutes), {
           expiresAt: Date.now() + FRONTEND_WIDGET_CACHE_TTL_MS,
           rows
         });
-      } catch (requestError) {
-        setWidgetErrors((prev) => ({ ...prev, [widget.id]: String(requestError) }));
-      } finally {
-        setWidgetLoading((prev) => ({ ...prev, [widget.id]: false }));
       }
-    })();
-    inFlightRef.current.set(key, promise);
-    await promise.finally(() => {
-      inFlightRef.current.delete(key);
-    });
-  }, [apiFetch, dashboardMinutes, selectedDashboardId]);
-
-  const refreshAll = useCallback(async (minutesOverride?: number) => {
-    await Promise.all(widgets.map((widget) => runWidget(widget, minutesOverride)));
-  }, [runWidget, widgets]);
+    } catch (requestError) {
+      const message = String(requestError);
+      setWidgetErrors((prev) => {
+        const next = { ...prev };
+        for (const widget of pending) next[widget.id] = message;
+        return next;
+      });
+    } finally {
+      setWidgetLoading((prev) => {
+        const next = { ...prev };
+        for (const widget of pending) next[widget.id] = false;
+        return next;
+      });
+    }
+  }, [apiFetch, dashboardMinutes, selectedDashboardId, widgets]);
 
   const saveLayout = useCallback(async () => {
     if (!selectedDashboardId) return;

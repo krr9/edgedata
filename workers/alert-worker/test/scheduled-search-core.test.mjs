@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  buildScheduledSearchPreview,
+  buildScheduledSearchRunSummary,
   buildScheduledSearchQueryRequest,
   resolveQueryWorkerSearchUrl
 } from '../src/scheduled-search-core.mjs';
@@ -43,4 +45,41 @@ test('buildScheduledSearchQueryRequest emits query-worker compatible shape', () 
     },
     limit: 250
   });
+});
+
+test('buildScheduledSearchPreview returns bounded preview rows', () => {
+  const preview = buildScheduledSearchPreview(
+    [{ id: 1 }, { id: 2 }, { id: 3 }],
+    2
+  );
+  assert.deepEqual(preview, [{ id: 1 }, { id: 2 }]);
+});
+
+test('buildScheduledSearchRunSummary returns operator-friendly success summary', () => {
+  const summary = buildScheduledSearchRunSummary({
+    name: 'Errors by Service',
+    status: 'success',
+    resultCount: 3,
+    results: [{ service: 'api', count: 2 }]
+  });
+
+  assert.equal(summary.status, 'success');
+  assert.equal(summary.result_count, 3);
+  assert.equal(summary.headline, 'Errors by Service: 3 results captured');
+  assert.deepEqual(summary.preview_fields, ['service', 'count']);
+  assert.equal(summary.has_results, true);
+});
+
+test('buildScheduledSearchRunSummary returns failure headline and error', () => {
+  const summary = buildScheduledSearchRunSummary({
+    name: 'Latency sampler',
+    status: 'error',
+    resultCount: 0,
+    errorMessage: 'Query worker returned 500'
+  });
+
+  assert.equal(summary.status, 'error');
+  assert.equal(summary.headline, 'Latency sampler run failed');
+  assert.equal(summary.error_message, 'Query worker returned 500');
+  assert.deepEqual(summary.preview_fields, []);
 });

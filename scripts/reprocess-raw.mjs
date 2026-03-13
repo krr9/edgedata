@@ -23,6 +23,7 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === '--service' && args[i + 1]) payload.service = args[++i];
   else if (arg === '--env' && args[i + 1]) payload.env = args[++i];
   else if (arg === '--max-objects' && args[i + 1]) payload.max_objects = Number(args[++i]);
+  else if (arg === '--source-prefix' && args[i + 1]) payload.source_prefix = args[++i];
   else if (arg === '--apply') payload.dry_run = false;
 }
 

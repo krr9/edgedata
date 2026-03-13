@@ -22,11 +22,15 @@ dataset = "log_metrics"
 binding = "SYNTHETIC_SERVICE"
 service = "synthetic-worker"
 
+[[env.production.services]]
+binding = "ALERT_SERVICE"
+service = "alert-worker-prod"
+
 [env.production.vars]
 CF_ACCOUNT_ID = ""
 REQUIRE_ACCESS_JWT = "true"
 # Replace with your Cloudflare Access application AUD for this environment.
-ACCESS_AUD = "edgedata-query-aud"
+ACCESS_AUD = "6d60cfebfc4c552e255d9324f1ea50f98b3506b8676231857fd8e1f9c4453a85"
 ACCESS_ISSUER = "https://edgedata.cloudflareaccess.com"
 ACCESS_JWKS_URL = ""
 # Replace with your real Access/IdP group names for role mapping.
@@ -42,6 +46,7 @@ AUTH_INVITE_TTL_HOURS = "48"
 SESSION_TTL_SECONDS = "43200"
 QUERY_RATE_LIMIT_PER_MIN = "600"
 AUTH_LOGIN_RATE_LIMIT_PER_MIN = "60"
+DASHBOARD_CACHE_SHARDS = "16"
 CORS_ORIGINS = "https://edgedata-1fo.pages.dev,https://*.edgedata-1fo.pages.dev"
 # Set to "true" for demo deployments to enable scenario picker in Incident Workspace.
 DEMO_SCENARIOS_ENABLED = "false"
@@ -69,6 +74,10 @@ dataset = "log_metrics"
 binding = "SYNTHETIC_SERVICE"
 service = "synthetic-worker"
 
+[[services]]
+binding = "ALERT_SERVICE"
+service = "alert-worker"
+
 [vars]
 CF_ACCOUNT_ID = ""
 REQUIRE_ACCESS_JWT = "true"
@@ -89,6 +98,7 @@ AUTH_INVITE_TTL_HOURS = "48"
 SESSION_TTL_SECONDS = "43200"
 QUERY_RATE_LIMIT_PER_MIN = "600"
 AUTH_LOGIN_RATE_LIMIT_PER_MIN = "60"
+DASHBOARD_CACHE_SHARDS = "16"
 CORS_ORIGINS = "https://edgedata-1fo.pages.dev,https://*.edgedata-1fo.pages.dev"
 # Set to "true" for demo deployments to enable scenario picker in Incident Workspace.
 DEMO_SCENARIOS_ENABLED = "false"

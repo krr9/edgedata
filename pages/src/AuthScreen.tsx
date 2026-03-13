@@ -4,7 +4,7 @@ import { useAuth } from './AuthContext';
 const API_BASE = ((import.meta as { env?: Record<string, string> }).env?.VITE_QUERY_API_BASE || '').trim();
 
 export function AuthScreen() {
-  const { login, refresh, loading: authLoading } = useAuth();
+  const { login, loading: authLoading } = useAuth();
   const [mode, setMode] = useState<'signin' | 'invite'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -30,17 +30,17 @@ export function AuthScreen() {
     }
   };
 
-  const handleSsoRefresh = async () => {
+  const handleSsoStart = () => {
     setError('');
     setInfo('');
-    setSsoLoading(true);
-    const result = await refresh();
-    if (!result.authenticated) {
-      setError(result.error || 'Cloudflare Access session not found. Complete Access sign-in and try again.');
-      setSsoLoading(false);
+    if (!API_BASE) {
+      setError('Missing VITE_QUERY_API_BASE. Configure your deployed query-worker URL.');
       return;
     }
-    setSsoLoading(false);
+
+    setSsoLoading(true);
+    const returnTo = window.location.href;
+    window.location.assign(`${API_BASE}/auth/access/start?return_to=${encodeURIComponent(returnTo)}`);
   };
 
   const handleInviteAccept = async (e: FormEvent) => {
@@ -132,8 +132,8 @@ export function AuthScreen() {
 
         {mode === 'signin' ? (
           <form onSubmit={handleSubmit}>
-            <button type="button" className="auth-secondary" disabled={ssoLoading || loading} onClick={handleSsoRefresh}>
-              {ssoLoading ? 'Checking Access session...' : 'Continue with Cloudflare Access'}
+            <button type="button" className="auth-secondary" disabled={ssoLoading || loading} onClick={handleSsoStart}>
+              {ssoLoading ? 'Redirecting to Access...' : 'Continue with Cloudflare Access'}
             </button>
             <div className="auth-divider"><span>or</span></div>
 

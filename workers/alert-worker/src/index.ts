@@ -1,6 +1,12 @@
 import { validateAlertAccessJwtConfig } from '../../shared/access-config.mjs';
 import {
+  buildMaterializationBucket,
+  hashQueryText
+} from '../../shared/materialization-core.mjs';
+import {
+  buildScheduledSearchPreview,
   buildScheduledSearchQueryRequest,
+  buildScheduledSearchRunSummary,
   resolveQueryWorkerSearchUrl
 } from './scheduled-search-core.mjs';
 
@@ -336,6 +342,7 @@ function resolveAlertSQL(alert: Alert, params: Record<string, unknown>): string 
   }
 
   const windowMinutes = asPositiveInt(params.window_minutes ?? params.window ?? 5, 5);
+  const index = typeof params.index === 'string' ? normalizeIndexValue(params.index) : undefined;
   const service = typeof params.service === 'string' ? params.service : undefined;
   const env = typeof params.env === 'string' ? params.env : undefined;
 
@@ -346,6 +353,7 @@ function resolveAlertSQL(alert: Alert, params: Record<string, unknown>): string 
         100.0 * SUM(CASE WHEN blob4 = 'error' THEN double1 ELSE 0 END) / NULLIF(SUM(double1), 0) AS value
       FROM log_metrics
       WHERE timestamp >= NOW() - INTERVAL '${windowMinutes} MINUTE'
+      ${maybeFilter('index1', index)}
       ${maybeFilter('blob1', service)}
       ${maybeFilter('blob2', env)}
       GROUP BY service
@@ -362,6 +370,7 @@ function resolveAlertSQL(alert: Alert, params: Record<string, unknown>): string 
       FROM log_metrics
       WHERE timestamp >= NOW() - INTERVAL '${windowMinutes} MINUTE'
         AND double3 > 0
+      ${maybeFilter('index1', index)}
       ${maybeFilter('blob1', service)}
       ${maybeFilter('blob2', env)}
       GROUP BY service
@@ -676,6 +685,11 @@ interface ScheduledSearch {
   enabled: number;
   actions_json: string;
   max_results: number;
+  execution_mode?: string | null;
+  cache_ttl_seconds?: number | null;
+  materialize_enabled?: number | null;
+  materialize_interval_seconds?: number | null;
+  max_staleness_seconds?: number | null;
   created_by?: string | null;
   created_at: string;
   updated_at?: string | null;
@@ -688,6 +702,37 @@ interface ScheduledSearchAction {
   url?: string;
   method?: string;
   template?: string;
+}
+
+interface ScheduledSearchRunRow {
+  id: string;
+  scheduled_search_id: string;
+  run_at: string;
+  time_from: string;
+  time_to: string;
+  status: string;
+  result_count: number;
+  results_json: string;
+  trigger_type?: string | null;
+  requested_by?: string | null;
+  query_request_json?: string | null;
+  preview_json?: string | null;
+  summary_json?: string | null;
+  materialized_result_id?: string | null;
+  comparison_json?: string | null;
+  stats_json: string;
+  error_message?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  baseline_run_id?: string | null;
+  created_at: string;
+}
+
+type ScheduledSearchTriggerType = 'schedule' | 'manual';
+
+interface ScheduledSearchExecutionOptions {
+  triggerType?: ScheduledSearchTriggerType;
+  requestedBy?: string | null;
 }
 
 function cronMatchesNow(cron: string, now: Date): boolean {
@@ -712,17 +757,34 @@ function cronMatchesNow(cron: string, now: Date): boolean {
   return matchesPart(minPart, minute) && matchesPart(hourPart, hour);
 }
 
-async function processScheduledSearch(search: ScheduledSearch, env: Env): Promise<void> {
-  const now = new Date();
+async function processScheduledSearch(
+  search: ScheduledSearch,
+  env: Env,
+  options: ScheduledSearchExecutionOptions = {}
+): Promise<Record<string, unknown>> {
+  const startedAtMs = Date.now();
+  const startedAt = new Date(startedAtMs).toISOString();
+  const now = new Date(startedAtMs);
   const timeTo = now.toISOString();
   const timeFrom = new Date(now.getTime() - search.time_window_minutes * 60 * 1000).toISOString();
   const queryWorkerSearchUrl = resolveQueryWorkerSearchUrl(env.QUERY_WORKER_URL);
   const resultId = crypto.randomUUID();
   const actions = safeJsonParse<ScheduledSearchAction[]>(search.actions_json, []);
+  const retainDays = asPositiveInt(actions.find((action) => action.retain_days)?.retain_days, 30);
+  const queryRequest = buildScheduledSearchQueryRequest({
+    ppl: search.ppl,
+    maxResults: search.max_results,
+    from: timeFrom,
+    to: timeTo
+  });
 
   let results: Record<string, unknown>[] = [];
   let status = 'success';
   let errorMessage: string | null = null;
+  let warning: string | null = null;
+  let queryStats: Record<string, unknown> = {};
+  let resultType: 'events' | 'table' = 'table';
+  let materializedResultId: string | null = null;
 
   try {
     const queryWorkerToken = String(env.QUERY_WORKER_TOKEN || '').trim();
@@ -737,16 +799,20 @@ async function processScheduledSearch(search: ScheduledSearch, env: Env): Promis
     const response = await fetch(queryWorkerSearchUrl, {
       method: 'POST',
       headers,
-      body: JSON.stringify(buildScheduledSearchQueryRequest({
-        ppl: search.ppl,
-        maxResults: search.max_results,
-        from: timeFrom,
-        to: timeTo
-      }))
+      body: JSON.stringify(queryRequest)
     });
     if (response.ok) {
-      const body = await response.json() as { results?: Record<string, unknown>[]; events?: Record<string, unknown>[] };
+      const body = await response.json() as {
+        result_type?: 'events' | 'table';
+        results?: Record<string, unknown>[];
+        events?: Record<string, unknown>[];
+        stats?: Record<string, unknown>;
+        warning?: string;
+      };
       results = (body.results || body.events || []).slice(0, search.max_results);
+      resultType = body.result_type === 'events' ? 'events' : 'table';
+      queryStats = body.stats && typeof body.stats === 'object' ? body.stats : {};
+      warning = typeof body.warning === 'string' && body.warning.trim() ? body.warning.trim() : null;
     } else {
       const responseText = (await response.text().catch(() => '')).trim();
       const detail = responseText ? ` body=${responseText.slice(0, 180)}` : '';
@@ -757,24 +823,108 @@ async function processScheduledSearch(search: ScheduledSearch, env: Env): Promis
     errorMessage = String(err);
   }
 
+  const completedAt = new Date().toISOString();
   const resultCount = results.length;
-  const statsJson = JSON.stringify({ duration_ms: Date.now() - now.getTime(), scanned: resultCount });
+  const preview = buildScheduledSearchPreview(results, 100);
+
+  if (status === 'success') {
+    try {
+      const artifactId = crypto.randomUUID();
+      const retentionExpiresAt = new Date(now.getTime() + retainDays * 86400000).toISOString();
+      const bucket = buildMaterializationBucket(
+        { from: timeFrom, to: timeTo },
+        Number(search.materialize_interval_seconds) || 300
+      );
+      const artifactPayload = {
+        result_type: resultType,
+        results,
+        next_cursor: null,
+        stats: queryStats,
+        warning
+      };
+      await env.DB.prepare(
+        `INSERT INTO materialized_results (
+           id, entity_type, entity_id, scope_key, query_hash, time_bucket_start, time_bucket_end,
+           status, result_count, payload_inline_json, stats_json, computed_at, expires_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        artifactId,
+        'scheduled_search_run',
+        resultId,
+        `scheduled_search:${search.id}`,
+        hashQueryText(search.ppl),
+        bucket.time_bucket_start || timeFrom,
+        bucket.time_bucket_end || timeTo,
+        status,
+        resultCount,
+        JSON.stringify(artifactPayload),
+        JSON.stringify(queryStats),
+        completedAt,
+        retentionExpiresAt
+      ).run();
+      materializedResultId = artifactId;
+    } catch (artifactError) {
+      const artifactMessage = `Full artifact unavailable: ${String(artifactError)}`;
+      warning = warning ? `${warning}; ${artifactMessage}` : artifactMessage;
+    }
+  }
+
+  const summary = buildScheduledSearchRunSummary({
+    name: search.name,
+    status,
+    resultCount,
+    errorMessage,
+    warning,
+    results
+  });
+  const statsJson = JSON.stringify({
+    duration_ms: Math.max(0, Date.parse(completedAt) - startedAtMs),
+    scanned: resultCount,
+    query_stats: queryStats,
+    result_type: resultType
+  });
 
   await env.DB.prepare(
-    `INSERT INTO scheduled_search_results (id, scheduled_search_id, run_at, time_from, time_to, status, result_count, results_json, stats_json, error_message, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO scheduled_search_results (
+       id, scheduled_search_id, run_at, time_from, time_to, status, result_count, results_json,
+       trigger_type, requested_by, query_request_json, preview_json, summary_json, materialized_result_id,
+       comparison_json, stats_json, error_message, started_at, completed_at, baseline_run_id, created_at
+     )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
-    resultId, search.id, timeTo, timeFrom, timeTo, status, resultCount,
-    JSON.stringify(results.slice(0, 100)),
-    statsJson, errorMessage, timeTo
+    resultId,
+    search.id,
+    timeTo,
+    timeFrom,
+    timeTo,
+    status,
+    resultCount,
+    JSON.stringify(preview),
+    options.triggerType || 'schedule',
+    options.requestedBy || null,
+    JSON.stringify(queryRequest),
+    JSON.stringify(preview),
+    JSON.stringify(summary),
+    materializedResultId,
+    '{}',
+    statsJson,
+    errorMessage,
+    startedAt,
+    completedAt,
+    null,
+    timeTo
   ).run();
 
   for (const action of actions) {
     try {
       if (action.type === 'slack' && action.webhook_url) {
-        const text = (action.template || 'Scheduled search "{{name}}" found {{result_count}} results')
+        const text = (action.template || '{{headline}}')
           .replace(/\{\{name\}\}/g, search.name)
-          .replace(/\{\{result_count\}\}/g, String(resultCount));
+          .replace(/\{\{result_count\}\}/g, String(resultCount))
+          .replace(/\{\{headline\}\}/g, String(summary.headline || `${search.name}: ${resultCount} results`))
+          .replace(/\{\{window_from\}\}/g, timeFrom)
+          .replace(/\{\{window_to\}\}/g, timeTo);
         await fetch(action.webhook_url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -789,7 +939,9 @@ async function processScheduledSearch(search: ScheduledSearch, env: Env): Promis
             name: search.name,
             run_at: timeTo,
             result_count: resultCount,
-            results: results.slice(0, 10)
+            trigger_type: options.triggerType || 'schedule',
+            summary,
+            results: preview.slice(0, 10)
           })
         });
       }
@@ -798,11 +950,28 @@ async function processScheduledSearch(search: ScheduledSearch, env: Env): Promis
     }
   }
 
-  const retainDays = actions.find(a => a.retain_days)?.retain_days || 30;
   const cutoff = new Date(now.getTime() - retainDays * 86400000).toISOString();
   await env.DB.prepare(
     'DELETE FROM scheduled_search_results WHERE scheduled_search_id = ? AND created_at < ?'
   ).bind(search.id, cutoff).run();
+  await env.DB.prepare(
+    `DELETE FROM materialized_results
+     WHERE entity_type = 'scheduled_search_run'
+       AND expires_at < ?`
+  ).bind(new Date().toISOString()).run();
+
+  return {
+    ok: true,
+    run_id: resultId,
+    scheduled_search_id: search.id,
+    run_at: timeTo,
+    status,
+    result_count: resultCount,
+    trigger_type: options.triggerType || 'schedule',
+    requested_by: options.requestedBy || null,
+    summary,
+    materialized_result_id: materializedResultId
+  };
 }
 
 async function runScheduledSearches(env: Env): Promise<{ ran: number; failed: number }> {
@@ -840,6 +1009,38 @@ async function runScheduledSearches(env: Env): Promise<{ ran: number; failed: nu
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    const scheduledSearchRunMatch = url.pathname.match(/^\/internal\/scheduled-searches\/([^/]+)\/run$/);
+    if (scheduledSearchRunMatch && request.method === 'POST') {
+      let authorized = false;
+      try {
+        authorized = await authorizeManualRun(request, env);
+      } catch (error) {
+        return Response.json({ ok: false, error: String(error) }, { status: 500 });
+      }
+      if (!authorized) {
+        return Response.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
+      }
+
+      const searchId = scheduledSearchRunMatch[1];
+      const body = await request.json().catch(() => ({})) as { requested_by?: unknown };
+      const search = await env.DB.prepare('SELECT * FROM scheduled_searches WHERE id = ?')
+        .bind(searchId)
+        .first<ScheduledSearch>();
+      if (!search) {
+        return Response.json({ ok: false, error: 'Scheduled search not found' }, { status: 404 });
+      }
+
+      try {
+        const run = await processScheduledSearch(search, env, {
+          triggerType: 'manual',
+          requestedBy: body.requested_by ? String(body.requested_by) : null
+        });
+        return Response.json(run, { status: 200 });
+      } catch (error) {
+        return Response.json({ ok: false, error: String(error) }, { status: 500 });
+      }
+    }
 
     if (url.pathname === '/health') {
       return Response.json({ status: 'ok', service: 'alert-worker', version: '1.2.0' });

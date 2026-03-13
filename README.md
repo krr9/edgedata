@@ -25,6 +25,7 @@ Current design-partner status: `pending` (tracked in `docs/evidence/design-partn
 - `workers/ingest-worker`: pluggable ingest framework that accepts batched log events (EdgeData JSON, OTLP/HTTP JSON logs, NDJSON), authenticates (Bearer or HMAC), normalizes payloads, writes raw NDJSON to R2, then asynchronously writes WAE metrics and token index shards.
 - `workers/query-worker`: search API, search summary API (facets/timeline/top terms/field coverage), dashboard query API, saved search CRUD over D1, and live tail WebSocket streaming via TailHub Durable Object. Query planning is backend-agnostic: default deep search uses partitioned `events`/`tokens` indexes, with optional provider-managed query-store integration.
 - `workers/alert-worker`: cron evaluator for D1 alert definitions with state/cooldown tracking and Slack/webhook notifications.
+- `workers/materialize-worker`: cron-driven dashboard widget materializer for precomputed performance-mode results.
 - `workers/synthetic-worker`: cron-based synthetic data producer that posts small demo batches to ingest for always-on searchable data.
 - `pages`: React UI for log explorer, dashboards, incident workspace investigations, alerts management, saved searches, and live tail real-time log streaming, including event inspector syntax highlighting and field-count side panels.
 
@@ -145,6 +146,7 @@ How to discover worker URLs on first deployment:
 - `wrangler deploy` prints the published `https://<worker-name>.<account-subdomain>.workers.dev` URL.
 - You can also copy the URL from Cloudflare Dashboard -> Workers & Pages -> Worker.
 - Export the URLs for scripts/UI:
+- For customer deployments, always point the UI at that customer's own query-worker hostname or custom domain. Do not reuse a repository author's personal `workers.dev` URL.
 
 ```bash
 export QUERY_URL="https://<query-worker>.<subdomain>.workers.dev"
@@ -152,6 +154,9 @@ export INGEST_URL="https://<ingest-worker>.<subdomain>.workers.dev"
 export ALERT_URL="https://<alert-worker>.<subdomain>.workers.dev"
 export VITE_QUERY_API_BASE="$QUERY_URL"
 ```
+
+- If SSO is enabled, `VITE_QUERY_API_BASE` must be the exact Access-protected query API origin that the browser will call.
+- `npm run deploy:pages` now fails fast when `VITE_QUERY_API_BASE` is missing or still set to the legacy `query-worker.rvkishore.workers.dev` default.
 
 How to discover D1 database ID on first deployment:
 
@@ -208,6 +213,7 @@ npm run d1:migrate:authz
 npm run d1:migrate:users
 npm run d1:migrate:ratelimits
 npm run d1:migrate:rbac
+npm run d1:migrate:performance
 ```
 
 Schema file: `schema.sql`
@@ -243,20 +249,29 @@ Query worker:
 - `AUTH_ENABLE_LOCAL_LOGIN` (`"false"` to disable local password login, SSO-only)
 - `AUTH_BOOTSTRAP_SUPERADMIN_EMAIL` (first-deploy superadmin email; falls back to `AUTH_BOOTSTRAP_EMAIL`)
 - `AUTH_INVITE_TTL_HOURS` (invite expiration, default 48)
+- `DASHBOARD_CACHE_SHARDS` (optional durable-object shard count for dashboard/widget cache; default `16`)
 - `SESSION_TTL_SECONDS` (session duration, defaults to 43200)
 - `QUERY_RATE_LIMIT_PER_MIN` (fixed-window request limit per minute per IP/principal)
 - `AUTH_LOGIN_RATE_LIMIT_PER_MIN` (fixed-window login attempts per minute per IP)
 - `CORS_ORIGINS` (comma-separated allowed origins)
 - `QUERY_VIEWER_TOKEN` (optional bearer token for viewer role)
 - `QUERY_ANALYST_TOKEN` (optional bearer token for analyst role)
-- `QUERY_ADMIN_TOKEN` (optional bearer token for admin role)
-- `OPS_WAE` analytics dataset binding (optional operational metrics)
+- `QUERY_ADMIN_TOKEN` (optional trusted bearer token for internal worker-to-worker admin calls)
+- `ALERT_SERVICE` service binding to `alert-worker` (used for manual scheduled-search runs)
+- Wrangler secret `ALERT_RUN_SECRET` (must match `alert-worker`; used by query worker proxy for `POST /scheduled-searches/:id/run`)
 - `SYNTHETIC_SERVICE` service binding to `synthetic-worker` (required for admin synthetic ingest controls)
 - Wrangler secret `SYNTHETIC_RUN_SECRET` (must match `synthetic-worker`; used by query worker admin proxy for `/admin/synthetic-ingest`)
 - `DEMO_SCENARIOS_ENABLED` (`"true"` enables investigation demo scenario presets, default `"false"`)
 - Wrangler secret `AUTH_BOOTSTRAP_PASSWORD`
 - Wrangler secret `AUTH_BOOTSTRAP_SUPERADMIN_PASSWORD` (preferred; falls back to `AUTH_BOOTSTRAP_PASSWORD`)
 - Wrangler secret `AUTH_SESSION_SECRET`
+
+Materialize worker:
+
+- `QUERY_WORKER_URL` (deployed query-worker base URL)
+- `QUERY_WORKER_TOKEN` (same value as query-worker `QUERY_ADMIN_TOKEN`)
+- `MATERIALIZE_RUN_SECRET` (optional bearer token for `POST /run`)
+- `OPS_WAE` analytics dataset binding (optional operational metrics)
 
 If any `QUERY_*_TOKEN` is configured, requests without a matching bearer token are rejected (unless Access JWT is enabled and valid).
 
@@ -294,7 +309,8 @@ Synthetic worker:
 
 Pages:
 
-- `VITE_QUERY_API_BASE` (required; set to deployed query-worker URL)
+- `VITE_QUERY_API_BASE` (required for deploys; set to the customer-specific deployed query-worker URL or custom domain)
+- If using Cloudflare Access SSO, this must be the exact Access-protected API origin, not just the Pages site origin.
 
 ## API Endpoints
 
@@ -320,6 +336,7 @@ Query worker:
 
 - `GET /health`
 - `POST /auth/login`
+- `GET /auth/access/start`
 - `GET /auth/me`
 - `POST /auth/logout`
 - `GET /auth/invites`

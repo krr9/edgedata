@@ -1,6 +1,20 @@
 export { TailHub } from './tail-hub.js';
 export { DashboardCache } from './dashboard-cache.js';
 import {
+  cacheShardNameForKey,
+  normalizeBooleanFlag,
+  normalizeCacheTtlSeconds,
+  normalizeExecutionMode,
+  normalizeMaterializeIntervalSeconds,
+  normalizeMaxStalenessSeconds,
+  normalizePerformanceProfile
+} from './performance-policy.mjs';
+import {
+  buildMaterializationBucket,
+  buildScopeKey,
+  hashQueryText
+} from '../../shared/materialization-core.mjs';
+import {
   classifyGuardrailError,
   enforceTimeGuardrails,
   getDateRange,
@@ -23,6 +37,7 @@ import {
   executeTransactionPipeline
 } from './search-stream-core.mjs';
 import { allowsCredentialedCors, resolveCorsOriginFromPatterns } from './cors-utils.mjs';
+import { resolveAccessStartReturnTo } from './access-sso-utils.mjs';
 import {
   buildStarterAlertPackDefinitions,
   extractStarterIdFromParamsJson
@@ -39,6 +54,7 @@ import {
 } from './investigation-core.mjs';
 import { statusFromError } from './error-utils.mjs';
 import { seedStarterDashboards } from './starter-dashboards.mjs';
+import { mergePermissionsWithDefaults } from './rbac-core.mjs';
 import { validateQueryAccessJwtConfig } from '../../shared/access-config.mjs';
 
 export interface Env {
@@ -71,9 +87,12 @@ export interface Env {
   AUTH_LOGIN_RATE_LIMIT_PER_MIN?: string;
   OPS_WAE?: AnalyticsEngineDataset;
   SYNTHETIC_SERVICE?: Fetcher;
+  ALERT_SERVICE?: Fetcher;
   SYNTHETIC_RUN_SECRET?: string;
+  ALERT_RUN_SECRET?: string;
   TAIL_HUB: DurableObjectNamespace;
   DASHBOARD_CACHE: DurableObjectNamespace;
+  DASHBOARD_CACHE_SHARDS?: string;
   DEMO_SCENARIOS_ENABLED?: string;
 }
 
@@ -172,8 +191,20 @@ interface SearchResponse {
     mode: SearchMode;
     scanned_partitions: number;
     scanned_objects: number;
+    listed_prefixes: number;
+    listing_calls: number;
+    listed_objects: number;
+    listing_fallbacks: number;
     candidates: number;
     returned: number;
+    execution_path?: 'single' | 'shared_base';
+    timing_ms?: {
+      listing: number;
+      object_read: number;
+      parse_filter: number;
+      post_pipeline: number;
+      total: number;
+    };
   };
 }
 
@@ -181,11 +212,26 @@ interface PplSearchResponse {
   result_type: 'events' | 'table';
   results: Array<SearchEvent | Record<string, unknown>>;
   next_cursor: { before_ts: string; before_event_id: string } | null;
+  source?: 'live' | 'cache' | 'materialized' | 'stale_materialized';
+  computed_at?: string;
+  expires_at?: string;
+  materialization_status?: 'fresh' | 'stale' | 'miss' | 'disabled';
   stats: SearchResponse['stats'] & {
     language: 'ppl';
     stage_count: number;
   };
   warning?: string;
+}
+
+interface DashboardBatchWidgetRequest {
+  widget_id: string;
+  ppl: string;
+  limit?: number;
+}
+
+interface DashboardBatchWidgetResult {
+  response?: PplSearchResponse;
+  error?: string;
 }
 
 interface GuardrailExplanation {
@@ -202,9 +248,21 @@ interface FacetCount {
 
 interface SearchSummaryResponse {
   mode: SearchMode;
+  scanned_partitions: number;
   sampled_events: number;
   sampled_candidates: number;
   scanned_objects: number;
+  listed_prefixes: number;
+  listing_calls: number;
+  listed_objects: number;
+  listing_fallbacks: number;
+  timing_ms?: {
+    listing: number;
+    object_read: number;
+    parse_filter: number;
+    post_pipeline: number;
+    total: number;
+  };
   truncated: boolean;
   top_terms: FacetCount[];
   field_presence: {
@@ -313,6 +371,14 @@ interface ScheduledSearchRow {
   enabled: number;
   actions_json: string;
   max_results: number;
+  execution_mode?: string | null;
+  cache_ttl_seconds?: number | null;
+  materialize_enabled?: number | null;
+  materialize_interval_seconds?: number | null;
+  max_staleness_seconds?: number | null;
+  last_materialized_at?: string | null;
+  last_materialization_status?: string | null;
+  last_materialization_error?: string | null;
   created_by?: string | null;
   created_at: string;
   updated_at?: string | null;
@@ -327,8 +393,18 @@ interface ScheduledSearchResultRow {
   status: string;
   result_count: number;
   results_json: string;
+  trigger_type?: string | null;
+  requested_by?: string | null;
+  query_request_json?: string | null;
+  preview_json?: string | null;
+  summary_json?: string | null;
+  materialized_result_id?: string | null;
+  comparison_json?: string | null;
   stats_json: string;
   error_message?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  baseline_run_id?: string | null;
   created_at: string;
 }
 
@@ -338,6 +414,8 @@ interface DashboardRow {
   description?: string | null;
   layout_json: string;
   is_default: number;
+  performance_profile?: string | null;
+  default_execution_mode?: string | null;
   created_by?: string | null;
   created_at: string;
   updated_at?: string | null;
@@ -358,6 +436,15 @@ interface DashboardPanelRow {
   display_options_json?: string | null;
   time_window_minutes: number;
   refresh_seconds: number;
+  execution_mode?: string | null;
+  cache_ttl_seconds?: number | null;
+  materialize_enabled?: number | null;
+  materialize_interval_seconds?: number | null;
+  max_staleness_seconds?: number | null;
+  priority?: number | null;
+  last_materialized_at?: string | null;
+  last_materialization_status?: string | null;
+  last_materialization_error?: string | null;
   options_json: string;
   position: number;
   created_at: string;
@@ -501,11 +588,70 @@ interface SearchContext {
   parsed: ParsedQuery;
 }
 
+interface ListingTracker {
+  prefixes: Set<string>;
+  listing_calls: number;
+  listed_objects: number;
+  listing_fallbacks: number;
+}
+
+interface ListingStatsSnapshot {
+  listed_prefixes: number;
+  listing_calls: number;
+  listed_objects: number;
+  listing_fallbacks: number;
+}
+
+interface TimingTracker {
+  listingMs: number;
+  objectReadMs: number;
+  parseFilterMs: number;
+  postPipelineMs: number;
+}
+
+interface TimingStatsSnapshot {
+  listing: number;
+  object_read: number;
+  parse_filter: number;
+  post_pipeline: number;
+  total: number;
+}
+
+type ExecutionMode = 'live' | 'cached' | 'materialized';
+type PerformanceProfile = 'economy' | 'balanced' | 'fast';
+
+interface ExecutionPolicy {
+  execution_mode: ExecutionMode;
+  cache_ttl_seconds: number;
+  materialize_enabled: boolean;
+  materialize_interval_seconds: number;
+  max_staleness_seconds: number;
+  priority: number;
+}
+
+interface MaterializedResultRow {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  scope_key: string;
+  query_hash: string;
+  time_bucket_start: string;
+  time_bucket_end: string;
+  status: string;
+  result_count: number;
+  payload_r2_key?: string | null;
+  payload_inline_json?: string | null;
+  stats_json: string;
+  computed_at: string;
+  expires_at: string;
+}
+
 const MAX_LIMIT = 500;
 const DEFAULT_LIMIT = 200;
 const MAX_CANDIDATES = 5000;
 const MAX_SUMMARY_EVENTS = 5000;
 const PPL_MAX_LIMIT = 5000;
+const R2_READ_CONCURRENCY = 8;
 const DEFAULT_EVENT_INDEX = 'default';
 const NDJSON_CONTENT_TYPE = 'application/x-ndjson; charset=utf-8';
 const PPL_PREFILTER_EQ_FIELDS = new Set([
@@ -711,6 +857,17 @@ function resolveCorsOrigin(request: Request, env: Env): string {
   );
 }
 
+function resolveAccessReturnTo(request: Request, env: Env): string {
+  const url = new URL(request.url);
+  return resolveAccessStartReturnTo({
+    requestUrl: request.url,
+    requestedReturnTo: url.searchParams.get('return_to') || '',
+    allowedOrigins: Array.from(parseCsvSet(env.CORS_ORIGINS)),
+    originHeader: request.headers.get('origin') || '',
+    refererHeader: request.headers.get('referer') || ''
+  });
+}
+
 function corsHeaders(request: Request, env: Env): Record<string, string> {
   const origin = resolveCorsOrigin(request, env);
   return {
@@ -735,6 +892,25 @@ function textResponse(text: string, status = 200, extraHeaders: Record<string, s
     status,
     headers: extraHeaders
   });
+}
+
+function htmlResponse(html: string, status = 200, extraHeaders: Record<string, string> = {}): Response {
+  return new Response(html, {
+    status,
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+      ...extraHeaders
+    }
+  });
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 function clientIp(request: Request): string {
@@ -945,6 +1121,22 @@ async function ensureRbacInitialized(env: Env): Promise<void> {
         now,
         now
       ).run();
+    }
+
+    const existingRoles = await env.DB.prepare(
+      `SELECT id, name, system_role, enabled, permissions_json, scope_json, created_at, updated_at
+       FROM roles
+       WHERE id IN (${roleIds.map(() => '?').join(', ')})`
+    ).bind(...roleIds).all<RoleRow>();
+
+    for (const role of existingRoles.results || []) {
+      if (role.system_role !== 1) continue;
+      const currentPermissions = parseJsonArray(role.permissions_json, []);
+      const mergedPermissions = mergePermissionsWithDefaults(currentPermissions, ROLE_PERMISSION_DEFAULTS[role.id] || []);
+      if (mergedPermissions.length === currentPermissions.length) continue;
+      await env.DB.prepare(
+        'UPDATE roles SET permissions_json = ?, updated_at = ? WHERE id = ?'
+      ).bind(JSON.stringify(mergedPermissions), now, role.id).run();
     }
 
     const seedGroupMappings = async (csv: string | undefined, roleId: string) => {
@@ -1195,6 +1387,53 @@ async function writeOpsMetric(
   await env.OPS_WAE.writeData([row]);
 }
 
+async function writeScanMetrics(
+  env: Env,
+  namespace: 'search' | 'search_summary' | 'dashboard_widget',
+  stats: ListingStatsSnapshot & {
+    scanned_objects: number;
+    scanned_partitions: number;
+    timing_ms?: Partial<TimingStatsSnapshot>;
+  }
+): Promise<void> {
+  const metricValue = (value: unknown): number => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : 0;
+  };
+  await Promise.allSettled([
+    writeOpsMetric(env, `${namespace}_scanned_partitions`, metricValue(stats.scanned_partitions)),
+    writeOpsMetric(env, `${namespace}_scanned_objects`, metricValue(stats.scanned_objects)),
+    writeOpsMetric(env, `${namespace}_listed_prefixes`, metricValue(stats.listed_prefixes)),
+    writeOpsMetric(env, `${namespace}_listing_calls`, metricValue(stats.listing_calls)),
+    writeOpsMetric(env, `${namespace}_listed_objects`, metricValue(stats.listed_objects)),
+    writeOpsMetric(env, `${namespace}_listing_fallbacks`, metricValue(stats.listing_fallbacks)),
+    writeOpsMetric(env, `${namespace}_listing_ms`, metricValue(stats.timing_ms?.listing)),
+    writeOpsMetric(env, `${namespace}_object_read_ms`, metricValue(stats.timing_ms?.object_read)),
+    writeOpsMetric(env, `${namespace}_parse_filter_ms`, metricValue(stats.timing_ms?.parse_filter)),
+    writeOpsMetric(env, `${namespace}_post_pipeline_ms`, metricValue(stats.timing_ms?.post_pipeline)),
+    writeOpsMetric(env, `${namespace}_total_ms`, metricValue(stats.timing_ms?.total))
+  ]);
+}
+
+function createTimingTracker(): TimingTracker {
+  return {
+    listingMs: 0,
+    objectReadMs: 0,
+    parseFilterMs: 0,
+    postPipelineMs: 0
+  };
+}
+
+function snapshotTimingTracker(tracker: TimingTracker, totalMs: number): TimingStatsSnapshot {
+  return {
+    listing: Math.round(tracker.listingMs),
+    object_read: Math.round(tracker.objectReadMs),
+    parse_filter: Math.round(tracker.parseFilterMs),
+    post_pipeline: Math.round(tracker.postPipelineMs),
+    total: Math.round(totalMs)
+  };
+}
+
 function clampLimit(limit: number | undefined, maxLimit = MAX_LIMIT): number {
   if (!limit || !Number.isFinite(limit)) return DEFAULT_LIMIT;
   return Math.max(1, Math.min(Math.trunc(limit), maxLimit));
@@ -1311,6 +1550,82 @@ async function listAllObjects(bucket: R2Bucket, prefix: string): Promise<string[
   return keys;
 }
 
+function createListingTracker(): ListingTracker {
+  return {
+    prefixes: new Set<string>(),
+    listing_calls: 0,
+    listed_objects: 0,
+    listing_fallbacks: 0
+  };
+}
+
+function snapshotListingTracker(tracker: ListingTracker): ListingStatsSnapshot {
+  return {
+    listed_prefixes: tracker.prefixes.size,
+    listing_calls: tracker.listing_calls,
+    listed_objects: tracker.listed_objects,
+    listing_fallbacks: tracker.listing_fallbacks
+  };
+}
+
+function recordListing(tracker: ListingTracker | undefined, prefix: string, listedObjects: number): void {
+  if (!tracker) return;
+  tracker.prefixes.add(prefix);
+  tracker.listing_calls += 1;
+  tracker.listed_objects += listedObjects;
+}
+
+function isExactScopedValue(value: string | undefined): value is string {
+  if (!value) return false;
+  if (value === '*') return false;
+  return !value.includes('*');
+}
+
+function encodePartitionValue(value: string): string {
+  return encodeURIComponent(value);
+}
+
+function buildPartitionPrefix(
+  kind: 'events' | 'tokens' | 'raw',
+  date: string,
+  filters: SearchFilters
+): string {
+  const base = `${kind}/date=${date}/`;
+  const index = isExactScopedValue(filters.index) ? normalizeIndexValue(filters.index) : null;
+  if (!index) return base;
+
+  const indexPrefix = `${base}index=${encodePartitionValue(index)}/`;
+  if (kind === 'raw') return indexPrefix;
+
+  const service = isExactScopedValue(filters.service) ? filters.service : null;
+  if (!service) return indexPrefix;
+
+  const servicePrefix = `${indexPrefix}service=${encodePartitionValue(service)}/`;
+  const env = isExactScopedValue(filters.env) ? filters.env : null;
+  if (!env) return servicePrefix;
+  return `${servicePrefix}env=${encodePartitionValue(env)}/`;
+}
+
+async function listObjectsWithPrefixFallback(
+  bucket: R2Bucket,
+  preferredPrefix: string,
+  fallbackPrefix: string,
+  tracker?: ListingTracker,
+  timing?: TimingTracker
+): Promise<string[]> {
+  const preferredStartedAt = Date.now();
+  const preferred = await listAllObjects(bucket, preferredPrefix);
+  if (timing) timing.listingMs += Date.now() - preferredStartedAt;
+  recordListing(tracker, preferredPrefix, preferred.length);
+  if (preferred.length > 0 || preferredPrefix === fallbackPrefix) return preferred;
+  if (tracker) tracker.listing_fallbacks += 1;
+  const fallbackStartedAt = Date.now();
+  const fallback = await listAllObjects(bucket, fallbackPrefix);
+  if (timing) timing.listingMs += Date.now() - fallbackStartedAt;
+  recordListing(tracker, fallbackPrefix, fallback.length);
+  return fallback;
+}
+
 function keyDimensionValue(key: string, dimension: 'index' | 'service' | 'env'): string | null {
   const match = key.match(new RegExp(`/${dimension}=([^/]+)/`));
   if (!match) return null;
@@ -1337,8 +1652,15 @@ function keyMatchesFiltersByPath(key: string, filters: SearchFilters): boolean {
   return true;
 }
 
-async function listEventKeysForDate(bucket: R2Bucket, date: string, filters: SearchFilters): Promise<string[]> {
-  const eventKeys = await listAllObjects(bucket, `events/date=${date}/`);
+async function listEventKeysForDate(
+  bucket: R2Bucket,
+  date: string,
+  filters: SearchFilters,
+  tracker?: ListingTracker,
+  timing?: TimingTracker
+): Promise<string[]> {
+  const eventPrefix = buildPartitionPrefix('events', date, filters);
+  const eventKeys = await listObjectsWithPrefixFallback(bucket, eventPrefix, `events/date=${date}/`, tracker, timing);
   const filteredEvents = eventKeys.filter((key) => keyMatchesFiltersByPath(key, filters));
 
   if (filteredEvents.length > 0) {
@@ -1346,12 +1668,20 @@ async function listEventKeysForDate(bucket: R2Bucket, date: string, filters: Sea
   }
 
   // Backward compatibility for data ingested before `events/` path existed.
-  const rawKeys = await listAllObjects(bucket, `raw/date=${date}/`);
+  const rawPrefix = buildPartitionPrefix('raw', date, filters);
+  const rawKeys = await listObjectsWithPrefixFallback(bucket, rawPrefix, `raw/date=${date}/`, tracker, timing);
   return rawKeys.filter((key) => keyMatchesFiltersByPath(key, filters));
 }
 
-async function listTokenKeysForDate(bucket: R2Bucket, date: string, filters: SearchFilters): Promise<string[]> {
-  const tokenKeys = await listAllObjects(bucket, `tokens/date=${date}/`);
+async function listTokenKeysForDate(
+  bucket: R2Bucket,
+  date: string,
+  filters: SearchFilters,
+  tracker?: ListingTracker,
+  timing?: TimingTracker
+): Promise<string[]> {
+  const tokenPrefix = buildPartitionPrefix('tokens', date, filters);
+  const tokenKeys = await listObjectsWithPrefixFallback(bucket, tokenPrefix, `tokens/date=${date}/`, tracker, timing);
   return tokenKeys.filter((key) => keyMatchesFiltersByPath(key, filters));
 }
 
@@ -1359,6 +1689,17 @@ async function readObjectText(bucket: R2Bucket, key: string): Promise<string | n
   const object = await bucket.get(key);
   if (!object) return null;
   return object.text();
+}
+
+async function readObjectChunk(
+  bucket: R2Bucket,
+  keys: string[],
+  timing?: TimingTracker
+): Promise<Array<{ key: string; text: string | null }>> {
+  const startedAt = Date.now();
+  const results = await Promise.all(keys.map(async (key) => ({ key, text: await readObjectText(bucket, key) })));
+  if (timing) timing.objectReadMs += Date.now() - startedAt;
+  return results;
 }
 
 async function fetchEventsByIds(
@@ -1370,41 +1711,48 @@ async function fetchEventsByIds(
   fromMs: number,
   toMs: number,
   cursor: { before_ts: string; before_event_id: string } | null | undefined,
-  limit: number
+  limit: number,
+  tracker?: ListingTracker,
+  timing?: TimingTracker
 ): Promise<{ results: SearchEvent[]; scannedObjects: number }> {
   const results: SearchEvent[] = [];
   let scannedObjects = 0;
 
   for (const date of dates) {
-    const keys = await listEventKeysForDate(env.RAW_BUCKET, date, filters);
-    for (const key of keys) {
+    const keys = await listEventKeysForDate(env.RAW_BUCKET, date, filters, tracker, timing);
+    for (let i = 0; i < keys.length; i += R2_READ_CONCURRENCY) {
       if (results.length >= limit || eventIds.size === 0) break;
+      const chunk = keys.slice(i, i + R2_READ_CONCURRENCY);
+      const objects = await readObjectChunk(env.RAW_BUCKET, chunk, timing);
+      for (const { text } of objects) {
+        if (results.length >= limit || eventIds.size === 0) break;
+        if (!text) continue;
 
-      const text = await readObjectText(env.RAW_BUCKET, key);
-      if (!text) continue;
+        scannedObjects++;
+        const parseStartedAt = Date.now();
+        const lines = text.split('\n');
 
-      scannedObjects++;
-      const lines = text.split('\n');
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let event: SearchEvent;
+          try {
+            event = JSON.parse(line) as SearchEvent;
+          } catch {
+            continue;
+          }
+          event.index = eventIndex(event);
 
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        let event: SearchEvent;
-        try {
-          event = JSON.parse(line) as SearchEvent;
-        } catch {
-          continue;
+          if (!eventIds.has(event.event_id)) continue;
+          if (!isWithinWindow(event.ts, fromMs, toMs)) continue;
+          if (!isBeforeCursor(event, cursor)) continue;
+          if (!eventMatchesFilters(event, filters)) continue;
+          if (!eventMatchesScope(event, scope)) continue;
+
+          results.push(event);
+          eventIds.delete(event.event_id);
+          if (results.length >= limit) break;
         }
-        event.index = eventIndex(event);
-
-        if (!eventIds.has(event.event_id)) continue;
-        if (!isWithinWindow(event.ts, fromMs, toMs)) continue;
-        if (!isBeforeCursor(event, cursor)) continue;
-        if (!eventMatchesFilters(event, filters)) continue;
-        if (!eventMatchesScope(event, scope)) continue;
-
-        results.push(event);
-        eventIds.delete(event.event_id);
-        if (results.length >= limit) break;
+        if (timing) timing.parseFilterMs += Date.now() - parseStartedAt;
       }
     }
 
@@ -1423,41 +1771,47 @@ async function scanEvents(
   toMs: number,
   cursor: { before_ts: string; before_event_id: string } | null | undefined,
   limit: number,
-  phrase: string | null
+  phrase: string | null,
+  tracker?: ListingTracker,
+  timing?: TimingTracker
 ): Promise<{ results: SearchEvent[]; scannedObjects: number }> {
   const matches: SearchEvent[] = [];
   let scannedObjects = 0;
 
   for (const date of dates) {
-    const keys = await listEventKeysForDate(env.RAW_BUCKET, date, filters);
+    const keys = await listEventKeysForDate(env.RAW_BUCKET, date, filters, tracker, timing);
+    for (let i = 0; i < keys.length; i += R2_READ_CONCURRENCY) {
+      const chunk = keys.slice(i, i + R2_READ_CONCURRENCY);
+      const objects = await readObjectChunk(env.RAW_BUCKET, chunk, timing);
+      for (const { text } of objects) {
+        if (!text) continue;
 
-    for (const key of keys) {
-      const text = await readObjectText(env.RAW_BUCKET, key);
-      if (!text) continue;
+        scannedObjects++;
+        const parseStartedAt = Date.now();
+        for (const line of text.split('\n')) {
+          if (!line.trim()) continue;
 
-      scannedObjects++;
-      for (const line of text.split('\n')) {
-        if (!line.trim()) continue;
+          let event: SearchEvent;
+          try {
+            event = JSON.parse(line) as SearchEvent;
+          } catch {
+            continue;
+          }
+          event.index = eventIndex(event);
 
-        let event: SearchEvent;
-        try {
-          event = JSON.parse(line) as SearchEvent;
-        } catch {
-          continue;
+          if (!isWithinWindow(event.ts, fromMs, toMs)) continue;
+          if (!isBeforeCursor(event, cursor)) continue;
+          if (!eventMatchesFilters(event, filters)) continue;
+          if (!eventMatchesScope(event, scope)) continue;
+
+          if (phrase) {
+            const haystack = (event.message_lc || event.message.toLowerCase());
+            if (!haystack.includes(phrase)) continue;
+          }
+
+          matches.push(event);
         }
-        event.index = eventIndex(event);
-
-        if (!isWithinWindow(event.ts, fromMs, toMs)) continue;
-        if (!isBeforeCursor(event, cursor)) continue;
-        if (!eventMatchesFilters(event, filters)) continue;
-        if (!eventMatchesScope(event, scope)) continue;
-
-        if (phrase) {
-          const haystack = (event.message_lc || event.message.toLowerCase());
-          if (!haystack.includes(phrase)) continue;
-        }
-
-        matches.push(event);
+        if (timing) timing.parseFilterMs += Date.now() - parseStartedAt;
       }
     }
   }
@@ -1471,40 +1825,47 @@ async function scanTokenCandidates(
   dates: string[],
   queryTokens: string[],
   filters: SearchFilters,
-  scope: DataScope
+  scope: DataScope,
+  tracker?: ListingTracker,
+  timing?: TimingTracker
 ): Promise<{ ids: string[]; scannedObjects: number }> {
   const tokenSet = new Set(queryTokens);
   const scoreById = new Map<string, number>();
   let scannedObjects = 0;
 
   for (const date of dates) {
-    const keys = await listTokenKeysForDate(env.RAW_BUCKET, date, filters);
-    for (const key of keys) {
-      const text = await readObjectText(env.RAW_BUCKET, key);
-      if (!text) continue;
+    const keys = await listTokenKeysForDate(env.RAW_BUCKET, date, filters, tracker, timing);
+    for (let i = 0; i < keys.length; i += R2_READ_CONCURRENCY) {
+      const chunk = keys.slice(i, i + R2_READ_CONCURRENCY);
+      const objects = await readObjectChunk(env.RAW_BUCKET, chunk, timing);
+      for (const { text } of objects) {
+        if (!text) continue;
 
-      scannedObjects++;
-      for (const line of text.split('\n')) {
-        if (!line.trim()) continue;
+        scannedObjects++;
+        const parseStartedAt = Date.now();
+        for (const line of text.split('\n')) {
+          if (!line.trim()) continue;
 
-        let record: { token?: string; event_id?: string; index?: string; service?: string; env?: string };
-        try {
-          record = JSON.parse(line) as { token?: string; event_id?: string; index?: string; service?: string; env?: string };
-        } catch {
-          continue;
+          let record: { token?: string; event_id?: string; index?: string; service?: string; env?: string };
+          try {
+            record = JSON.parse(line) as { token?: string; event_id?: string; index?: string; service?: string; env?: string };
+          } catch {
+            continue;
+          }
+
+          if (!record.event_id || !record.token) continue;
+          if (!tokenSet.has(record.token)) continue;
+          const recordIndex = normalizeIndexValue(record.index);
+          if (filters.index && recordIndex !== normalizeIndexValue(filters.index)) continue;
+          if (!matchesScopedValue(recordIndex, scope.indexes)) continue;
+          if (filters.service && record.service !== filters.service) continue;
+          if (filters.env && record.env !== filters.env) continue;
+          if (!matchesScopedValue(record.service, scope.services)) continue;
+          if (!matchesScopedValue(record.env, scope.envs)) continue;
+
+          scoreById.set(record.event_id, (scoreById.get(record.event_id) || 0) + 1);
         }
-
-        if (!record.event_id || !record.token) continue;
-        if (!tokenSet.has(record.token)) continue;
-        const recordIndex = normalizeIndexValue(record.index);
-        if (filters.index && recordIndex !== normalizeIndexValue(filters.index)) continue;
-        if (!matchesScopedValue(recordIndex, scope.indexes)) continue;
-        if (filters.service && record.service !== filters.service) continue;
-        if (filters.env && record.env !== filters.env) continue;
-        if (!matchesScopedValue(record.service, scope.services)) continue;
-        if (!matchesScopedValue(record.env, scope.envs)) continue;
-
-        scoreById.set(record.event_id, (scoreById.get(record.event_id) || 0) + 1);
+        if (timing) timing.parseFilterMs += Date.now() - parseStartedAt;
       }
     }
   }
@@ -1526,12 +1887,13 @@ async function fetchEventsByIdsStream(
   fromMs: number,
   toMs: number,
   cursor: { before_ts: string; before_event_id: string } | null | undefined,
-  onEvent: (event: SearchEvent) => Promise<boolean> | boolean
+  onEvent: (event: SearchEvent) => Promise<boolean> | boolean,
+  tracker?: ListingTracker
 ): Promise<{ scannedObjects: number }> {
   let scannedObjects = 0;
 
   for (const date of dates) {
-    const keys = await listEventKeysForDate(env.RAW_BUCKET, date, filters);
+    const keys = await listEventKeysForDate(env.RAW_BUCKET, date, filters, tracker);
     for (const key of keys) {
       if (eventIds.size === 0) break;
 
@@ -1578,12 +1940,13 @@ async function scanEventsStream(
   toMs: number,
   cursor: { before_ts: string; before_event_id: string } | null | undefined,
   phrase: string | null,
-  onEvent: (event: SearchEvent) => Promise<boolean> | boolean
+  onEvent: (event: SearchEvent) => Promise<boolean> | boolean,
+  tracker?: ListingTracker
 ): Promise<{ scannedObjects: number }> {
   let scannedObjects = 0;
 
   for (const date of dates) {
-    const keys = await listEventKeysForDate(env.RAW_BUCKET, date, filters);
+    const keys = await listEventKeysForDate(env.RAW_BUCKET, date, filters, tracker);
 
     for (const key of keys) {
       const text = await readObjectText(env.RAW_BUCKET, key);
@@ -2287,16 +2650,18 @@ async function executeSearchWithContext(
   env: Env,
   auth: AuthContext,
   cursor: { before_ts: string; before_event_id: string } | null | undefined,
-  limit: number
-): Promise<{ results: SearchEvent[]; scannedObjects: number; candidates: number }> {
+  limit: number,
+  timing = createTimingTracker()
+): Promise<{ results: SearchEvent[]; scannedObjects: number; candidates: number; listing: ListingStatsSnapshot }> {
   const { mode, phrase, filters, fromMs, toMs, dates, parsed } = context;
 
   let results: SearchEvent[] = [];
   let scannedObjects = 0;
   let candidates = 0;
+  const listingTracker = createListingTracker();
 
   if (mode === 'token') {
-    const tokenScan = await scanTokenCandidates(env, dates, parsed.tokens, filters, auth.scope);
+    const tokenScan = await scanTokenCandidates(env, dates, parsed.tokens, filters, auth.scope, listingTracker, timing);
     scannedObjects += tokenScan.scannedObjects;
     candidates = tokenScan.ids.length;
 
@@ -2310,7 +2675,9 @@ async function executeSearchWithContext(
         fromMs,
         toMs,
         cursor,
-        limit
+        limit,
+        listingTracker,
+        timing
       );
       scannedObjects += events.scannedObjects;
       results = events.results;
@@ -2325,19 +2692,23 @@ async function executeSearchWithContext(
       toMs,
       cursor,
       limit,
-      mode === 'phrase' ? phrase : null
+      mode === 'phrase' ? phrase : null,
+      listingTracker,
+      timing
     );
     scannedObjects += scanned.scannedObjects;
     results = scanned.results;
   }
 
-  return { results, scannedObjects, candidates };
+  return { results, scannedObjects, candidates, listing: snapshotListingTracker(listingTracker) };
 }
 
 async function performSearch(request: SearchRequest, env: Env, auth: AuthContext): Promise<SearchResponse> {
+  const startedAt = Date.now();
+  const timing = createTimingTracker();
   const context = buildSearchContext(request, auth);
   const limit = clampLimit(request.limit, context.mode === 'phrase' ? 200 : MAX_LIMIT);
-  const execution = await executeSearchWithContext(context, env, auth, request.cursor, limit);
+  const execution = await executeSearchWithContext(context, env, auth, request.cursor, limit, timing);
 
   return {
     results: execution.results,
@@ -2346,15 +2717,23 @@ async function performSearch(request: SearchRequest, env: Env, auth: AuthContext
       mode: context.mode,
       scanned_partitions: context.dates.length,
       scanned_objects: execution.scannedObjects,
+      listed_prefixes: execution.listing.listed_prefixes,
+      listing_calls: execution.listing.listing_calls,
+      listed_objects: execution.listing.listed_objects,
+      listing_fallbacks: execution.listing.listing_fallbacks,
       candidates: execution.candidates,
-      returned: execution.results.length
+      returned: execution.results.length,
+      execution_path: 'single',
+      timing_ms: snapshotTimingTracker(timing, Date.now() - startedAt)
     }
   };
 }
 
 async function performSearchSummary(request: SearchRequest, env: Env, auth: AuthContext): Promise<SearchSummaryResponse> {
+  const startedAt = Date.now();
+  const timing = createTimingTracker();
   const context = buildSearchContext(request, auth);
-  const execution = await executeSearchWithContext(context, env, auth, null, MAX_SUMMARY_EVENTS);
+  const execution = await executeSearchWithContext(context, env, auth, null, MAX_SUMMARY_EVENTS, timing);
   const sampledEvents = execution.results;
 
   const facets = {
@@ -2367,9 +2746,15 @@ async function performSearchSummary(request: SearchRequest, env: Env, auth: Auth
 
   return {
     mode: context.mode,
+    scanned_partitions: context.dates.length,
     sampled_events: sampledEvents.length,
     sampled_candidates: execution.candidates,
     scanned_objects: execution.scannedObjects,
+    listed_prefixes: execution.listing.listed_prefixes,
+    listing_calls: execution.listing.listing_calls,
+    listed_objects: execution.listing.listed_objects,
+    listing_fallbacks: execution.listing.listing_fallbacks,
+    timing_ms: snapshotTimingTracker(timing, Date.now() - startedAt),
     truncated: sampledEvents.length >= MAX_SUMMARY_EVENTS,
     top_terms: buildTopTerms(sampledEvents, 24),
     field_presence: buildFieldPresence(sampledEvents),
@@ -2379,6 +2764,8 @@ async function performSearchSummary(request: SearchRequest, env: Env, auth: Auth
 }
 
 async function performPplSearch(request: PplSearchRequest, env: Env, auth: AuthContext): Promise<PplSearchResponse> {
+  const startedAt = Date.now();
+  const timing = createTimingTracker();
   if (!request?.time?.from || !request?.time?.to) {
     throw new Error('Time range required');
   }
@@ -2391,9 +2778,11 @@ async function performPplSearch(request: PplSearchRequest, env: Env, auth: AuthC
   const context = buildSearchContext(compiled, auth);
   const requestedLimit = clampLimit(request.limit, PPL_MAX_LIMIT);
   const executionLimit = context.mode === 'phrase' ? Math.min(200, requestedLimit) : requestedLimit;
-  const execution = await executeSearchWithContext(context, env, auth, compiled.cursor, executionLimit);
+  const execution = await executeSearchWithContext(context, env, auth, compiled.cursor, executionLimit, timing);
+  const postPipelineStartedAt = Date.now();
   const lookupCache = await loadLookupCache(pipeline, env);
   const transformed = applyPplPipelineStages(execution.results, pipeline, lookupCache);
+  timing.postPipelineMs += Date.now() - postPipelineStartedAt;
   const rows = transformed.rows.slice(0, requestedLimit);
   const nextCursorValue = transformed.resultType === 'events'
     ? nextCursor(rows as SearchEvent[])
@@ -2407,8 +2796,14 @@ async function performPplSearch(request: PplSearchRequest, env: Env, auth: AuthC
       mode: context.mode,
       scanned_partitions: context.dates.length,
       scanned_objects: execution.scannedObjects,
+      listed_prefixes: execution.listing.listed_prefixes,
+      listing_calls: execution.listing.listing_calls,
+      listed_objects: execution.listing.listed_objects,
+      listing_fallbacks: execution.listing.listing_fallbacks,
       candidates: execution.candidates,
       returned: rows.length,
+      execution_path: 'single',
+      timing_ms: snapshotTimingTracker(timing, Date.now() - startedAt),
       language: 'ppl',
       stage_count: pipeline.stages.length
     },
@@ -2491,6 +2886,7 @@ async function streamPplSearch(
       let candidates = 0;
       let scannedObjects = 0;
       let lastEvent: SearchEvent | null = null;
+      const listingTracker = createListingTracker();
 
       const emitEventIfMatch = async (event: SearchEvent): Promise<boolean> => {
         if (!rowMatchesWhereStages(event as unknown as Record<string, unknown>, pipeline.stages)) {
@@ -2500,9 +2896,14 @@ async function streamPplSearch(
         emitted += 1;
         lastEvent = event;
         if (emitted % 25 === 0) {
+          const listing = snapshotListingTracker(listingTracker);
           await writeNdjsonLine(writer, encoder, {
             type: 'progress',
             scanned_objects: scannedObjects,
+            listed_prefixes: listing.listed_prefixes,
+            listing_calls: listing.listing_calls,
+            listed_objects: listing.listed_objects,
+            listing_fallbacks: listing.listing_fallbacks,
             candidates,
             returned: emitted
           });
@@ -2511,7 +2912,7 @@ async function streamPplSearch(
       };
 
       if (context.mode === 'token') {
-        const tokenScan = await scanTokenCandidates(env, context.dates, context.parsed.tokens, context.filters, auth.scope);
+        const tokenScan = await scanTokenCandidates(env, context.dates, context.parsed.tokens, context.filters, auth.scope, listingTracker);
         scannedObjects += tokenScan.scannedObjects;
         candidates = tokenScan.ids.length;
 
@@ -2525,7 +2926,8 @@ async function streamPplSearch(
             context.fromMs,
             context.toMs,
             compiled.cursor,
-            emitEventIfMatch
+            emitEventIfMatch,
+            listingTracker
           );
           scannedObjects += fetched.scannedObjects;
         }
@@ -2539,7 +2941,8 @@ async function streamPplSearch(
           context.toMs,
           compiled.cursor,
           context.mode === 'phrase' ? context.phrase : null,
-          emitEventIfMatch
+          emitEventIfMatch,
+          listingTracker
         );
         scannedObjects += scanned.scannedObjects;
       }
@@ -2548,6 +2951,7 @@ async function streamPplSearch(
         ? { before_ts: lastEvent.ts, before_event_id: lastEvent.event_id }
         : null;
 
+      const listing = snapshotListingTracker(listingTracker);
       await writeNdjsonLine(writer, encoder, {
         type: 'final',
         result_type: 'events',
@@ -2556,6 +2960,10 @@ async function streamPplSearch(
           mode: context.mode,
           scanned_partitions: context.dates.length,
           scanned_objects: scannedObjects,
+          listed_prefixes: listing.listed_prefixes,
+          listing_calls: listing.listing_calls,
+          listed_objects: listing.listed_objects,
+          listing_fallbacks: listing.listing_fallbacks,
           candidates,
           returned: emitted,
           language: 'ppl',
@@ -2773,12 +3181,8 @@ function valuesAreSqlExact(values: string[]): boolean {
 }
 
 function buildWaeScopeWhere(scope: DataScope): { whereSql: string; requiresFallback: boolean } {
-  if (!scope.indexes.includes('*')) {
-    // WAE rows do not currently include index dimension, so enforce scoped fallback execution.
-    return { whereSql: '', requiresFallback: true };
-  }
-
   const dimensions: Array<{ values: string[]; column: string }> = [
+    { values: scope.indexes, column: 'index1' },
     { values: scope.services, column: 'blob1' },
     { values: scope.envs, column: 'blob2' },
     { values: scope.hosts, column: 'blob3' }
@@ -2971,29 +3375,74 @@ async function handleDashboardWidgetQuery(
     return jsonResponse({ error: 'time.from, time.to, and ppl are required' }, 400, requestCorsHeaders);
   }
   const widgetId = body.widget_id ? String(body.widget_id) : null;
+  const policy = widgetId
+    ? (await loadDashboardPanelPolicies(env, [widgetId])).get(widgetId) || DEFAULT_EXECUTION_POLICY
+    : DEFAULT_EXECUTION_POLICY;
   const cacheKey = buildDashboardWidgetCacheKey(req, auth.scope, widgetId);
   const cacheKeyHash = hashCacheKey(cacheKey);
   const toMs = Date.parse(req.time.to);
   const cacheBucket = Number.isFinite(toMs) ? Math.floor(toMs / (DASHBOARD_QUERY_CACHE_BUCKET_SECONDS * 1000)) : null;
-  const cached = await getDashboardCachePayload(env, cacheKey);
-  if (cached.hit && cached.payload) {
+  const materialized = widgetId ? await readMaterializedWidgetResult(env, req, auth.scope, widgetId, policy) : null;
+  if (materialized) {
     return jsonResponse(
       {
-        ...cached.payload,
-        cache: 'hit',
+        ...materialized,
+        cache: 'miss',
         cache_debug: {
           key_hash: cacheKeyHash,
           bucket: cacheBucket,
           bucket_seconds: DASHBOARD_QUERY_CACHE_BUCKET_SECONDS,
-          ttl_seconds: DASHBOARD_QUERY_CACHE_TTL_SECONDS
+          ttl_seconds: policy.cache_ttl_seconds
         }
       },
       200,
-      { ...requestCorsHeaders, 'x-edgedata-cache': 'hit' }
+      { ...requestCorsHeaders, 'x-edgedata-cache': 'materialized' }
     );
   }
+  if (isWidgetCacheEnabled(policy)) {
+    const cached = await getDashboardCachePayload(env, cacheKey);
+    if (cached.hit && cached.payload) {
+      await writeScanMetrics(env, 'dashboard_widget', {
+        scanned_partitions: cached.payload.stats.scanned_partitions,
+        scanned_objects: cached.payload.stats.scanned_objects,
+        listed_prefixes: cached.payload.stats.listed_prefixes,
+        listing_calls: cached.payload.stats.listing_calls,
+        listed_objects: cached.payload.stats.listed_objects,
+        listing_fallbacks: cached.payload.stats.listing_fallbacks,
+        timing_ms: cached.payload.stats.timing_ms
+      }).catch(() => undefined);
+      return jsonResponse(
+        {
+          ...cached.payload,
+          source: cached.payload.source || 'cache',
+          cache: 'hit',
+          cache_debug: {
+            key_hash: cacheKeyHash,
+            bucket: cacheBucket,
+            bucket_seconds: DASHBOARD_QUERY_CACHE_BUCKET_SECONDS,
+            ttl_seconds: policy.cache_ttl_seconds
+          }
+        },
+        200,
+        { ...requestCorsHeaders, 'x-edgedata-cache': 'hit' }
+      );
+    }
+  }
   const response = await performPplSearch(req, env, auth);
-  await setDashboardCachePayload(env, cacheKey, response);
+  response.source = 'live';
+  response.materialization_status = policy.materialize_enabled ? 'miss' : 'disabled';
+  await writeScanMetrics(env, 'dashboard_widget', {
+    scanned_partitions: response.stats.scanned_partitions,
+    scanned_objects: response.stats.scanned_objects,
+    listed_prefixes: response.stats.listed_prefixes,
+    listing_calls: response.stats.listing_calls,
+    listed_objects: response.stats.listed_objects,
+    listing_fallbacks: response.stats.listing_fallbacks,
+    timing_ms: response.stats.timing_ms
+  }).catch(() => undefined);
+  if (isWidgetCacheEnabled(policy)) {
+    await setDashboardCachePayload(env, cacheKey, response, policy.cache_ttl_seconds);
+  }
   return jsonResponse(
     {
       ...response,
@@ -3002,7 +3451,7 @@ async function handleDashboardWidgetQuery(
         key_hash: cacheKeyHash,
         bucket: cacheBucket,
         bucket_seconds: DASHBOARD_QUERY_CACHE_BUCKET_SECONDS,
-        ttl_seconds: DASHBOARD_QUERY_CACHE_TTL_SECONDS
+        ttl_seconds: policy.cache_ttl_seconds
       }
     },
     200,
@@ -3026,6 +3475,14 @@ function normalizeJsonInput(input: unknown, fallback: string): string {
 }
 
 const DASHBOARD_WIDGET_TYPES: DashboardWidgetType[] = ['timeseries', 'bar', 'pie', 'table', 'kpi', 'topn', 'markdown'];
+const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
+  execution_mode: 'live',
+  cache_ttl_seconds: 120,
+  materialize_enabled: false,
+  materialize_interval_seconds: 300,
+  max_staleness_seconds: 600,
+  priority: 0
+};
 
 function mapLegacyVizToWidgetType(vizType: string | null | undefined): DashboardWidgetType {
   const value = String(vizType || 'table').toLowerCase();
@@ -3083,6 +3540,21 @@ function parseJsonObject(input: unknown, fallback: Record<string, unknown> = {})
   return { ...fallback };
 }
 
+function parseJsonRecordArray(input: unknown): Record<string, unknown>[] {
+  if (!input) return [];
+  if (Array.isArray(input)) {
+    return input.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) as Record<string, unknown>[];
+  }
+  if (typeof input !== 'string') return [];
+  try {
+    const parsed = JSON.parse(input) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) as Record<string, unknown>[];
+  } catch {
+    return [];
+  }
+}
+
 function normalizeDashboardPanelRow(row: DashboardPanelRow): Record<string, unknown> {
   const widgetType = row.widget_type
     ? mapLegacyVizToWidgetType(row.widget_type)
@@ -3097,6 +3569,12 @@ function normalizeDashboardPanelRow(row: DashboardPanelRow): Record<string, unkn
     widget_type: widgetType,
     query_text: queryText,
     query_mode: String(row.query_mode || 'ppl'),
+    execution_mode: normalizeExecutionMode(row.execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode),
+    cache_ttl_seconds: normalizeCacheTtlSeconds(row.cache_ttl_seconds, DEFAULT_EXECUTION_POLICY.cache_ttl_seconds),
+    materialize_enabled: normalizeBooleanFlag(row.materialize_enabled, DEFAULT_EXECUTION_POLICY.materialize_enabled),
+    materialize_interval_seconds: normalizeMaterializeIntervalSeconds(row.materialize_interval_seconds, DEFAULT_EXECUTION_POLICY.materialize_interval_seconds),
+    max_staleness_seconds: normalizeMaxStalenessSeconds(row.max_staleness_seconds, DEFAULT_EXECUTION_POLICY.max_staleness_seconds),
+    priority: Number.isFinite(Number(row.priority)) ? Math.max(0, Math.trunc(Number(row.priority))) : 0,
     viz_config_json: normalizeJsonInput(row.viz_config_json || row.options_json, '{}'),
     layout_json: normalizedLayoutJson,
     bindings_json: normalizeJsonInput(row.bindings_json, '{}'),
@@ -3110,17 +3588,168 @@ function normalizeDashboardPanelRow(row: DashboardPanelRow): Record<string, unkn
   };
 }
 
+function normalizeDashboardRow(row: DashboardRow): Record<string, unknown> {
+  return {
+    ...row,
+    performance_profile: normalizePerformanceProfile(row.performance_profile, 'economy') as PerformanceProfile,
+    default_execution_mode: normalizeExecutionMode(row.default_execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode) as ExecutionMode
+  };
+}
+
+function normalizeScheduledSearchRow(row: ScheduledSearchRow): Record<string, unknown> {
+  return {
+    ...row,
+    execution_mode: normalizeExecutionMode(row.execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode),
+    cache_ttl_seconds: normalizeCacheTtlSeconds(row.cache_ttl_seconds, DEFAULT_EXECUTION_POLICY.cache_ttl_seconds),
+    materialize_enabled: normalizeBooleanFlag(row.materialize_enabled, DEFAULT_EXECUTION_POLICY.materialize_enabled),
+    materialize_interval_seconds: normalizeMaterializeIntervalSeconds(row.materialize_interval_seconds, DEFAULT_EXECUTION_POLICY.materialize_interval_seconds),
+    max_staleness_seconds: normalizeMaxStalenessSeconds(row.max_staleness_seconds, DEFAULT_EXECUTION_POLICY.max_staleness_seconds)
+  };
+}
+
+function normalizeScheduledSearchResultRow(
+  row: ScheduledSearchResultRow,
+  options: { includePreview?: boolean } = {}
+): Record<string, unknown> {
+  const preview = parseJsonRecordArray(row.preview_json || row.results_json);
+  return {
+    id: row.id,
+    scheduled_search_id: row.scheduled_search_id,
+    run_at: row.run_at,
+    time_from: row.time_from,
+    time_to: row.time_to,
+    status: row.status,
+    result_count: row.result_count,
+    trigger_type: row.trigger_type || 'schedule',
+    requested_by: row.requested_by || null,
+    summary: parseJsonObject(row.summary_json, {}),
+    comparison: parseJsonObject(row.comparison_json, {}),
+    stats: parseJsonObject(row.stats_json, {}),
+    error_message: row.error_message || null,
+    started_at: row.started_at || null,
+    completed_at: row.completed_at || null,
+    baseline_run_id: row.baseline_run_id || null,
+    materialized_result_id: row.materialized_result_id || null,
+    has_full_results: Boolean(row.materialized_result_id),
+    preview: options.includePreview ? preview : undefined
+  };
+}
+
 const DASHBOARD_QUERY_CACHE_TTL_SECONDS = 120;
 const DASHBOARD_QUERY_CACHE_BUCKET_SECONDS = 120;
 
 function buildScopeCacheKey(scope: DataScope): string {
-  const parts = [
-    `i:${scope.indexes.slice().sort().join(',')}`,
-    `s:${scope.services.slice().sort().join(',')}`,
-    `e:${scope.envs.slice().sort().join(',')}`,
-    `h:${scope.hosts.slice().sort().join(',')}`
-  ];
-  return parts.join('|');
+  return buildScopeKey(scope);
+}
+
+function asDashboardCacheShardCount(env: Env): number {
+  const parsed = Number(env.DASHBOARD_CACHE_SHARDS);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 16;
+  return Math.min(256, Math.max(1, Math.trunc(parsed)));
+}
+
+function getDashboardCacheStub(env: Env, key: string): DurableObjectStub {
+  const shardName = cacheShardNameForKey(key, asDashboardCacheShardCount(env));
+  return env.DASHBOARD_CACHE.get(env.DASHBOARD_CACHE.idFromName(shardName));
+}
+
+function normalizeExecutionPolicyRow(row: {
+  execution_mode?: string | null;
+  cache_ttl_seconds?: number | null;
+  materialize_enabled?: number | boolean | null;
+  materialize_interval_seconds?: number | null;
+  max_staleness_seconds?: number | null;
+  priority?: number | null;
+}): ExecutionPolicy {
+  return {
+    execution_mode: normalizeExecutionMode(row.execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode) as ExecutionMode,
+    cache_ttl_seconds: normalizeCacheTtlSeconds(row.cache_ttl_seconds, DEFAULT_EXECUTION_POLICY.cache_ttl_seconds),
+    materialize_enabled: normalizeBooleanFlag(row.materialize_enabled, DEFAULT_EXECUTION_POLICY.materialize_enabled),
+    materialize_interval_seconds: normalizeMaterializeIntervalSeconds(row.materialize_interval_seconds, DEFAULT_EXECUTION_POLICY.materialize_interval_seconds),
+    max_staleness_seconds: normalizeMaxStalenessSeconds(row.max_staleness_seconds, DEFAULT_EXECUTION_POLICY.max_staleness_seconds),
+    priority: Number.isFinite(Number(row.priority)) ? Math.max(0, Math.trunc(Number(row.priority))) : DEFAULT_EXECUTION_POLICY.priority
+  };
+}
+
+function isWidgetCacheEnabled(policy: ExecutionPolicy): boolean {
+  return policy.execution_mode !== 'live' || policy.materialize_enabled;
+}
+
+async function loadDashboardPanelPolicies(
+  env: Env,
+  widgetIds: string[]
+): Promise<Map<string, ExecutionPolicy>> {
+  const ids = Array.from(new Set(widgetIds.map((value) => String(value || '').trim()).filter(Boolean)));
+  const policies = new Map<string, ExecutionPolicy>();
+  if (ids.length === 0) return policies;
+
+  const placeholders = ids.map(() => '?').join(', ');
+  const rows = await env.DB.prepare(
+    `SELECT id, execution_mode, cache_ttl_seconds, materialize_enabled, materialize_interval_seconds, max_staleness_seconds, priority
+     FROM dashboard_panels
+     WHERE id IN (${placeholders})`
+  ).bind(...ids).all<DashboardPanelRow>();
+
+  for (const row of rows.results || []) {
+    policies.set(row.id, normalizeExecutionPolicyRow(row));
+  }
+
+  return policies;
+}
+
+async function readMaterializedWidgetResult(
+  env: Env,
+  req: PplSearchRequest,
+  scope: DataScope,
+  widgetId: string,
+  policy: ExecutionPolicy
+): Promise<PplSearchResponse | null> {
+  if (!policy.materialize_enabled && policy.execution_mode !== 'materialized') {
+    return null;
+  }
+
+  const bucket = buildMaterializationBucket(req.time, policy.materialize_interval_seconds);
+  const scopeKey = buildScopeCacheKey(scope);
+  const queryHash = hashQueryText(req.ppl);
+  const row = await env.DB.prepare(
+    `SELECT *
+     FROM materialized_results
+     WHERE entity_type = 'dashboard_panel'
+       AND entity_id = ?
+       AND scope_key = ?
+       AND query_hash = ?
+       AND time_bucket_start = ?
+       AND time_bucket_end = ?
+     ORDER BY computed_at DESC
+     LIMIT 1`
+  ).bind(widgetId, scopeKey, queryHash, bucket.time_bucket_start, bucket.time_bucket_end).first<MaterializedResultRow>();
+
+  if (!row?.payload_inline_json) return null;
+
+  let payload: PplSearchResponse;
+  try {
+    payload = JSON.parse(row.payload_inline_json) as PplSearchResponse;
+  } catch {
+    return null;
+  }
+
+  const computedAtMs = Date.parse(row.computed_at);
+  const expiresAtMs = Date.parse(row.expires_at);
+  const now = Date.now();
+  if (!Number.isFinite(computedAtMs) || !Number.isFinite(expiresAtMs)) return null;
+
+  const freshnessBudgetMs = policy.max_staleness_seconds * 1000;
+  const isFresh = expiresAtMs > now;
+  const isStaleButAllowed = computedAtMs + freshnessBudgetMs > now;
+  if (!isFresh && !isStaleButAllowed) return null;
+
+  return {
+    ...payload,
+    source: isFresh ? 'materialized' : 'stale_materialized',
+    computed_at: row.computed_at,
+    expires_at: row.expires_at,
+    materialization_status: isFresh ? 'fresh' : 'stale'
+  };
 }
 
 function normalizePplForCache(ppl: string): string {
@@ -3141,6 +3770,216 @@ function buildDashboardWidgetCacheKey(req: PplSearchRequest, scope: DataScope, w
   ].join('|');
 }
 
+function intersectSharedFilters(filtersList: SearchFilters[]): SearchFilters {
+  if (filtersList.length === 0) return {};
+  const keys = new Set<string>(Object.keys(filtersList[0]));
+  for (let i = 1; i < filtersList.length; i++) {
+    for (const key of Array.from(keys)) {
+      if (!(key in filtersList[i]) || filtersList[i][key as keyof SearchFilters] !== filtersList[0][key as keyof SearchFilters]) {
+        keys.delete(key);
+      }
+    }
+  }
+  const shared: SearchFilters = {};
+  for (const key of keys) {
+    const value = filtersList[0][key as keyof SearchFilters];
+    if (value !== undefined) {
+      shared[key as keyof SearchFilters] = value as never;
+    }
+  }
+  return shared;
+}
+
+function canShareDashboardWidgetBase(
+  compiledRequests: SearchRequest[],
+  sharedFilters: SearchFilters
+): boolean {
+  if (compiledRequests.length <= 1) return false;
+  const firstQ = compiledRequests[0]?.q || '';
+  if (!compiledRequests.every((req) => (req.q || '') === firstQ)) return false;
+  return Boolean(sharedFilters.index || sharedFilters.service || firstQ.trim());
+}
+
+async function executeSharedDashboardWidgetGroup(
+  widgets: Array<{ widgetId: string; request: PplSearchRequest; pipeline: PplPipeline; compiled: SearchRequest }>,
+  env: Env,
+  auth: AuthContext
+): Promise<Record<string, DashboardBatchWidgetResult>> {
+  const results: Record<string, DashboardBatchWidgetResult> = {};
+  const sharedFilters = intersectSharedFilters(widgets.map((widget) => widget.compiled.filters || {}));
+  if (!canShareDashboardWidgetBase(widgets.map((widget) => widget.compiled), sharedFilters)) {
+    for (const widget of widgets) {
+      try {
+        results[widget.widgetId] = { response: await performPplSearch(widget.request, env, auth) };
+      } catch (error) {
+        results[widget.widgetId] = { error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    return results;
+  }
+
+  const baseRequest: SearchRequest = {
+    time: widgets[0].request.time,
+    q: widgets[0].compiled.q,
+    filters: sharedFilters,
+    limit: MAX_SUMMARY_EVENTS,
+    cursor: null
+  };
+  const sharedStartedAt = Date.now();
+  const timing = createTimingTracker();
+  const baseContext = buildSearchContext(baseRequest, auth);
+  const baseExecution = await executeSearchWithContext(baseContext, env, auth, null, MAX_SUMMARY_EVENTS, timing);
+
+  for (const widget of widgets) {
+    try {
+      const postPipelineStartedAt = Date.now();
+      const lookupCache = await loadLookupCache(widget.pipeline, env);
+      const transformed = applyPplPipelineStages(baseExecution.results, widget.pipeline, lookupCache);
+      const widgetTiming: TimingTracker = {
+        ...timing,
+        postPipelineMs: timing.postPipelineMs + (Date.now() - postPipelineStartedAt)
+      };
+      const requestedLimit = clampLimit(widget.request.limit, PPL_MAX_LIMIT);
+      const rows = transformed.rows.slice(0, requestedLimit);
+      const nextCursorValue = transformed.resultType === 'events'
+        ? nextCursor(rows as SearchEvent[])
+        : null;
+      results[widget.widgetId] = {
+        response: {
+          result_type: transformed.resultType,
+          results: rows,
+          next_cursor: nextCursorValue,
+          source: 'live',
+          materialization_status: 'disabled',
+          stats: {
+            mode: baseContext.mode,
+            scanned_partitions: baseContext.dates.length,
+            scanned_objects: baseExecution.scannedObjects,
+            listed_prefixes: baseExecution.listing.listed_prefixes,
+            listing_calls: baseExecution.listing.listing_calls,
+            listed_objects: baseExecution.listing.listed_objects,
+            listing_fallbacks: baseExecution.listing.listing_fallbacks,
+            candidates: baseExecution.candidates,
+            returned: rows.length,
+            execution_path: 'shared_base',
+            timing_ms: snapshotTimingTracker(widgetTiming, Date.now() - sharedStartedAt),
+            language: 'ppl',
+            stage_count: widget.pipeline.stages.length
+          },
+          warning: baseExecution.results.length >= MAX_SUMMARY_EVENTS && isPplTableQuery(widget.pipeline.stages)
+            ? `PPL pipeline evaluated on first ${MAX_SUMMARY_EVENTS} matched events`
+            : undefined
+        }
+      };
+    } catch (error) {
+      results[widget.widgetId] = { error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  return results;
+}
+
+async function handleDashboardWidgetBatchQuery(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  requestCorsHeaders: Record<string, string>
+): Promise<Response> {
+  const body = await request.json() as { time?: { from?: string; to?: string }; widgets?: DashboardBatchWidgetRequest[] };
+  const time = body.time;
+  const widgets = Array.isArray(body.widgets) ? body.widgets : [];
+  if (!time?.from || !time?.to || widgets.length === 0) {
+    return jsonResponse({ error: 'time.from, time.to, and widgets are required' }, 400, requestCorsHeaders);
+  }
+
+  const payloads: Record<string, DashboardBatchWidgetResult> = {};
+  const pendingGroups = new Map<string, Array<{ widgetId: string; request: PplSearchRequest; pipeline: PplPipeline; compiled: SearchRequest }>>();
+  const policyByWidgetId = await loadDashboardPanelPolicies(
+    env,
+    widgets.map((widget) => String(widget.widget_id || '').trim())
+  );
+
+  for (const widget of widgets) {
+    const widgetId = String(widget.widget_id || '').trim();
+    const ppl = String(widget.ppl || '').trim();
+    if (!widgetId || !ppl) {
+      if (widgetId) payloads[widgetId] = { error: 'widget_id and ppl are required' };
+      continue;
+    }
+    const req: PplSearchRequest = {
+      time,
+      ppl,
+      limit: Math.max(1, Math.min(2000, Number(widget.limit) || 500)),
+      cursor: null
+    };
+    const policy = policyByWidgetId.get(widgetId) || DEFAULT_EXECUTION_POLICY;
+    const cacheKey = buildDashboardWidgetCacheKey(req, auth.scope, widgetId);
+    const materialized = await readMaterializedWidgetResult(env, req, auth.scope, widgetId, policy);
+    if (materialized) {
+      payloads[widgetId] = { response: materialized };
+      continue;
+    }
+    if (isWidgetCacheEnabled(policy)) {
+      const cached = await getDashboardCachePayload(env, cacheKey);
+      if (cached.hit && cached.payload) {
+        payloads[widgetId] = {
+          response: {
+            ...cached.payload,
+            source: cached.payload.source || 'cache'
+          }
+        };
+        continue;
+      }
+    }
+
+    try {
+      const pipeline = parsePplPipeline(req.ppl) as PplPipeline;
+      const compiled = buildSearchRequestFromPpl(req, pipeline);
+      const groupKey = JSON.stringify({
+        q: compiled.q || '',
+        index: compiled.filters?.index || '',
+        service: compiled.filters?.service || '',
+        env: compiled.filters?.env || ''
+      });
+      const group = pendingGroups.get(groupKey) || [];
+      group.push({ widgetId, request: req, pipeline, compiled });
+      pendingGroups.set(groupKey, group);
+    } catch (error) {
+      payloads[widgetId] = { error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  for (const group of pendingGroups.values()) {
+    const groupResults = await executeSharedDashboardWidgetGroup(group, env, auth);
+    for (const [widgetId, result] of Object.entries(groupResults)) {
+      payloads[widgetId] = result;
+      if (result.response) {
+        const req = group.find((item) => item.widgetId === widgetId)?.request;
+        const policy = policyByWidgetId.get(widgetId) || DEFAULT_EXECUTION_POLICY;
+        if (req) {
+          const cacheKey = buildDashboardWidgetCacheKey(req, auth.scope, widgetId);
+          result.response.source = result.response.source || 'live';
+          result.response.materialization_status = result.response.materialization_status || (policy.materialize_enabled ? 'miss' : 'disabled');
+          if (isWidgetCacheEnabled(policy)) {
+            await setDashboardCachePayload(env, cacheKey, result.response, policy.cache_ttl_seconds);
+          }
+        }
+        await writeScanMetrics(env, 'dashboard_widget', {
+          scanned_partitions: result.response.stats.scanned_partitions,
+          scanned_objects: result.response.stats.scanned_objects,
+          listed_prefixes: result.response.stats.listed_prefixes,
+          listing_calls: result.response.stats.listing_calls,
+          listed_objects: result.response.stats.listed_objects,
+          listing_fallbacks: result.response.stats.listing_fallbacks,
+          timing_ms: result.response.stats.timing_ms
+        }).catch(() => undefined);
+      }
+    }
+  }
+
+  return jsonResponse({ widgets: payloads }, 200, requestCorsHeaders);
+}
+
 function hashCacheKey(raw: string): string {
   // Deterministic lightweight hash for debug visibility.
   let h = 2166136261;
@@ -3156,7 +3995,7 @@ async function getDashboardCachePayload(
   key: string
 ): Promise<{ hit: boolean; payload?: PplSearchResponse }> {
   try {
-    const stub = env.DASHBOARD_CACHE.get(env.DASHBOARD_CACHE.idFromName('global'));
+    const stub = getDashboardCacheStub(env, key);
     const response = await stub.fetch(`https://dashboard-cache/cache/get?key=${encodeURIComponent(key)}`);
     if (!response.ok) return { hit: false };
     const body = await response.json() as { hit?: boolean; payload?: PplSearchResponse };
@@ -3167,14 +4006,19 @@ async function getDashboardCachePayload(
   }
 }
 
-async function setDashboardCachePayload(env: Env, key: string, payload: PplSearchResponse): Promise<void> {
+async function setDashboardCachePayload(
+  env: Env,
+  key: string,
+  payload: PplSearchResponse,
+  ttlSeconds = DASHBOARD_QUERY_CACHE_TTL_SECONDS
+): Promise<void> {
   try {
-    const stub = env.DASHBOARD_CACHE.get(env.DASHBOARD_CACHE.idFromName('global'));
+    const stub = getDashboardCacheStub(env, key);
     await stub.fetch('https://dashboard-cache/cache/set', {
       method: 'POST',
       body: JSON.stringify({
         key,
-        ttl_seconds: DASHBOARD_QUERY_CACHE_TTL_SECONDS,
+        ttl_seconds: normalizeCacheTtlSeconds(ttlSeconds, DASHBOARD_QUERY_CACHE_TTL_SECONDS),
         payload
       })
     });
@@ -3537,6 +4381,23 @@ async function handleScheduledSearches(
 ): Promise<Response> {
   const principal = auth.email || auth.principal;
   const isAdmin = auth.role === 'admin' || auth.role === 'superadmin';
+  const loadAccessibleScheduledSearch = async (id: string): Promise<ScheduledSearchRow | null> => {
+    const search = await env.DB.prepare('SELECT * FROM scheduled_searches WHERE id = ?')
+      .bind(id)
+      .first<ScheduledSearchRow>();
+    if (!search) return null;
+    if (!isAdmin && search.created_by && search.created_by !== principal) {
+      throw new Error('Forbidden');
+    }
+    return search;
+  };
+
+  const loadScheduledSearchRun = async (searchId: string, runId: string): Promise<ScheduledSearchResultRow | null> => {
+    const row = await env.DB.prepare(
+      'SELECT * FROM scheduled_search_results WHERE id = ? AND scheduled_search_id = ?'
+    ).bind(runId, searchId).first<ScheduledSearchResultRow>();
+    return row || null;
+  };
 
   if (request.method === 'GET' && pathname === '/scheduled-searches') {
     assertPermission(auth, 'scheduled_search.read');
@@ -3547,7 +4408,7 @@ async function handleScheduledSearches(
       : await env.DB.prepare(
           'SELECT * FROM scheduled_searches WHERE created_by = ? OR created_by IS NULL ORDER BY created_at DESC LIMIT 100'
         ).bind(principal).all<ScheduledSearchRow>();
-    return jsonResponse(rows.results || [], 200, requestCorsHeaders);
+    return jsonResponse((rows.results || []).map(normalizeScheduledSearchRow), 200, requestCorsHeaders);
   }
 
   if (request.method === 'POST' && pathname === '/scheduled-searches') {
@@ -3565,13 +4426,104 @@ async function handleScheduledSearches(
     const enabled = body.enabled === 0 || body.enabled === false ? 0 : 1;
     const actionsJson = JSON.stringify(Array.isArray(body.actions) ? body.actions : []);
     const maxResults = Math.max(1, Math.min(5000, Number(body.max_results) || 500));
+    const executionMode = normalizeExecutionMode(body.execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode);
+    const cacheTtlSeconds = normalizeCacheTtlSeconds(body.cache_ttl_seconds, DEFAULT_EXECUTION_POLICY.cache_ttl_seconds);
+    const materializeEnabled = normalizeBooleanFlag(body.materialize_enabled, DEFAULT_EXECUTION_POLICY.materialize_enabled) ? 1 : 0;
+    const materializeIntervalSeconds = normalizeMaterializeIntervalSeconds(body.materialize_interval_seconds, DEFAULT_EXECUTION_POLICY.materialize_interval_seconds);
+    const maxStalenessSeconds = normalizeMaxStalenessSeconds(body.max_staleness_seconds, DEFAULT_EXECUTION_POLICY.max_staleness_seconds);
 
     await env.DB.prepare(
-      `INSERT INTO scheduled_searches (id, name, ppl, time_window_minutes, schedule_cron, enabled, actions_json, max_results, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(id, name, ppl, timeWindowMinutes, scheduleCron, enabled, actionsJson, maxResults, principal, now, now).run();
+      `INSERT INTO scheduled_searches (
+         id, name, ppl, time_window_minutes, schedule_cron, enabled, actions_json, max_results,
+         execution_mode, cache_ttl_seconds, materialize_enabled, materialize_interval_seconds, max_staleness_seconds,
+         created_by, created_at, updated_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      id, name, ppl, timeWindowMinutes, scheduleCron, enabled, actionsJson, maxResults,
+      executionMode, cacheTtlSeconds, materializeEnabled, materializeIntervalSeconds, maxStalenessSeconds,
+      principal, now, now
+    ).run();
 
-    return jsonResponse({ id, name, ppl, time_window_minutes: timeWindowMinutes, schedule_cron: scheduleCron, enabled, max_results: maxResults, created_by: principal, created_at: now }, 201, requestCorsHeaders);
+    return jsonResponse(normalizeScheduledSearchRow({
+      id,
+      name,
+      ppl,
+      time_window_minutes: timeWindowMinutes,
+      schedule_cron: scheduleCron,
+      enabled,
+      actions_json: actionsJson,
+      max_results: maxResults,
+      execution_mode: executionMode,
+      cache_ttl_seconds: cacheTtlSeconds,
+      materialize_enabled: materializeEnabled,
+      materialize_interval_seconds: materializeIntervalSeconds,
+      max_staleness_seconds: maxStalenessSeconds,
+      created_by: principal,
+      created_at: now,
+      updated_at: now
+    } satisfies ScheduledSearchRow), 201, requestCorsHeaders);
+  }
+
+  const runResultsMatch = pathname.match(/^\/scheduled-searches\/([^/]+)\/runs\/([^/]+)\/results$/);
+  if (request.method === 'GET' && runResultsMatch) {
+    assertPermission(auth, 'scheduled_search.read');
+    const [, searchId, runId] = runResultsMatch;
+    const search = await loadAccessibleScheduledSearch(searchId);
+    if (!search) return jsonResponse({ error: 'Not found' }, 404, requestCorsHeaders);
+    const run = await loadScheduledSearchRun(searchId, runId);
+    if (!run) return jsonResponse({ error: 'Run not found' }, 404, requestCorsHeaders);
+
+    const artifact = run.materialized_result_id
+      ? await env.DB.prepare('SELECT * FROM materialized_results WHERE id = ?')
+          .bind(run.materialized_result_id)
+          .first<MaterializedResultRow>()
+      : null;
+    const preview = parseJsonRecordArray(run.preview_json || run.results_json);
+    let payload = artifact?.payload_inline_json ? parseJsonObject(artifact.payload_inline_json, {}) : {};
+    let results = parseJsonRecordArray(payload.results);
+    if (results.length === 0) {
+      results = preview;
+    }
+
+    return jsonResponse({
+      run_id: run.id,
+      scheduled_search_id: searchId,
+      result_type: payload.result_type === 'events' ? 'events' : 'table',
+      results,
+      total_results: run.result_count,
+      partial: !artifact,
+      warning: typeof payload.warning === 'string' ? payload.warning : null,
+      stats: Object.keys(payload).length > 0 ? parseJsonObject(payload.stats, {}) : parseJsonObject(run.stats_json, {})
+    }, 200, requestCorsHeaders);
+  }
+
+  const runDetailMatch = pathname.match(/^\/scheduled-searches\/([^/]+)\/runs\/([^/]+)$/);
+  if (request.method === 'GET' && runDetailMatch) {
+    assertPermission(auth, 'scheduled_search.read');
+    const [, searchId, runId] = runDetailMatch;
+    const search = await loadAccessibleScheduledSearch(searchId);
+    if (!search) return jsonResponse({ error: 'Not found' }, 404, requestCorsHeaders);
+    const run = await loadScheduledSearchRun(searchId, runId);
+    if (!run) return jsonResponse({ error: 'Run not found' }, 404, requestCorsHeaders);
+    const artifact = run.materialized_result_id
+      ? await env.DB.prepare('SELECT id, status, result_count, computed_at, expires_at FROM materialized_results WHERE id = ?')
+          .bind(run.materialized_result_id)
+          .first<Pick<MaterializedResultRow, 'id' | 'status' | 'result_count' | 'computed_at' | 'expires_at'>>()
+      : null;
+
+    return jsonResponse({
+      ...normalizeScheduledSearchResultRow(run, { includePreview: true }),
+      search: normalizeScheduledSearchRow(search),
+      query_request: parseJsonObject(run.query_request_json, {}),
+      artifact: artifact ? {
+        id: artifact.id,
+        status: artifact.status,
+        result_count: artifact.result_count,
+        computed_at: artifact.computed_at,
+        expires_at: artifact.expires_at
+      } : null
+    }, 200, requestCorsHeaders);
   }
 
   const idMatch = pathname.match(/^\/scheduled-searches\/([^/]+)/);
@@ -3580,31 +4532,41 @@ async function handleScheduledSearches(
 
   if (request.method === 'GET' && pathname.endsWith('/results')) {
     assertPermission(auth, 'scheduled_search.read');
+    const search = await loadAccessibleScheduledSearch(id);
+    if (!search) return jsonResponse({ error: 'Not found' }, 404, requestCorsHeaders);
     const rows = await env.DB.prepare(
       'SELECT * FROM scheduled_search_results WHERE scheduled_search_id = ? ORDER BY run_at DESC LIMIT 50'
     ).bind(id).all<ScheduledSearchResultRow>();
-    return jsonResponse(rows.results || [], 200, requestCorsHeaders);
+    return jsonResponse((rows.results || []).map((row) => normalizeScheduledSearchResultRow(row)), 200, requestCorsHeaders);
   }
 
   if (request.method === 'POST' && pathname.endsWith('/run')) {
     assertPermission(auth, 'scheduled_search.write');
-    const search = await env.DB.prepare('SELECT * FROM scheduled_searches WHERE id = ?')
-      .bind(id).first<ScheduledSearchRow>();
+    const search = await loadAccessibleScheduledSearch(id);
     if (!search) return jsonResponse({ error: 'Not found' }, 404, requestCorsHeaders);
-    if (!isAdmin && search.created_by && search.created_by !== principal) {
-      throw new Error('Forbidden');
+    const runResponse = await fetchAlertControl(env, `/internal/scheduled-searches/${id}/run`, {
+      method: 'POST',
+      body: JSON.stringify({ requested_by: principal })
+    });
+    const responseText = await runResponse.text();
+    const runBody = responseText ? parseJsonObject(responseText, {}) : {};
+    if (!runResponse.ok || runBody.error) {
+      return jsonResponse(
+        { error: String(runBody.error || `Scheduled search run failed (${runResponse.status})`) },
+        runResponse.status >= 400 ? runResponse.status : 500,
+        requestCorsHeaders
+      );
     }
-    return jsonResponse({ message: 'Scheduled search queued for execution', id }, 202, requestCorsHeaders);
+    await writeAuditLog(env, auth, 'scheduled_search.run.triggered', 'scheduled_search', id, {
+      trigger_type: 'manual'
+    }).catch(() => undefined);
+    return jsonResponse(runBody, 200, requestCorsHeaders);
   }
 
   if (request.method === 'PUT') {
     assertPermission(auth, 'scheduled_search.write');
-    const existing = await env.DB.prepare('SELECT id, created_by FROM scheduled_searches WHERE id = ?')
-      .bind(id).first<{ id: string; created_by?: string | null }>();
+    const existing = await loadAccessibleScheduledSearch(id);
     if (!existing) return jsonResponse({ error: 'Not found' }, 404, requestCorsHeaders);
-    if (!isAdmin && existing.created_by && existing.created_by !== principal) {
-      throw new Error('Forbidden');
-    }
     const body = await request.json() as Record<string, unknown>;
     const now = new Date().toISOString();
     const updates: string[] = [];
@@ -3616,21 +4578,23 @@ async function handleScheduledSearches(
     if (body.enabled !== undefined) { updates.push('enabled = ?'); values.push(body.enabled ? 1 : 0); }
     if (body.actions !== undefined) { updates.push('actions_json = ?'); values.push(JSON.stringify(Array.isArray(body.actions) ? body.actions : [])); }
     if (body.max_results !== undefined) { updates.push('max_results = ?'); values.push(Math.max(1, Math.min(5000, Number(body.max_results) || 500))); }
+    if (body.execution_mode !== undefined) { updates.push('execution_mode = ?'); values.push(normalizeExecutionMode(body.execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode)); }
+    if (body.cache_ttl_seconds !== undefined) { updates.push('cache_ttl_seconds = ?'); values.push(normalizeCacheTtlSeconds(body.cache_ttl_seconds, DEFAULT_EXECUTION_POLICY.cache_ttl_seconds)); }
+    if (body.materialize_enabled !== undefined) { updates.push('materialize_enabled = ?'); values.push(normalizeBooleanFlag(body.materialize_enabled, DEFAULT_EXECUTION_POLICY.materialize_enabled) ? 1 : 0); }
+    if (body.materialize_interval_seconds !== undefined) { updates.push('materialize_interval_seconds = ?'); values.push(normalizeMaterializeIntervalSeconds(body.materialize_interval_seconds, DEFAULT_EXECUTION_POLICY.materialize_interval_seconds)); }
+    if (body.max_staleness_seconds !== undefined) { updates.push('max_staleness_seconds = ?'); values.push(normalizeMaxStalenessSeconds(body.max_staleness_seconds, DEFAULT_EXECUTION_POLICY.max_staleness_seconds)); }
     updates.push('updated_at = ?');
     values.push(now);
     values.push(id);
     await env.DB.prepare(`UPDATE scheduled_searches SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
-    return jsonResponse({ id, updated_at: now }, 200, requestCorsHeaders);
+    const updated = await env.DB.prepare('SELECT * FROM scheduled_searches WHERE id = ?').bind(id).first<ScheduledSearchRow>();
+    return jsonResponse(updated ? normalizeScheduledSearchRow(updated) : { id, updated_at: now }, 200, requestCorsHeaders);
   }
 
   if (request.method === 'DELETE') {
     assertPermission(auth, 'scheduled_search.delete');
-    const existing = await env.DB.prepare('SELECT id, created_by FROM scheduled_searches WHERE id = ?')
-      .bind(id).first<{ id: string; created_by?: string | null }>();
+    const existing = await loadAccessibleScheduledSearch(id);
     if (!existing) return new Response(null, { status: 204, headers: requestCorsHeaders });
-    if (!isAdmin && existing.created_by && existing.created_by !== principal) {
-      throw new Error('Forbidden');
-    }
     await env.DB.prepare('DELETE FROM scheduled_search_results WHERE scheduled_search_id = ?').bind(id).run();
     await env.DB.prepare('DELETE FROM scheduled_searches WHERE id = ?').bind(id).run();
     return new Response(null, { status: 204, headers: requestCorsHeaders });
@@ -3653,7 +4617,7 @@ async function handleDashboards(
     assertPermission(auth, 'dashboard.read');
     await seedStarterDashboards(env.DB).catch(() => undefined);
     const rows = await env.DB.prepare('SELECT * FROM dashboards ORDER BY is_default DESC, created_at DESC LIMIT 100').all<DashboardRow>();
-    return jsonResponse(rows.results || [], 200, requestCorsHeaders);
+    return jsonResponse((rows.results || []).map(normalizeDashboardRow), 200, requestCorsHeaders);
   }
 
   if (request.method === 'POST' && pathname === '/dashboards') {
@@ -3663,11 +4627,24 @@ async function handleDashboards(
     if (!name) return jsonResponse({ error: 'name is required' }, 400, requestCorsHeaders);
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
+    const performanceProfile = normalizePerformanceProfile(body.performance_profile, 'economy');
+    const defaultExecutionMode = normalizeExecutionMode(body.default_execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode);
     await env.DB.prepare(
-      `INSERT INTO dashboards (id, name, description, layout_json, is_default, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, '[]', 0, ?, ?, ?)`
-    ).bind(id, name, String(body.description || ''), principal, now, now).run();
-    return jsonResponse({ id, name, created_at: now }, 201, requestCorsHeaders);
+      `INSERT INTO dashboards (id, name, description, layout_json, is_default, performance_profile, default_execution_mode, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, '[]', 0, ?, ?, ?, ?, ?)`
+    ).bind(id, name, String(body.description || ''), performanceProfile, defaultExecutionMode, principal, now, now).run();
+    return jsonResponse(normalizeDashboardRow({
+      id,
+      name,
+      description: String(body.description || ''),
+      layout_json: '[]',
+      is_default: 0,
+      performance_profile: performanceProfile,
+      default_execution_mode: defaultExecutionMode,
+      created_by: principal,
+      created_at: now,
+      updated_at: now
+    } satisfies DashboardRow), 201, requestCorsHeaders);
   }
 
   const dashMatch = pathname.match(/^\/dashboards\/([^/]+)/);
@@ -3729,6 +4706,12 @@ async function handleDashboards(
       const refreshSec = Math.max(0, Math.min(3600, Number(body.refresh_seconds) || 0));
       const position = Math.max(0, Number(body.position) || 0);
       const queryMode = String(body.query_mode || 'ppl');
+      const executionMode = normalizeExecutionMode(body.execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode);
+      const cacheTtlSeconds = normalizeCacheTtlSeconds(body.cache_ttl_seconds, DEFAULT_EXECUTION_POLICY.cache_ttl_seconds);
+      const materializeEnabled = normalizeBooleanFlag(body.materialize_enabled, DEFAULT_EXECUTION_POLICY.materialize_enabled) ? 1 : 0;
+      const materializeIntervalSeconds = normalizeMaterializeIntervalSeconds(body.materialize_interval_seconds, DEFAULT_EXECUTION_POLICY.materialize_interval_seconds);
+      const maxStalenessSeconds = normalizeMaxStalenessSeconds(body.max_staleness_seconds, DEFAULT_EXECUTION_POLICY.max_staleness_seconds);
+      const priority = Math.max(0, Math.min(100, Number(body.priority) || 0));
       const vizConfigJson = normalizeJsonInput(body.viz_config_json ?? body.viz_config ?? body.options_json, '{}');
       const layoutJson = normalizeJsonInput(body.layout_json ?? body.layout, defaultLayoutForPanel(position, widgetType));
       const bindingsJson = normalizeJsonInput(body.bindings_json ?? body.bindings, '{}');
@@ -3737,9 +4720,11 @@ async function handleDashboards(
         `INSERT INTO dashboard_panels (
           id, dashboard_id, title, ppl, viz_type, widget_type, query_text, query_mode,
           viz_config_json, layout_json, bindings_json, display_options_json,
-          time_window_minutes, refresh_seconds, options_json, position, created_at, updated_at
+          time_window_minutes, refresh_seconds, execution_mode, cache_ttl_seconds,
+          materialize_enabled, materialize_interval_seconds, max_staleness_seconds, priority,
+          options_json, position, created_at, updated_at
         )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(
         id,
         dashboardId,
@@ -3755,6 +4740,12 @@ async function handleDashboards(
         displayOptionsJson,
         timeWindow,
         refreshSec,
+        executionMode,
+        cacheTtlSeconds,
+        materializeEnabled,
+        materializeIntervalSeconds,
+        maxStalenessSeconds,
+        priority,
         vizConfigJson,
         position,
         now,
@@ -3776,6 +4767,12 @@ async function handleDashboards(
           display_options_json: displayOptionsJson,
           time_window_minutes: timeWindow,
           refresh_seconds: refreshSec,
+          execution_mode: executionMode,
+          cache_ttl_seconds: cacheTtlSeconds,
+          materialize_enabled: materializeEnabled,
+          materialize_interval_seconds: materializeIntervalSeconds,
+          max_staleness_seconds: maxStalenessSeconds,
+          priority,
           options_json: vizConfigJson,
           position,
           created_at: now,
@@ -3810,6 +4807,30 @@ async function handleDashboards(
         values.push(queryText);
       }
       if (body.query_mode !== undefined) { updates.push('query_mode = ?'); values.push(String(body.query_mode || 'ppl')); }
+      if (body.execution_mode !== undefined) {
+        updates.push('execution_mode = ?');
+        values.push(normalizeExecutionMode(body.execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode));
+      }
+      if (body.cache_ttl_seconds !== undefined) {
+        updates.push('cache_ttl_seconds = ?');
+        values.push(normalizeCacheTtlSeconds(body.cache_ttl_seconds, DEFAULT_EXECUTION_POLICY.cache_ttl_seconds));
+      }
+      if (body.materialize_enabled !== undefined) {
+        updates.push('materialize_enabled = ?');
+        values.push(normalizeBooleanFlag(body.materialize_enabled, DEFAULT_EXECUTION_POLICY.materialize_enabled) ? 1 : 0);
+      }
+      if (body.materialize_interval_seconds !== undefined) {
+        updates.push('materialize_interval_seconds = ?');
+        values.push(normalizeMaterializeIntervalSeconds(body.materialize_interval_seconds, DEFAULT_EXECUTION_POLICY.materialize_interval_seconds));
+      }
+      if (body.max_staleness_seconds !== undefined) {
+        updates.push('max_staleness_seconds = ?');
+        values.push(normalizeMaxStalenessSeconds(body.max_staleness_seconds, DEFAULT_EXECUTION_POLICY.max_staleness_seconds));
+      }
+      if (body.priority !== undefined) {
+        updates.push('priority = ?');
+        values.push(Math.max(0, Math.min(100, Number(body.priority) || 0)));
+      }
       if (body.viz_config_json !== undefined || body.viz_config !== undefined) {
         const configJson = normalizeJsonInput(body.viz_config_json ?? body.viz_config, '{}');
         updates.push('viz_config_json = ?');
@@ -3867,11 +4888,14 @@ async function handleDashboards(
     if (body.name !== undefined) { updates.push('name = ?'); values.push(String(body.name).trim()); }
     if (body.description !== undefined) { updates.push('description = ?'); values.push(String(body.description)); }
     if (body.layout_json !== undefined) { updates.push('layout_json = ?'); values.push(typeof body.layout_json === 'string' ? body.layout_json : JSON.stringify(body.layout_json)); }
+    if (body.performance_profile !== undefined) { updates.push('performance_profile = ?'); values.push(normalizePerformanceProfile(body.performance_profile, 'economy')); }
+    if (body.default_execution_mode !== undefined) { updates.push('default_execution_mode = ?'); values.push(normalizeExecutionMode(body.default_execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode)); }
     updates.push('updated_at = ?');
     values.push(now);
     values.push(dashboardId);
     await env.DB.prepare(`UPDATE dashboards SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
-    return jsonResponse({ id: dashboardId, updated_at: now }, 200, requestCorsHeaders);
+    const updated = await env.DB.prepare('SELECT * FROM dashboards WHERE id = ?').bind(dashboardId).first<DashboardRow>();
+    return jsonResponse(updated ? normalizeDashboardRow(updated) : { id: dashboardId, updated_at: now }, 200, requestCorsHeaders);
   }
 
   if (request.method === 'DELETE') {
@@ -4339,6 +5363,27 @@ async function fetchSyntheticControl(
   );
 }
 
+async function fetchAlertControl(
+  env: Env,
+  path: string,
+  init: RequestInit = {}
+): Promise<Response> {
+  if (!env.ALERT_SERVICE) {
+    throw new Error('Alert control is not configured (missing ALERT_SERVICE binding)');
+  }
+  if (!env.ALERT_RUN_SECRET) {
+    throw new Error('Alert control is not configured (missing ALERT_RUN_SECRET secret)');
+  }
+  const headers = new Headers(init.headers || {});
+  headers.set('Authorization', `Bearer ${env.ALERT_RUN_SECRET}`);
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  return env.ALERT_SERVICE.fetch(
+    new Request(`https://internal${path}`, { ...init, headers })
+  );
+}
+
 async function handleSyntheticIngestAdmin(
   request: Request,
   env: Env,
@@ -4441,6 +5486,64 @@ async function handleAuth(
   pathname: string,
   requestCorsHeaders: Record<string, string>
 ): Promise<Response> {
+  if (request.method === 'GET' && pathname === '/auth/access/start') {
+    const returnTo = resolveAccessReturnTo(request, env);
+
+    try {
+      await authenticateRequest(request, env);
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: returnTo,
+          'cache-control': 'no-store'
+        }
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Authentication failed';
+      const escapedMessage = escapeHtml(message);
+      const escapedReturnTo = escapeHtml(returnTo);
+      return htmlResponse(
+        `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>EdgeData Access Sign-In</title>
+    <style>
+      :root { color-scheme: light; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      body { margin: 0; background: #f5f3ef; color: #1f2937; }
+      main { max-width: 640px; margin: 64px auto; padding: 32px; background: #fffdf9; border: 1px solid #e7ded1; border-radius: 18px; box-shadow: 0 18px 50px rgba(36, 30, 18, 0.08); }
+      h1 { margin: 0 0 12px; font-size: 1.75rem; }
+      p { line-height: 1.6; margin: 0 0 14px; }
+      code { background: #f3eee6; padding: 0.15rem 0.35rem; border-radius: 6px; }
+      .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 20px; }
+      a { color: #8a3b12; font-weight: 600; }
+      .button { display: inline-block; padding: 12px 16px; border-radius: 10px; text-decoration: none; background: #8a3b12; color: #fffdf9; }
+      .muted { color: #5b6472; font-size: 0.95rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Cloudflare Access session not available</h1>
+      <p>This login flow expects the browser to reach an Access-protected query API origin first, then return to the app.</p>
+      <p><strong>Current result:</strong> ${escapedMessage}</p>
+      <p class="muted">If you are using a <code>workers.dev</code> API URL, point <code>VITE_QUERY_API_BASE</code> at the Access-protected query-worker hostname or custom domain, then try again.</p>
+      <div class="actions">
+        <a class="button" href="${escapedReturnTo}">Back to EdgeData</a>
+        <a href="${escapedReturnTo}">Retry from app</a>
+      </div>
+    </main>
+  </body>
+</html>`,
+        401,
+        {
+          ...requestCorsHeaders,
+          'cache-control': 'no-store'
+        }
+      );
+    }
+  }
+
   if (request.method === 'POST' && pathname === '/auth/login') {
     if (!localLoginEnabled(env)) {
       return jsonResponse({ error: 'Local login is disabled' }, 403, requestCorsHeaders);
@@ -4880,6 +5983,15 @@ export default {
         const req = await request.json() as PplSearchRequest;
         const response = await performPplSearch(req, env, auth);
         await writeOpsMetric(env, 'r2sql_calls_total', response.stats.scanned_objects).catch(() => undefined);
+        await writeScanMetrics(env, 'search', {
+          scanned_partitions: response.stats.scanned_partitions,
+          scanned_objects: response.stats.scanned_objects,
+          listed_prefixes: response.stats.listed_prefixes,
+          listing_calls: response.stats.listing_calls,
+          listed_objects: response.stats.listed_objects,
+          listing_fallbacks: response.stats.listing_fallbacks,
+          timing_ms: response.stats.timing_ms
+        }).catch(() => undefined);
         await writeOpsMetric(env, 'query_latency_ms', Date.now() - startedAt).catch(() => undefined);
         return jsonResponse(response, 200, requestCorsHeaders);
       } catch (error) {
@@ -4907,6 +6019,15 @@ export default {
         const req = await request.json() as PplSearchRequest;
         const summary = await performPplSearchSummary(req, env, auth);
         await writeOpsMetric(env, 'r2sql_calls_total', summary.scanned_objects).catch(() => undefined);
+        await writeScanMetrics(env, 'search_summary', {
+          scanned_partitions: summary.scanned_partitions,
+          scanned_objects: summary.scanned_objects,
+          listed_prefixes: summary.listed_prefixes,
+          listing_calls: summary.listing_calls,
+          listed_objects: summary.listed_objects,
+          listing_fallbacks: summary.listing_fallbacks,
+          timing_ms: summary.timing_ms
+        }).catch(() => undefined);
         await writeOpsMetric(env, 'query_latency_ms', Date.now() - startedAt).catch(() => undefined);
         return jsonResponse(summary, 200, requestCorsHeaders);
       } catch (error) {
@@ -4962,6 +6083,19 @@ export default {
       try {
         assertPermission(auth, 'dashboard.read');
         const response = await handleDashboardWidgetQuery(request, env, auth, requestCorsHeaders);
+        await writeOpsMetric(env, 'query_latency_ms', Date.now() - startedAt).catch(() => undefined);
+        return response;
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders, 500);
+      }
+    }
+
+    if (url.pathname === '/dashboards/widgets/query-batch' && request.method === 'POST') {
+      await writeOpsMetric(env, 'dashboard_widget_batch_requests_total', 1).catch(() => undefined);
+      try {
+        assertPermission(auth, 'dashboard.read');
+        const response = await handleDashboardWidgetBatchQuery(request, env, auth, requestCorsHeaders);
         await writeOpsMetric(env, 'query_latency_ms', Date.now() - startedAt).catch(() => undefined);
         return response;
       } catch (error) {

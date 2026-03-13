@@ -38,11 +38,14 @@ if [[ -z "${D1_DATABASE_ID:-}" ]]; then
 fi
 
 ALERT_QUERY_WORKER_URL=""
+MATERIALIZE_QUERY_WORKER_URL=""
 if [[ "$TARGET_ENV" == "production" ]]; then
   if [[ -n "${QUERY_WORKER_URL:-}" ]]; then
     ALERT_QUERY_WORKER_URL="$QUERY_WORKER_URL"
+    MATERIALIZE_QUERY_WORKER_URL="$QUERY_WORKER_URL"
   elif [[ -n "${QUERY_URL:-}" && "$QUERY_URL" == *"query-worker-prod."* ]]; then
     ALERT_QUERY_WORKER_URL="$QUERY_URL"
+    MATERIALIZE_QUERY_WORKER_URL="$QUERY_URL"
   fi
   if [[ "$HAS_QUERY_WORKER_VAR" != "1" && -z "$ALERT_QUERY_WORKER_URL" ]]; then
     echo "For production deploys, set QUERY_WORKER_URL to your query-worker-prod URL."
@@ -51,12 +54,14 @@ if [[ "$TARGET_ENV" == "production" ]]; then
   fi
 else
   ALERT_QUERY_WORKER_URL="${QUERY_WORKER_URL:-${QUERY_URL:-}}"
+  MATERIALIZE_QUERY_WORKER_URL="${QUERY_WORKER_URL:-${QUERY_URL:-}}"
 fi
 
 WORKER_CONFIGS=(
   "workers/ingest-worker/wrangler.toml"
   "workers/query-worker/wrangler.toml"
   "workers/alert-worker/wrangler.toml"
+  "workers/materialize-worker/wrangler.toml"
   "workers/synthetic-worker/wrangler.toml"
 )
 
@@ -66,6 +71,9 @@ for config in "${WORKER_CONFIGS[@]}"; do
   EXTRA_ARGS=()
   if [[ "$config" == "workers/alert-worker/wrangler.toml" && "$HAS_QUERY_WORKER_VAR" != "1" && -n "$ALERT_QUERY_WORKER_URL" ]]; then
     EXTRA_ARGS+=(--var "QUERY_WORKER_URL:${ALERT_QUERY_WORKER_URL}")
+  fi
+  if [[ "$config" == "workers/materialize-worker/wrangler.toml" && "$HAS_QUERY_WORKER_VAR" != "1" && -n "$MATERIALIZE_QUERY_WORKER_URL" ]]; then
+    EXTRA_ARGS+=(--var "QUERY_WORKER_URL:${MATERIALIZE_QUERY_WORKER_URL}")
   fi
   if ((${#EXTRA_ARGS[@]} > 0)); then
     bash "$WRAPPER" --config "$config" deploy "${DEPLOY_ARGS[@]}" "${EXTRA_ARGS[@]}"

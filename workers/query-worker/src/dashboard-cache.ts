@@ -28,7 +28,7 @@ export class DashboardCache extends DurableObject {
       };
       const key = String(body.key || '').trim();
       if (!key) return Response.json({ error: 'key is required' }, { status: 400 });
-      const ttl = Math.max(1, Math.min(120, Number(body.ttl_seconds) || 20));
+      const ttl = Math.max(1, Math.min(3600, Number(body.ttl_seconds) || 20));
       const expiresAt = Date.now() + ttl * 1000;
       await this.ctx.storage.put(key, {
         expires_at: expiresAt,

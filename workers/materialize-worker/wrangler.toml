@@ -1,0 +1,32 @@
+name = "materialize-worker"
+main = "src/index.ts"
+compatibility_date = "2026-02-16"
+
+triggers = { crons = ["* * * * *"] }
+
+[env.production]
+name = "materialize-worker-prod"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_name = "edgedata-db"
+
+[[env.production.services]]
+binding = "QUERY_SERVICE"
+service = "query-worker"
+
+[env.production.vars]
+QUERY_WORKER_URL = ""
+
+[[d1_databases]]
+binding = "DB"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_name = "edgedata-db"
+
+[[services]]
+binding = "QUERY_SERVICE"
+service = "query-worker"
+
+[vars]
+QUERY_WORKER_URL = ""

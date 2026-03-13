@@ -203,6 +203,7 @@ Target customers already manage identity in IdP + Access. Role mapping must inte
 ### 10.1 Auth
 
 - `POST /auth/login` (local mode only or explicitly enabled)
+- `GET /auth/access/start`
 - `GET /auth/me`
 - `POST /auth/logout`
 - `POST /auth/invite`
@@ -375,4 +376,3 @@ All existing APIs must enforce permission and data-scope checks.
 2. Should wildcard scope matching use glob or regex?
 3. Should local login be disabled by default in all production templates?
 4. Phase-2 priority: service principals vs SCIM sync first?
-

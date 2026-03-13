@@ -89,7 +89,8 @@
 [data-theme='dark'] .save-search-row input,
 [data-theme='dark'] .search-actions-menu,
 [data-theme='dark'] .query-typeahead-dropdown,
-[data-theme='dark'] .session-share-input {
+[data-theme='dark'] .session-share-input,
+[data-theme='dark'] .ask-ai-plan-query {
   background: #102137;
   border-color: var(--line);
   color: var(--text);
@@ -111,6 +112,8 @@
 }
 
 [data-theme='dark'] .time-presets button,
+[data-theme='dark'] .query-mode-toggle,
+[data-theme='dark'] .query-mode-toggle button,
 [data-theme='dark'] button.secondary,
 [data-theme='dark'] .search-input button.secondary,
 [data-theme='dark'] .stream-toggle {
@@ -119,10 +122,27 @@
   border-color: #345577;
 }
 
+[data-theme='dark'] .query-mode-toggle button.active {
+  background: #214268;
+  border-color: #4f79a8;
+  color: #e4efff;
+}
+
 [data-theme='dark'] .time-presets button.active {
   background: #214268;
   border-color: #4f79a8;
   color: #e4efff;
+}
+
+[data-theme='dark'] .time-presets button:not(.active):hover,
+[data-theme='dark'] .dashboard-toolbar-presets button:not(.active):hover,
+[data-theme='dark'] button.secondary:hover,
+[data-theme='dark'] .search-input button.secondary:hover,
+[data-theme='dark'] .stream-toggle:hover {
+  background: #23486f;
+  border-color: #7aa9dd;
+  color: #f0f7ff;
+  box-shadow: 0 0 0 1px rgba(122, 169, 221, 0.35);
 }
 
 [data-theme='dark'] .search-stats span,
@@ -204,6 +224,22 @@
   background: #13263f;
   border-color: #35567b;
   color: #c4d8f3;
+}
+
+[data-theme='dark'] .ask-ai-plan {
+  background: linear-gradient(180deg, rgba(18, 31, 49, 0.96) 0%, rgba(20, 36, 58, 0.96) 100%);
+  border-color: #35567b;
+}
+
+[data-theme='dark'] .ask-ai-plan-header strong,
+[data-theme='dark'] .ask-ai-plan-summary,
+[data-theme='dark'] .ask-ai-plan-reasons span {
+  color: #c4d8f3;
+}
+
+[data-theme='dark'] .ask-ai-plan-reasons span {
+  background: #14263d;
+  border-color: #2d4667;
 }
 
 [data-theme='dark'] .alert-starter-pack h4,
@@ -1088,6 +1124,32 @@ body {
   color: var(--primary-700);
 }
 
+.query-mode-toggle {
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.query-mode-toggle button {
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  padding: 7px 12px;
+  min-width: 92px;
+}
+
+.query-mode-toggle button.active {
+  background: #eaf2ff;
+  border-color: #bfd5f7;
+  color: #163c70;
+}
+
 .search-input,
 .save-search-row {
   margin-top: 9px;
@@ -1302,6 +1364,97 @@ button:disabled {
 .stream-toggle input {
   width: 14px;
   height: 14px;
+}
+
+.ask-ai-plan {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(240, 246, 255, 0.95) 0%, rgba(250, 252, 255, 0.95) 100%);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.ask-ai-plan-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ask-ai-plan-header strong {
+  font-size: 13px;
+  color: #153a67;
+}
+
+.ask-ai-confidence {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid #c8daf8;
+  background: #eef5ff;
+  color: #365a89;
+}
+
+.ask-ai-confidence.high {
+  border-color: #9fd0b0;
+  background: #ebf8f0;
+  color: #216548;
+}
+
+.ask-ai-confidence.medium {
+  border-color: #d5c387;
+  background: #fff7df;
+  color: #8a5f00;
+}
+
+.ask-ai-confidence.low {
+  border-color: #d6dceb;
+  background: #f3f6fb;
+  color: #5b6f88;
+}
+
+.ask-ai-plan-summary {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ask-ai-plan-query {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #d5e2f6;
+  background: rgba(255, 255, 255, 0.92);
+  color: #163a67;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.ask-ai-plan-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ask-ai-plan-reasons span {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid #d8e5f8;
+  background: rgba(255, 255, 255, 0.9);
+  color: #436284;
+  font-size: 11px;
+  padding: 5px 8px;
 }
 
 button.secondary {
@@ -2748,12 +2901,28 @@ button.danger {
   gap: 6px;
 }
 
+.scheduled-run-card {
+  border: 1px solid #deebfb;
+  border-radius: 8px;
+  padding: 8px;
+  background: #fff;
+}
+
 .scheduled-run-row {
   display: grid;
   grid-template-columns: 190px 70px 90px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
   font-size: 12px;
+}
+
+.scheduled-run-subrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 11px;
+  color: #6a7f96;
+  margin-top: 6px;
 }
 
 .scheduled-run-time {
@@ -2778,10 +2947,62 @@ button.danger {
   color: #516882;
 }
 
+.scheduled-run-summary-text {
+  color: #3c5067;
+}
+
 .scheduled-run-error {
   color: #d84f58;
   white-space: normal;
   word-break: break-word;
+}
+
+.scheduled-run-actions {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.scheduled-run-detail {
+  margin-top: 10px;
+  border-top: 1px solid #deebfb;
+  padding-top: 10px;
+}
+
+.scheduled-run-detail-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.scheduled-run-artifact-meta {
+  font-size: 11px;
+  color: #6a7f96;
+}
+
+.scheduled-run-preview {
+  margin-top: 10px;
+  overflow-x: auto;
+}
+
+.scheduled-run-preview table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.scheduled-run-preview th,
+.scheduled-run-preview td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #edf3fb;
+  text-align: left;
+  vertical-align: top;
+}
+
+.scheduled-run-preview th {
+  color: #4d6580;
+  font-weight: 700;
 }
 
 .empty-state {
@@ -3078,6 +3299,10 @@ button.danger {
   .scheduled-run-row {
     grid-template-columns: 1fr;
     gap: 2px;
+  }
+
+  .scheduled-run-detail-header {
+    flex-direction: column;
   }
 
   .alerts-layout {

@@ -1,4 +1,4 @@
-import { listIngestParsers, parseIngestPayload } from './ingest-framework.mjs';
+import { listIngestParsers, parseIngestPayload, normalizeLogpushRecord } from './ingest-framework.mjs';
 
 export interface Env {
   DB: D1Database;
@@ -8,6 +8,7 @@ export interface Env {
   INGEST_SECRET: string;
   INGEST_HMAC_SECRET?: string;
   INGEST_RATE_LIMIT_PER_MIN?: string;
+  INGEST_MAX_BODY_BYTES?: string;
   REPROCESS_SECRET?: string;
   QUERY_SERVICE?: Fetcher;
 }
@@ -72,6 +73,7 @@ interface TokenRecord {
 interface AnalyticsEngineRow {
   blobs: string[];
   doubles: number[];
+  indexes?: string[];
   timestamp: Date;
 }
 
@@ -90,6 +92,7 @@ interface ReprocessRequest {
   env?: string;
   max_objects?: number;
   dry_run?: boolean;
+  source_prefix?: string;
 }
 
 interface ReprocessSummary {
@@ -112,7 +115,7 @@ interface ParsedIngestPayload {
   defaults?: Partial<{ index: string; service: string; env: string; host: string }>;
 }
 
-const MAX_BODY_BYTES = 3 * 1024 * 1024;
+const DEFAULT_MAX_BODY_BYTES = 3 * 1024 * 1024;
 const MAX_BATCH_EVENTS = 1000;
 const MAX_ATTRS_BYTES = 16 * 1024;
 const MAX_TOKENS_PER_EVENT = 12;
@@ -129,6 +132,13 @@ const WHITELIST_STATUS_CODES = new Set(['400', '401', '403', '404', '429', '500'
 
 function clientIp(request: Request): string {
   return request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || 'unknown-ip';
+}
+
+function resolveMaxBodyBytes(envValue: string | undefined): number {
+  if (!envValue) return DEFAULT_MAX_BODY_BYTES;
+  const parsed = Number(envValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_BODY_BYTES;
+  return Math.trunc(parsed);
 }
 
 function asRateLimitPerMinute(value: string | undefined, fallback: number): number {
@@ -417,6 +427,7 @@ async function writeWAE(events: NormalizedEvent[], env: Env): Promise<void> {
   const datapoints: AnalyticsEngineRow[] = events.map((event) => ({
     blobs: [event.service, event.env, event.host, event.level, event.msg_hash],
     doubles: [1, event.status || 0, event.duration_ms || 0],
+    indexes: [event.index],
     timestamp: new Date(event.ts)
   }));
 
@@ -573,7 +584,12 @@ function extractRawKeyMeta(key: string): { index: string; service: string; env: 
 function normalizeReprocessEvent(
   record: LogEvent,
   defaults: { index: string; service: string; env: string; host: string }
-): NormalizedEvent {
+): NormalizedEvent | NormalizedEvent[] {
+  const logpushEvents = (normalizeLogpushRecord as (r: unknown) => LogEvent[] | null)(record);
+  if (logpushEvents) {
+    return logpushEvents.map((lp: LogEvent) => normalizeEvent(lp, defaults));
+  }
+
   const hasCanonicalShape = Boolean(
     typeof (record as { event_id?: unknown }).event_id === 'string' &&
     typeof record.ts === 'string' &&
@@ -646,9 +662,12 @@ async function reprocessRawObject(
     try {
       const parsed = JSON.parse(line) as LogEvent;
       const normalized = normalizeReprocessEvent(parsed, defaults);
-      if (dedupe.has(normalized.event_id)) continue;
-      dedupe.add(normalized.event_id);
-      events.push(normalized);
+      const items = Array.isArray(normalized) ? normalized : [normalized];
+      for (const item of items) {
+        if (dedupe.has(item.event_id)) continue;
+        dedupe.add(item.event_id);
+        events.push(item);
+      }
     } catch {
       skippedLines += 1;
     }
@@ -694,21 +713,36 @@ async function reprocessRawRange(env: Env, request: ReprocessRequest): Promise<R
   const envFilter = request.env?.trim();
   const dryRun = request.dry_run !== false;
   const maxObjects = Math.max(1, Math.min(Number(request.max_objects || 200), REPROCESS_MAX_OBJECTS));
+  const sourcePrefix = request.source_prefix?.trim();
 
-  const dates = dateRangeInclusive(from, to);
   const keys: string[] = [];
   let scannedObjects = 0;
-  for (const date of dates) {
-    const dateKeys = await listAllObjects(env.RAW_BUCKET, `raw/date=${date}/`);
-    for (const key of dateKeys) {
+
+  if (sourcePrefix) {
+    const prefix = sourcePrefix.endsWith('/') ? sourcePrefix : `${sourcePrefix}/`;
+    const allKeys = await listAllObjects(env.RAW_BUCKET, prefix);
+    for (const key of allKeys) {
       scannedObjects += 1;
       if (indexFilter && keyIndexFromPath(key) !== indexFilter) continue;
-      if (service && !key.includes(`/service=${service}/`)) continue;
-      if (envFilter && !key.includes(`/env=${envFilter}/`)) continue;
+      if (service && key.includes(`/service=`) && !key.includes(`/service=${service}/`)) continue;
+      if (envFilter && key.includes(`/env=`) && !key.includes(`/env=${envFilter}/`)) continue;
       keys.push(key);
       if (keys.length >= maxObjects) break;
     }
-    if (keys.length >= maxObjects) break;
+  } else {
+    const dates = dateRangeInclusive(from, to);
+    for (const date of dates) {
+      const dateKeys = await listAllObjects(env.RAW_BUCKET, `raw/date=${date}/`);
+      for (const key of dateKeys) {
+        scannedObjects += 1;
+        if (indexFilter && keyIndexFromPath(key) !== indexFilter) continue;
+        if (service && !key.includes(`/service=${service}/`)) continue;
+        if (envFilter && !key.includes(`/env=${envFilter}/`)) continue;
+        keys.push(key);
+        if (keys.length >= maxObjects) break;
+      }
+      if (keys.length >= maxObjects) break;
+    }
   }
 
   let reindexedEvents = 0;
@@ -803,16 +837,22 @@ export default {
       return Response.json({ error: 'Rate limit exceeded', request_id: requestId }, { status: 429 });
     }
 
+    const maxBodyBytes = resolveMaxBodyBytes(env.INGEST_MAX_BODY_BYTES);
     const contentLength = Number(request.headers.get('content-length') || 0);
-    if (contentLength > MAX_BODY_BYTES) {
+    if (contentLength > maxBodyBytes) {
       ctx.waitUntil(writeOpsMetric(env, 'ingest_parse_errors', 1).catch(() => undefined));
       return Response.json({ error: 'Payload too large', request_id: requestId }, { status: 413 });
     }
 
     const rawBody = await request.text();
-    if (rawBody.length > MAX_BODY_BYTES) {
+    if (rawBody.length > maxBodyBytes) {
       ctx.waitUntil(writeOpsMetric(env, 'ingest_parse_errors', 1).catch(() => undefined));
       return Response.json({ error: 'Payload too large', request_id: requestId }, { status: 413 });
+    }
+
+    // Logpush sends this payload during destination validation -- accept it without ingesting.
+    if (rawBody.trim() === '{"content":"tests"}') {
+      return Response.json({ status: 'ok', logpush_validation: true, request_id: requestId });
     }
 
     const auth = await authenticate(request, env, rawBody);

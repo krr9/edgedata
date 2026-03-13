@@ -37,6 +37,7 @@ const DashboardPage = lazy(async () => {
 
 type ViewMode = 'search' | 'dashboard' | 'saved' | 'scheduled' | 'alerts' | 'admin' | 'livetail' | 'workspace';
 type SearchMode = 'structured' | 'token' | 'phrase';
+type QueryInputMode = 'search' | 'ask_ai';
 type ThemeMode = 'light' | 'dark';
 type ThemePreference = 'system' | ThemeMode;
 type NavIconKey = ViewMode | 'signout' | 'user';
@@ -213,6 +214,195 @@ function quotePplLiteral(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
+const PPL_COMMAND_PREFIX = /^(search|where|fields|sort|head|stats|timechart|top|rare|dedup|eval|lookup|rex|transaction|rename|table)\b/i;
+const ASK_AI_STOPWORDS = new Set([
+  'a', 'an', 'and', 'are', 'at', 'be', 'by', 'do', 'find', 'for', 'from', 'get', 'how',
+  'i', 'in', 'into', 'is', 'last', 'me', 'of', 'on', 'over', 'show', 'that', 'the', 'these',
+  'those', 'to', 'under', 'using', 'was', 'what', 'where', 'which', 'who', 'with', 'within'
+]);
+const ASK_AI_INTENT_WORDS = new Set([
+  'error', 'errors', 'fail', 'failed', 'failing', 'failure', 'latency', 'slow', 'slower',
+  'trace', 'request', 'requests', 'status', 'warn', 'warning', 'warnings', 'timeout',
+  'timeouts', 'spike', 'spikes', 'investigate', 'look', 'lookup', 'up'
+]);
+
+function buildScopedConditions(filterState: SearchFilterState, pivots: InvestigationPivots): string[] {
+  const conditions: string[] = [];
+  if (filterState.indexName.trim()) conditions.push(`index=${quotePplLiteral(filterState.indexName.trim().toLowerCase())}`);
+  if (filterState.service.trim()) conditions.push(`service=${quotePplLiteral(filterState.service.trim())}`);
+  if (filterState.environment.trim()) conditions.push(`env=${quotePplLiteral(filterState.environment.trim())}`);
+  if (filterState.host.trim()) conditions.push(`host=${quotePplLiteral(filterState.host.trim())}`);
+  if (filterState.level.trim()) conditions.push(`level=${quotePplLiteral(filterState.level.trim().toLowerCase())}`);
+  if (filterState.statusCode.trim()) {
+    const numeric = Number(filterState.statusCode.trim());
+    if (!Number.isNaN(numeric)) conditions.push(`status=${Math.trunc(numeric)}`);
+  }
+  if (pivots.trace_id) conditions.push(`trace_id=${quotePplLiteral(pivots.trace_id)}`);
+  if (pivots.request_id) conditions.push(`request_id=${quotePplLiteral(pivots.request_id)}`);
+  if (pivots.user_id) conditions.push(`user_id=${quotePplLiteral(pivots.user_id)}`);
+  if (pivots.msg_hash) conditions.push(`msg_hash=${quotePplLiteral(pivots.msg_hash)}`);
+  return conditions;
+}
+
+function tokenizeAskPrompt(prompt: string): string[] {
+  return prompt
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/["',!?()[\]{}]/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .filter((token) => !ASK_AI_STOPWORDS.has(token))
+    .filter((token) => token.length >= 2)
+    .filter((token) => !ASK_AI_INTENT_WORDS.has(token))
+    .filter((token) => !/^(last|next|past)\d+$/.test(token))
+    .filter((token) => !/^\d+(ms|s|m|h|d)?$/.test(token));
+}
+
+function buildAskAiPlan(options: {
+  prompt: string;
+  filters: SearchFilterState;
+  pivots: InvestigationPivots;
+  topTerms: string[];
+}): AskAiPlan {
+  const prompt = String(options.prompt || '').trim();
+  const scopedConditions = buildScopedConditions(options.filters, options.pivots);
+  const reasoning: string[] = ['Runs in the current Log Explorer so results, facets, and pivots stay in one place.'];
+
+  if (scopedConditions.length > 0) {
+    reasoning.push('Keeps the current explorer filters and investigation pivots in scope.');
+  } else {
+    reasoning.push('Uses the current time range and keeps index/service scope broad unless the prompt narrows it.');
+  }
+
+  if (!prompt) {
+    const generatedPpl = scopedConditions.length > 0
+      ? `search * | where ${scopedConditions.join(' and ')} | sort -ts | head 200`
+      : 'search * | sort -ts | head 200';
+    reasoning.push('No AI prompt entered yet, so this stays as a broad recent-events search.');
+    return {
+      intentLabel: 'Broad exploration',
+      confidence: 'low',
+      generatedPpl,
+      reasoning,
+      passthrough: false
+    };
+  }
+
+  if (prompt.includes('|') || PPL_COMMAND_PREFIX.test(prompt)) {
+    reasoning.push('Input already looks like PPL, so Ask AI will pass it through unchanged.');
+    return {
+      intentLabel: 'Direct PPL passthrough',
+      confidence: 'high',
+      generatedPpl: prompt,
+      reasoning,
+      passthrough: true
+    };
+  }
+
+  const lower = prompt.toLowerCase();
+  const inferredConditions: string[] = [];
+  let confidence: AskAiPlan['confidence'] = 'medium';
+  let intentLabel = 'Guided exploration';
+
+  const quotedPhrase = prompt.match(/"([^"]+)"/)?.[1]?.trim();
+  const routeToken = prompt.match(/\/[A-Za-z0-9._~!$&'()*+,;=:@%-]+(?:\/[A-Za-z0-9._~!$&'()*+,;=:@%-]+)*/)?.[0]?.trim();
+  const traceId = /\btrace(?:[_\s-]?id)?\b/i.test(prompt)
+    ? prompt.match(/\b([0-9a-f]{16,32})\b/i)?.[1]
+    : undefined;
+  const requestId = /\brequest(?:[_\s-]?id)?\b/i.test(prompt)
+    ? prompt.match(/\brequest(?:[_\s-]?id)?[:=\s]+([A-Za-z0-9._:-]{6,})\b/i)?.[1]
+    : undefined;
+  const explicitStatus = lower.match(/\bstatus(?: code)?\s*(?:=|is|of)?\s*(\d{3})\b/)?.[1];
+  const statusClass = lower.match(/\b([45])xx\b/)?.[1];
+  const durationMs = lower.match(/\b(?:over|above|greater than|slower than|longer than)\s*(\d+)\s*ms\b/)?.[1];
+  const durationSeconds = lower.match(/\b(?:over|above|greater than|slower than|longer than)\s*(\d+)\s*(?:s|sec|secs|seconds)\b/)?.[1];
+
+  if (traceId) {
+    intentLabel = 'Trace investigation';
+    confidence = 'high';
+    inferredConditions.push(`trace_id=${quotePplLiteral(traceId)}`);
+    reasoning.push(`Detected trace lookup for ${traceId}.`);
+  } else if (requestId) {
+    intentLabel = 'Request investigation';
+    confidence = 'high';
+    inferredConditions.push(`request_id=${quotePplLiteral(requestId)}`);
+    reasoning.push(`Detected request lookup for ${requestId}.`);
+  } else if (/\b(latency|slow|slower|duration|p95|performance)\b/i.test(prompt)) {
+    intentLabel = 'Latency investigation';
+    const threshold = durationMs
+      ? Number(durationMs)
+      : durationSeconds
+        ? Number(durationSeconds) * 1000
+        : 1000;
+    inferredConditions.push(`duration_ms>=${Math.trunc(threshold)}`);
+    reasoning.push(`Interpreted this as a latency investigation and added duration_ms>=${Math.trunc(threshold)}.`);
+  } else if (/\b(error|errors|fail|failed|failure|exception|5xx)\b/i.test(prompt)) {
+    intentLabel = 'Error investigation';
+    if (statusClass) {
+      inferredConditions.push(`status>=${Number(statusClass) * 100}`);
+      reasoning.push(`Detected ${statusClass}xx status focus and constrained status accordingly.`);
+    } else if (explicitStatus) {
+      inferredConditions.push(`status=${Math.trunc(Number(explicitStatus))}`);
+      reasoning.push(`Detected explicit status ${explicitStatus}.`);
+      confidence = 'high';
+    } else {
+      inferredConditions.push('level="error"');
+      reasoning.push('Interpreted this as an error-focused query and constrained level="error".');
+    }
+  } else if (/\b(warn|warning|warnings)\b/i.test(prompt)) {
+    intentLabel = 'Warning investigation';
+    inferredConditions.push('level="warn"');
+    reasoning.push('Interpreted this as a warning-focused query and constrained level="warn".');
+  }
+
+  if (explicitStatus && !inferredConditions.some((condition) => condition.startsWith('status='))) {
+    inferredConditions.push(`status=${Math.trunc(Number(explicitStatus))}`);
+    reasoning.push(`Added explicit status=${explicitStatus} from the prompt.`);
+    confidence = 'high';
+  }
+
+  const rawTokens = tokenizeAskPrompt(prompt);
+  const routeAwareTokens = routeToken
+    ? [routeToken, ...rawTokens.filter((token) => token !== routeToken.toLowerCase())]
+    : rawTokens;
+  const searchTokens = routeAwareTokens
+    .filter((token) => !traceId || token !== traceId.toLowerCase())
+    .filter((token) => !requestId || token !== requestId.toLowerCase())
+    .slice(0, 6);
+
+  let searchExpr = '*';
+  if (quotedPhrase) {
+    searchExpr = quotePplLiteral(quotedPhrase);
+    reasoning.push('Treats the quoted text as an exact phrase search.');
+    if (confidence === 'low') confidence = 'medium';
+  } else if (searchTokens.length > 0) {
+    searchExpr = searchTokens
+      .map((token) => (/^[a-z0-9:_/-]+$/i.test(token) ? token : quotePplLiteral(token)))
+      .join(' ');
+    reasoning.push(`Uses prompt keywords as search terms: ${searchTokens.join(', ')}.`);
+  } else if (options.topTerms.length > 0) {
+    searchExpr = options.topTerms.slice(0, 2).map((term) => quotePplLiteral(term)).join(' ');
+    reasoning.push('No strong keywords were detected, so this falls back to recent top terms from the current dataset.');
+    confidence = 'low';
+  }
+
+  const whereConditions = [...scopedConditions, ...inferredConditions];
+  let generatedPpl = `search ${searchExpr}`;
+  if (whereConditions.length > 0) {
+    generatedPpl += ` | where ${whereConditions.join(' and ')}`;
+  }
+  generatedPpl += ' | sort -ts | head 200';
+
+  return {
+    intentLabel,
+    confidence,
+    generatedPpl,
+    reasoning,
+    passthrough: false
+  };
+}
+
 function buildTraceContextPplFromEvent(event: Pick<LogEvent, 'trace_id' | 'index' | 'service' | 'env'>): string {
   const traceId = String(event.trace_id || '').trim();
   if (!traceId) return 'search *';
@@ -331,13 +521,56 @@ interface ScheduledSearchItem {
   updated_at?: string | null;
 }
 
+interface ScheduledSearchRunSummary {
+  headline?: string | null;
+  status?: string;
+  result_count?: number;
+  warning?: string | null;
+  error_message?: string | null;
+  preview_fields?: string[];
+  has_results?: boolean;
+}
+
 interface ScheduledSearchResult {
   id: string;
   scheduled_search_id: string;
   run_at: string;
+  time_from: string;
+  time_to: string;
   status: string;
   result_count: number;
+  trigger_type?: string;
+  requested_by?: string | null;
+  summary?: ScheduledSearchRunSummary;
+  stats?: Record<string, unknown>;
+  started_at?: string | null;
+  completed_at?: string | null;
+  materialized_result_id?: string | null;
+  has_full_results?: boolean;
   error_message?: string | null;
+}
+
+interface ScheduledSearchRunDetail extends ScheduledSearchResult {
+  preview?: Record<string, unknown>[];
+  query_request?: Record<string, unknown>;
+  artifact?: {
+    id: string;
+    status: string;
+    result_count: number;
+    computed_at: string;
+    expires_at: string;
+  } | null;
+}
+
+interface ScheduledSearchRunResultsPayload {
+  run_id: string;
+  scheduled_search_id: string;
+  result_type: 'events' | 'table';
+  results: Record<string, unknown>[];
+  total_results: number;
+  partial?: boolean;
+  warning?: string | null;
+  stats?: Record<string, unknown>;
 }
 
 interface AlertDefinition {
@@ -468,6 +701,14 @@ interface SearchRequestPayload {
   ppl: string;
   limit: number;
   cursor: { before_ts: string; before_event_id: string } | null;
+}
+
+interface AskAiPlan {
+  intentLabel: string;
+  confidence: 'high' | 'medium' | 'low';
+  generatedPpl: string;
+  reasoning: string[];
+  passthrough: boolean;
 }
 
 interface SearchStreamChunk {
@@ -1140,6 +1381,7 @@ function App() {
     return readViewFromLocation(window.location) || 'search';
   });
 
+  const [queryInputMode, setQueryInputMode] = useState<QueryInputMode>('search');
   const [query, setQuery] = useState('search * | where index="otel-demo" | sort -ts | head 200');
   const [queryFocused, setQueryFocused] = useState(false);
   const [querySuggestions, setQuerySuggestions] = useState<QuerySuggestionItem[]>([]);
@@ -1245,6 +1487,7 @@ function App() {
   } | null>(null);
 
   const [loading, setLoading] = useState(false);
+  const [hasCompletedSearch, setHasCompletedSearch] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [guardrailDetail, setGuardrailDetail] = useState<GuardrailExplanation | null>(null);
   const [workspaceLaunchInfo, setWorkspaceLaunchInfo] = useState<string | null>(null);
@@ -1283,6 +1526,11 @@ function App() {
   const [scheduledLoading, setScheduledLoading] = useState(false);
   const [scheduledError, setScheduledError] = useState<string | null>(null);
   const [scheduledResults, setScheduledResults] = useState<Record<string, ScheduledSearchResult[]>>({});
+  const [scheduledRunDetails, setScheduledRunDetails] = useState<Record<string, ScheduledSearchRunDetail>>({});
+  const [scheduledRunResults, setScheduledRunResults] = useState<Record<string, ScheduledSearchRunResultsPayload>>({});
+  const [scheduledRunLoading, setScheduledRunLoading] = useState<Record<string, boolean>>({});
+  const [scheduledActiveRunBySearch, setScheduledActiveRunBySearch] = useState<Record<string, string>>({});
+  const [scheduledRunTriggering, setScheduledRunTriggering] = useState<Record<string, boolean>>({});
   const [showScheduleForm, setShowScheduleForm] = useState(false);
   const [scheduleFormName, setScheduleFormName] = useState('');
   const [scheduleFormPpl, setScheduleFormPpl] = useState('');
@@ -1357,7 +1605,6 @@ function App() {
     }
   }, [sessionIdFromUrl, user]);
 
-  const highlightTerms = useMemo(() => extractHighlightTerms(query), [query]);
   const canOpenAdmin = user?.role === 'admin' || user?.role === 'superadmin';
   const navItems = useMemo<Array<{ key: ViewMode; label: string }>>(() => {
     const items: Array<{ key: ViewMode; label: string }> = [
@@ -1559,6 +1806,23 @@ function App() {
 
   const facets = summary?.facets || localFacets;
   const topTerms = summary?.top_terms || [];
+  const assistantPlan = useMemo(() => buildAskAiPlan({
+    prompt: query,
+    filters: {
+      indexName,
+      service,
+      environment,
+      host,
+      level,
+      statusCode
+    },
+    pivots: investigationPivots,
+    topTerms: topTerms.map((item) => item.value).filter(Boolean)
+  }), [environment, host, indexName, investigationPivots, level, query, service, statusCode, topTerms]);
+  const highlightTerms = useMemo(
+    () => extractHighlightTerms(queryInputMode === 'ask_ai' ? assistantPlan.generatedPpl : query),
+    [assistantPlan.generatedPpl, query, queryInputMode]
+  );
 
   const localFieldPresence = useMemo(() => {
     return {
@@ -1728,7 +1992,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!queryFocused || view !== 'search') {
+    if (!queryFocused || view !== 'search' || queryInputMode !== 'search') {
       closeQuerySuggestions();
       return;
     }
@@ -1788,7 +2052,7 @@ function App() {
     return () => {
       globalThis.clearTimeout(timeout);
     };
-  }, [apiFetch, closeQuerySuggestions, query, queryFocused, topTerms, view]);
+  }, [apiFetch, closeQuerySuggestions, query, queryFocused, queryInputMode, topTerms, view]);
 
   useEffect(() => {
     if (!querySuggestionsOpen) return;
@@ -1829,30 +2093,26 @@ function App() {
       ...(overrides?.filterOverrides || {})
     };
     const pivots = overrides?.pivotOverrides ?? investigationPivots;
-
     const rawQuery = (overrides?.queryOverride ?? query).trim();
+
+    if (queryInputMode === 'ask_ai') {
+      return buildAskAiPlan({
+        prompt: rawQuery,
+        filters: filterState,
+        pivots,
+        topTerms: topTerms.map((item) => item.value).filter(Boolean)
+      }).generatedPpl;
+    }
+
     const looksLikePipeline = /\|/.test(rawQuery) || /^(search|where|fields|sort|head|stats)\b/i.test(rawQuery);
     if (looksLikePipeline) return rawQuery;
 
-    const conditions: string[] = [];
-    if (filterState.indexName.trim()) conditions.push(`index=${quotePplLiteral(filterState.indexName.trim().toLowerCase())}`);
-    if (filterState.service.trim()) conditions.push(`service=${quotePplLiteral(filterState.service.trim())}`);
-    if (filterState.environment.trim()) conditions.push(`env=${quotePplLiteral(filterState.environment.trim())}`);
-    if (filterState.host.trim()) conditions.push(`host=${quotePplLiteral(filterState.host.trim())}`);
-    if (filterState.level.trim()) conditions.push(`level=${quotePplLiteral(filterState.level.trim().toLowerCase())}`);
-    if (filterState.statusCode.trim()) {
-      const numeric = Number(filterState.statusCode.trim());
-      if (!Number.isNaN(numeric)) conditions.push(`status=${Math.trunc(numeric)}`);
-    }
-    if (pivots.trace_id) conditions.push(`trace_id=${quotePplLiteral(pivots.trace_id)}`);
-    if (pivots.request_id) conditions.push(`request_id=${quotePplLiteral(pivots.request_id)}`);
-    if (pivots.user_id) conditions.push(`user_id=${quotePplLiteral(pivots.user_id)}`);
-    if (pivots.msg_hash) conditions.push(`msg_hash=${quotePplLiteral(pivots.msg_hash)}`);
+    const conditions = buildScopedConditions(filterState, pivots);
 
     const searchExpr = rawQuery || '*';
     if (conditions.length === 0) return `search ${searchExpr}`;
     return `search ${searchExpr} | where ${conditions.join(' and ')}`;
-  }, [indexName, query, service, environment, host, level, statusCode, investigationPivots]);
+  }, [environment, host, indexName, investigationPivots, level, query, queryInputMode, service, statusCode, topTerms]);
 
   const buildSearchPayload = useCallback((options?: {
     queryOverride?: string;
@@ -2149,6 +2409,7 @@ function App() {
             });
           }
         }
+        setHasCompletedSearch(true);
         return;
       }
 
@@ -2191,6 +2452,7 @@ function App() {
           timeOverride: options?.timeOverride
         });
       }
+      setHasCompletedSearch(true);
     } catch (requestError) {
       if (requestError instanceof DOMException && requestError.name === 'AbortError') {
         return;
@@ -2300,9 +2562,10 @@ function App() {
 
     setSavedError(null);
     try {
+      const persistedQuery = queryInputMode === 'ask_ai' ? assistantPlan.generatedPpl : query;
       const response = await apiFetch('/saved-searches', {
         method: 'POST',
-        body: JSON.stringify({ name, query })
+        body: JSON.stringify({ name, query: persistedQuery })
       });
 
       const body = await response.json() as { error?: string };
@@ -2317,7 +2580,7 @@ function App() {
     } catch (requestError) {
       setSavedError(String(requestError));
     }
-  }, [apiFetch, loadSavedSearches, query, saveName, setAddressableView]);
+  }, [apiFetch, assistantPlan.generatedPpl, loadSavedSearches, query, queryInputMode, saveName, setAddressableView]);
 
   const deleteSavedSearch = useCallback(async (id: string) => {
     try {
@@ -2400,17 +2663,76 @@ function App() {
         const body = await response.json() as ScheduledSearchResult[];
         setScheduledResults(prev => ({ ...prev, [id]: body }));
       }
-    } catch {
-      // best-effort
+    } catch (err) {
+      setScheduledError(String(err));
     }
   }, [apiFetch]);
 
+  const loadScheduledRunDetail = useCallback(async (searchId: string, runId: string) => {
+    setScheduledRunLoading((prev) => ({ ...prev, [runId]: true }));
+    try {
+      const response = await apiFetch(`/scheduled-searches/${searchId}/runs/${runId}`);
+      const body = await response.json() as ScheduledSearchRunDetail | { error?: string };
+      if (!response.ok || ('error' in body && body.error)) {
+        throw new Error(('error' in body && body.error) ? body.error : 'Failed to load run detail');
+      }
+      setScheduledRunDetails((prev) => ({ ...prev, [runId]: body as ScheduledSearchRunDetail }));
+      setScheduledActiveRunBySearch((prev) => ({ ...prev, [searchId]: runId }));
+    } catch (err) {
+      setScheduledError(String(err));
+    } finally {
+      setScheduledRunLoading((prev) => ({ ...prev, [runId]: false }));
+    }
+  }, [apiFetch]);
+
+  const loadScheduledRunResults = useCallback(async (searchId: string, runId: string) => {
+    setScheduledRunLoading((prev) => ({ ...prev, [runId]: true }));
+    try {
+      const response = await apiFetch(`/scheduled-searches/${searchId}/runs/${runId}/results`);
+      const body = await response.json() as ScheduledSearchRunResultsPayload | { error?: string };
+      if (!response.ok || ('error' in body && body.error)) {
+        throw new Error(('error' in body && body.error) ? body.error : 'Failed to load run results');
+      }
+      setScheduledRunResults((prev) => ({ ...prev, [runId]: body as ScheduledSearchRunResultsPayload }));
+      setScheduledActiveRunBySearch((prev) => ({ ...prev, [searchId]: runId }));
+    } catch (err) {
+      setScheduledError(String(err));
+    } finally {
+      setScheduledRunLoading((prev) => ({ ...prev, [runId]: false }));
+    }
+  }, [apiFetch]);
+
+  const runScheduledSearch = useCallback(async (id: string) => {
+    setScheduledRunTriggering((prev) => ({ ...prev, [id]: true }));
+    setScheduledError(null);
+    try {
+      const response = await apiFetch(`/scheduled-searches/${id}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      const body = await response.json() as { error?: string; run_id?: string };
+      if (!response.ok || body.error || !body.run_id) {
+        throw new Error(body.error || 'Failed to run scheduled search');
+      }
+      await loadScheduledResults(id);
+      await Promise.all([
+        loadScheduledRunDetail(id, body.run_id),
+        loadScheduledRunResults(id, body.run_id)
+      ]);
+    } catch (err) {
+      setScheduledError(String(err));
+    } finally {
+      setScheduledRunTriggering((prev) => ({ ...prev, [id]: false }));
+    }
+  }, [apiFetch, loadScheduledResults, loadScheduledRunDetail, loadScheduledRunResults]);
+
   const scheduleCurrentSearch = useCallback(() => {
-    setScheduleFormPpl(query);
+    setScheduleFormPpl(queryInputMode === 'ask_ai' ? assistantPlan.generatedPpl : query);
     setScheduleFormName('');
     setShowScheduleForm(true);
     setAddressableView('scheduled');
-  }, [query, setAddressableView]);
+  }, [assistantPlan.generatedPpl, query, queryInputMode, setAddressableView]);
 
   const loadAlerts = useCallback(async () => {
     setAlertsLoading(true);
@@ -3010,6 +3332,7 @@ function App() {
   }, [apiFetch, loadAdminData, newMappingGroup, newMappingRoleId]);
 
   const applySavedSearch = useCallback((saved: SavedSearch) => {
+    setQueryInputMode('search');
     setQuery(saved.query);
     setAddressableView('search');
   }, [setAddressableView]);
@@ -3029,6 +3352,7 @@ function App() {
       : null;
 
     setQuery(nextQuery);
+    setQueryInputMode('search');
     setIndexName(nextScope.index);
     setService(nextScope.service);
     setEnvironment(nextScope.env);
@@ -3506,6 +3830,31 @@ function App() {
                 </div>
               )}
 
+              <div className="query-mode-toggle" role="tablist" aria-label="Search input mode">
+                <button
+                  type="button"
+                  className={queryInputMode === 'search' ? 'active' : ''}
+                  aria-pressed={queryInputMode === 'search'}
+                  onClick={() => {
+                    setQueryInputMode('search');
+                    setQuerySuggestionsOpen(queryFocused && querySuggestions.length > 0);
+                  }}
+                >
+                  Search
+                </button>
+                <button
+                  type="button"
+                  className={queryInputMode === 'ask_ai' ? 'active' : ''}
+                  aria-pressed={queryInputMode === 'ask_ai'}
+                  onClick={() => {
+                    setQueryInputMode('ask_ai');
+                    closeQuerySuggestions();
+                  }}
+                >
+                  Ask AI
+                </button>
+              </div>
+
               <div className="search-input">
                 <div className="query-input-wrapper" ref={queryTypeaheadRef}>
                   <input
@@ -3515,21 +3864,27 @@ function App() {
                     onChange={(event) => setQuery(event.target.value)}
                     onFocus={() => {
                       setQueryFocused(true);
-                      setQuerySuggestionsOpen(querySuggestions.length > 0);
+                      if (queryInputMode === 'search') {
+                        setQuerySuggestionsOpen(querySuggestions.length > 0);
+                      }
                     }}
                     onBlur={() => {
                       setQueryFocused(false);
                     }}
-                    placeholder='search * | where index="otel-demo" | sort -ts | head 200'
+                    placeholder={queryInputMode === 'ask_ai'
+                      ? 'Why is checkout latency high in otel-demo?'
+                      : 'search * | where index="otel-demo" | sort -ts | head 200'}
                     onKeyDown={(event) => {
                       if ((event.ctrlKey || event.metaKey) && event.key === ' ') {
                         event.preventDefault();
-                        setQuerySuggestionsOpen(querySuggestions.length > 0);
-                        setQuerySuggestionIndex(querySuggestions.length > 0 ? 0 : -1);
+                        if (queryInputMode === 'search') {
+                          setQuerySuggestionsOpen(querySuggestions.length > 0);
+                          setQuerySuggestionIndex(querySuggestions.length > 0 ? 0 : -1);
+                        }
                         return;
                       }
 
-                      if (querySuggestionsOpen && querySuggestions.length > 0) {
+                      if (queryInputMode === 'search' && querySuggestionsOpen && querySuggestions.length > 0) {
                         if (event.key === 'ArrowDown') {
                           event.preventDefault();
                           setQuerySuggestionIndex((index) => (index + 1) % querySuggestions.length);
@@ -3562,7 +3917,7 @@ function App() {
                       }
                     }}
                   />
-                  {querySuggestionsOpen && (
+                  {queryInputMode === 'search' && querySuggestionsOpen && (
                     <div className="query-typeahead-dropdown" role="listbox" aria-label="Search suggestions">
                       {querySuggestionsLoading && (
                         <div className="query-typeahead-status">Loading suggestions...</div>
@@ -3601,7 +3956,7 @@ function App() {
                   }}
                   disabled={loading}
                 >
-                  {loading ? 'Searching...' : 'Search'}
+                  {loading ? (queryInputMode === 'ask_ai' ? 'Thinking...' : 'Searching...') : (queryInputMode === 'ask_ai' ? 'Ask AI' : 'Search')}
                 </button>
                 {loading && (
                   <button
@@ -3678,6 +4033,26 @@ function App() {
                   )}
                 </div>
               </div>
+
+              {queryInputMode === 'ask_ai' && (
+                <div className="ask-ai-plan">
+                  <div className="ask-ai-plan-header">
+                    <strong>{assistantPlan.intentLabel}</strong>
+                    <span className={`ask-ai-confidence ${assistantPlan.confidence}`}>{assistantPlan.confidence} confidence</span>
+                  </div>
+                  <p className="ask-ai-plan-summary">
+                    {assistantPlan.passthrough
+                      ? 'Ask AI detected direct PPL and will run it unchanged.'
+                      : 'Ask AI will compile this prompt into PPL and execute it in the current explorer.'}
+                  </p>
+                  <pre className="ask-ai-plan-query">{assistantPlan.generatedPpl}</pre>
+                  <div className="ask-ai-plan-reasons">
+                    {assistantPlan.reasoning.map((reason, index) => (
+                      <span key={`ask-ai-reason-${index}`}>{reason}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {showSaveSearchInline && (
                 <div className="save-search-row">
@@ -4014,7 +4389,7 @@ function App() {
               </aside>
 
                 <section className="events-panel">
-                {resultType === 'events' && results.length === 0 && !loading && !error && (
+                {resultType === 'events' && hasCompletedSearch && results.length === 0 && !loading && !error && (
                   <div className="empty-state card">
                     <p>No results found. Adjust time range, filters, or PPL query.</p>
                   </div>
@@ -4854,6 +5229,13 @@ function App() {
                       <div className="saved-query">{ss.ppl}</div>
                     </div>
                     <div className="saved-actions">
+                      <button
+                        className="secondary"
+                        disabled={scheduledRunTriggering[ss.id]}
+                        onClick={() => void runScheduledSearch(ss.id)}
+                      >
+                        {scheduledRunTriggering[ss.id] ? 'Running...' : 'Run Now'}
+                      </button>
                       <button className="secondary" onClick={() => { void toggleScheduledSearch(ss.id, !ss.enabled); }}>
                         {ss.enabled ? 'Disable' : 'Enable'}
                       </button>
@@ -4862,6 +5244,11 @@ function App() {
                         onClick={() => {
                           if (scheduledResults[ss.id]) {
                             setScheduledResults((prev) => {
+                              const next = { ...prev };
+                              delete next[ss.id];
+                              return next;
+                            });
+                            setScheduledActiveRunBySearch((prev) => {
                               const next = { ...prev };
                               delete next[ss.id];
                               return next;
@@ -4886,16 +5273,101 @@ function App() {
                       {scheduledResults[ss.id].length === 0 && <span className="scheduled-runs-empty">No runs yet</span>}
                       <div className="scheduled-run-list">
                         {scheduledResults[ss.id].slice(0, 5).map((r) => (
-                          <div key={r.id} className="scheduled-run-row">
-                            <span className="scheduled-run-time">{formatDateTime(r.run_at)}</span>
-                            <span className={`scheduled-run-status status-${r.status === 'success' ? 'success' : 'error'}`}>
-                              {r.status}
-                            </span>
-                            <span className="scheduled-run-count">{r.result_count} results</span>
+                          <div key={r.id} className="scheduled-run-card">
+                            <div className="scheduled-run-row">
+                              <span className="scheduled-run-time">{formatDateTime(r.run_at)}</span>
+                              <span className={`scheduled-run-status status-${r.status === 'success' ? 'success' : 'error'}`}>
+                                {r.status}
+                              </span>
+                              <span className="scheduled-run-count">{r.result_count} results</span>
+                              <span className="scheduled-run-summary-text">
+                                {r.summary?.headline || (r.error_message || 'Run completed')}
+                              </span>
+                            </div>
+                            <div className="scheduled-run-subrow">
+                              <span>{formatDateTime(r.time_from)} to {formatDateTime(r.time_to)}</span>
+                              <span>{r.trigger_type || 'schedule'}</span>
+                              {r.requested_by && <span>{r.requested_by}</span>}
+                            </div>
                             {r.error_message && <span className="scheduled-run-error">{r.error_message}</span>}
+                            <div className="scheduled-run-actions">
+                              <button
+                                className="secondary"
+                                disabled={scheduledRunLoading[r.id]}
+                                onClick={() => {
+                                  void Promise.all([
+                                    loadScheduledRunDetail(ss.id, r.id),
+                                    loadScheduledRunResults(ss.id, r.id)
+                                  ]);
+                                }}
+                              >
+                                {scheduledRunLoading[r.id] ? 'Loading...' : 'View Run'}
+                              </button>
+                            </div>
                           </div>
                         ))}
                       </div>
+
+                      {scheduledActiveRunBySearch[ss.id] && scheduledRunDetails[scheduledActiveRunBySearch[ss.id]] && (
+                        <div className="scheduled-run-detail">
+                          {(() => {
+                            const activeRunId = scheduledActiveRunBySearch[ss.id];
+                            const detail = scheduledRunDetails[activeRunId];
+                            const runPayload = scheduledRunResults[activeRunId];
+                            const rows = runPayload?.results || detail.preview || [];
+                            const columnKeys = rows.length > 0 ? Object.keys(rows[0]).slice(0, 6) : [];
+                            return (
+                              <>
+                                <div className="scheduled-run-detail-header">
+                                  <div>
+                                    <strong>{detail.summary?.headline || 'Run detail'}</strong>
+                                    <div className="scheduled-run-subrow">
+                                      <span>{formatDateTime(detail.run_at)}</span>
+                                      <span>{detail.status}</span>
+                                      <span>{detail.result_count} results</span>
+                                    </div>
+                                  </div>
+                                  {detail.artifact && (
+                                    <span className="scheduled-run-artifact-meta">
+                                      Artifact expires {formatDateTime(detail.artifact.expires_at)}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="scheduled-run-subrow">
+                                  <span>Window: {formatDateTime(detail.time_from)} to {formatDateTime(detail.time_to)}</span>
+                                  {runPayload?.partial && <span>Preview only</span>}
+                                  {detail.query_request?.time && <span>On-demand result view ready</span>}
+                                </div>
+                                {detail.error_message && <div className="scheduled-run-error">{detail.error_message}</div>}
+                                {rows.length === 0 ? (
+                                  <p className="scheduled-runs-empty">No rows captured for this run.</p>
+                                ) : (
+                                  <div className="scheduled-run-preview">
+                                    <table>
+                                      <thead>
+                                        <tr>
+                                          {columnKeys.map((key) => (
+                                            <th key={key}>{key}</th>
+                                          ))}
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {rows.slice(0, 10).map((row, rowIndex) => (
+                                          <tr key={`${activeRunId}-${rowIndex}`}>
+                                            {columnKeys.map((key) => (
+                                              <td key={`${activeRunId}-${rowIndex}-${key}`}>{String(row[key] ?? '')}</td>
+                                            ))}
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

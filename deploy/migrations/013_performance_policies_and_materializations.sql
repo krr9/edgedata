@@ -1,4 +1,5 @@
 -- 013: Performance policies, materialization metadata, and reusable result storage
+-- NOTE: Not idempotent. Do not re-run on databases where these columns already exist.
 
 ALTER TABLE dashboards ADD COLUMN performance_profile TEXT NOT NULL DEFAULT 'economy';
 ALTER TABLE dashboards ADD COLUMN default_execution_mode TEXT NOT NULL DEFAULT 'live';

@@ -1023,6 +1023,13 @@ async function cleanupExpiredMaterializations(env: Env): Promise<void> {
   ).bind(new Date().toISOString()).run();
 }
 
+async function cleanupOldAuditLogs(env: Env): Promise<void> {
+  const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  await env.DB.prepare(
+    'DELETE FROM audit_log WHERE created_at < ?'
+  ).bind(cutoff).run();
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -1102,6 +1109,9 @@ export default {
         }),
         cleanupExpiredMaterializations(env).catch((err) => {
           console.error('materialization cleanup failed', err);
+        }),
+        cleanupOldAuditLogs(env).catch((err) => {
+          console.error('audit_log cleanup failed', err);
         })
       ])
     );

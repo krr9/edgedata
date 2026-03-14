@@ -1,4 +1,5 @@
 -- 014: Scheduled search run artifacts and richer execution metadata
+-- NOTE: Not idempotent. Do not re-run on databases where these columns already exist.
 
 ALTER TABLE scheduled_search_results ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'schedule';
 ALTER TABLE scheduled_search_results ADD COLUMN requested_by TEXT;

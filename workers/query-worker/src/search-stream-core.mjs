@@ -144,8 +144,18 @@ function computeAggregation(fn, field, rows) {
   if (fn === 'min') return nums.length ? Math.min(...nums) : null;
   if (fn === 'max') return nums.length ? Math.max(...nums) : null;
 
-  if (fn === 'earliest') return values.length ? values.sort()[0] : null;
-  if (fn === 'latest') return values.length ? values.sort().reverse()[0] : null;
+  if (fn === 'earliest') {
+    if (!values.length) return null;
+    const nums = values.map(Number).filter(Number.isFinite);
+    if (nums.length === values.length) return Math.min(...nums);
+    return values.map(String).sort()[0];
+  }
+  if (fn === 'latest') {
+    if (!values.length) return null;
+    const nums = values.map(Number).filter(Number.isFinite);
+    if (nums.length === values.length) return Math.max(...nums);
+    return values.map(String).sort().reverse()[0];
+  }
 
   return null;
 }

@@ -131,6 +131,7 @@ CREATE INDEX IF NOT EXISTS idx_rate_limits_updated_at ON rate_limits(updated_at)
 CREATE INDEX IF NOT EXISTS idx_roles_enabled ON roles(enabled);
 CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id);
 CREATE INDEX IF NOT EXISTS idx_group_role_map_group ON access_group_role_mappings(access_group);
+CREATE INDEX IF NOT EXISTS idx_group_role_map_role_id ON access_group_role_mappings(role_id);
 CREATE INDEX IF NOT EXISTS idx_invites_email ON invitations(email);
 CREATE INDEX IF NOT EXISTS idx_invites_status ON invitations(status);
 CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log(created_at DESC);

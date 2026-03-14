@@ -1,5 +1,7 @@
 import { listIngestParsers, parseIngestPayload, normalizeLogpushRecord } from './ingest-framework.mjs';
 import { timingSafeTokenCompare } from '../../shared/timing-safe.mjs';
+import { clientIp as sharedClientIp } from '../../shared/request-utils.mjs';
+import { enforceRateLimit as sharedEnforceRateLimit, asRateLimitPerMinute as sharedAsRateLimitPerMinute } from '../../shared/rate-limit.mjs';
 
 export interface Env {
   DB: D1Database;
@@ -131,8 +133,11 @@ const STOPWORDS = new Set([
 
 const WHITELIST_STATUS_CODES = new Set(['400', '401', '403', '404', '429', '500', '502', '503', '504']);
 
-function clientIp(request: Request): string {
-  return request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || 'unknown-ip';
+const clientIp = sharedClientIp as (request: Request) => string;
+const asRateLimitPerMinute = sharedAsRateLimitPerMinute as (value: string | undefined, fallback: number) => number;
+
+function enforceRateLimit(env: Env, scope: string, key: string, perMinute: number): Promise<void> {
+  return sharedEnforceRateLimit(env.DB, scope, key, perMinute);
 }
 
 function resolveMaxBodyBytes(envValue: string | undefined): number {
@@ -140,43 +145,6 @@ function resolveMaxBodyBytes(envValue: string | undefined): number {
   const parsed = Number(envValue);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_BODY_BYTES;
   return Math.trunc(parsed);
-}
-
-function asRateLimitPerMinute(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
-  return Math.trunc(parsed);
-}
-
-async function enforceRateLimit(
-  env: Env,
-  scope: string,
-  key: string,
-  perMinute: number
-): Promise<void> {
-  if (perMinute <= 0) return;
-
-  const now = Date.now();
-  const windowStartMs = Math.floor(now / 60000) * 60000;
-  const nowIso = new Date(now).toISOString();
-
-  await env.DB.prepare(
-    `INSERT INTO rate_limits (scope, limit_key, window_start_ms, count, updated_at)
-     VALUES (?, ?, ?, 1, ?)
-     ON CONFLICT(scope, limit_key, window_start_ms) DO UPDATE SET
-       count = count + 1,
-       updated_at = excluded.updated_at`
-  ).bind(scope, key, windowStartMs, nowIso).run();
-
-  const row = await env.DB.prepare(
-    `SELECT count
-     FROM rate_limits
-     WHERE scope = ? AND limit_key = ? AND window_start_ms = ?`
-  ).bind(scope, key, windowStartMs).first<{ count?: number }>();
-
-  if (Number(row?.count || 0) > perMinute) {
-    throw new Error('Rate limit exceeded');
-  }
 }
 
 function generateULID(): string {
@@ -193,15 +161,10 @@ function generateULID(): string {
   return str;
 }
 
-function hash40(value: string): string {
-  // FNV-1a variant is sufficient for message grouping and deterministic hashes.
-  let hash = 2166136261;
-  for (let i = 0; i < value.length; i++) {
-    hash ^= value.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  const hex = (hash >>> 0).toString(16).padStart(8, '0');
-  return (hex + hex + hex + hex + hex).slice(0, 40);
+async function hash40(value: string): Promise<string> {
+  const data = new TextEncoder().encode(value);
+  const hashBuffer = await crypto.subtle.digest('SHA-1', data);
+  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 function normalizeTimestamp(ts: string | undefined): string {
@@ -236,10 +199,10 @@ function toNumber(value: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-function normalizeEvent(
+async function normalizeEvent(
   event: LogEvent,
   defaults: { index: string; service: string; env: string; host: string }
-): NormalizedEvent {
+): Promise<NormalizedEvent> {
   const ts = normalizeTimestamp((event.ts as string | undefined) || (event.timestamp as string | undefined));
   const dt = new Date(ts);
   const date = dt.toISOString().split('T')[0];
@@ -267,7 +230,7 @@ function normalizeEvent(
     level: normalizeLevel(event.level as string | undefined),
     message,
     message_lc,
-    msg_hash: hash40(message_lc),
+    msg_hash: await hash40(message_lc),
     trace_id: event.trace_id ? clampString(String(event.trace_id), 256) : undefined,
     span_id: event.span_id ? clampString(String(event.span_id), 256) : undefined,
     parent_span_id: event.parent_span_id ? clampString(String(event.parent_span_id), 256) : undefined,
@@ -585,13 +548,13 @@ function extractRawKeyMeta(key: string): { index: string; service: string; env: 
   };
 }
 
-function normalizeReprocessEvent(
+async function normalizeReprocessEvent(
   record: LogEvent,
   defaults: { index: string; service: string; env: string; host: string }
-): NormalizedEvent | NormalizedEvent[] {
+): Promise<NormalizedEvent | NormalizedEvent[]> {
   const logpushEvents = (normalizeLogpushRecord as (r: unknown) => LogEvent[] | null)(record);
   if (logpushEvents) {
-    return logpushEvents.map((lp: LogEvent) => normalizeEvent(lp, defaults));
+    return Promise.all(logpushEvents.map((lp: LogEvent) => normalizeEvent(lp, defaults)));
   }
 
   const hasCanonicalShape = Boolean(
@@ -601,7 +564,7 @@ function normalizeReprocessEvent(
   );
 
   if (!hasCanonicalShape) {
-    return normalizeEvent(record, defaults);
+    return await normalizeEvent(record, defaults);
   }
 
   const ts = normalizeTimestamp(record.ts);
@@ -628,7 +591,7 @@ function normalizeReprocessEvent(
     level: normalizeLevel(record.level as string | undefined),
     message,
     message_lc: messageLc,
-    msg_hash: clampString(String(record.msg_hash || hash40(messageLc)), 40),
+    msg_hash: clampString(String(record.msg_hash || await hash40(messageLc)), 40),
     trace_id: record.trace_id ? clampString(String(record.trace_id), 256) : undefined,
     span_id: record.span_id ? clampString(String(record.span_id), 256) : undefined,
     parent_span_id: record.parent_span_id ? clampString(String(record.parent_span_id), 256) : undefined,
@@ -665,7 +628,7 @@ async function reprocessRawObject(
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as LogEvent;
-      const normalized = normalizeReprocessEvent(parsed, defaults);
+      const normalized = await normalizeReprocessEvent(parsed, defaults);
       const items = Array.isArray(normalized) ? normalized : [normalized];
       for (const item of items) {
         if (dedupe.has(item.event_id)) continue;
@@ -921,7 +884,7 @@ export default {
       host: request.headers.get('X-Host') || parserDefaults.host || 'unknown'
     };
 
-    const normalizedEvents = incomingEvents.map((event) => normalizeEvent(event, defaults));
+    const normalizedEvents = await Promise.all(incomingEvents.map((event) => normalizeEvent(event, defaults)));
     ctx.waitUntil(
       writeOpsMetric(env, `ingest_parser_${normalizeMetricSuffix(parserResult.parser)}`, normalizedEvents.length).catch(() => undefined)
     );

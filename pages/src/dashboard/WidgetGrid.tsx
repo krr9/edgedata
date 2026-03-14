@@ -84,12 +84,12 @@ export function WidgetGrid({
           <div className="widget-card-header">
             <h3>{widget.title}</h3>
             <div className="widget-card-actions">
-              <button className="secondary" onClick={() => onRefreshWidget(widget.id)}>Refresh</button>
+              <button className="secondary" onClick={() => onRefreshWidget(widget.id)} aria-label="Refresh">Refresh</button>
               {editable && (
                 <>
-                  <button className="secondary" onClick={() => onEditWidget(widget.id)}>Edit</button>
-                  <button className="secondary" onClick={() => onDuplicateWidget(widget.id)}>Duplicate</button>
-                  <button className="danger" onClick={() => onDeleteWidget(widget.id)}>Delete</button>
+                  <button className="secondary" onClick={() => onEditWidget(widget.id)} aria-label="Edit">Edit</button>
+                  <button className="secondary" onClick={() => onDuplicateWidget(widget.id)} aria-label="Duplicate">Duplicate</button>
+                  <button className="danger" onClick={() => onDeleteWidget(widget.id)} aria-label="Delete">Delete</button>
                 </>
               )}
             </div>

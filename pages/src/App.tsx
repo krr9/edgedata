@@ -1,1071 +1,92 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Activity,
-  Bell,
-  Bookmark,
-  Briefcase,
-  ChevronLeft,
-  ChevronRight,
-  Clock3,
-  Database,
-  LayoutDashboard,
-  LogOut,
-  Search,
-  Settings,
-  SunMoon,
-  UserRound,
-  type LucideIcon
-} from 'lucide-react';
+import { SunMoon } from 'lucide-react';
 import { useAuth } from './AuthContext';
 import { AuthScreen } from './AuthScreen';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { Sidebar } from './components/Sidebar';
+import { useApiClient } from './hooks/useApiClient';
 import { IncidentWorkspacePage, type WorkspaceStarterSelection } from './investigation/IncidentWorkspacePage';
-import { PivotChips } from './investigation/PivotChips';
-import { RelatedEventsPanel } from './investigation/RelatedEventsPanel';
 import {
   type InvestigationPivots,
-  type PivotKey,
   type RelatedEvent,
   hasPivots,
   parseInvestigationParams,
   pivotsFromRelatedEvent
 } from './investigation/types';
+import { AlertsPage } from './pages/AlertsPage';
+import { AdminPage } from './pages/AdminPage';
+import { SavedPage } from './pages/SavedPage';
+import { ScheduledPage } from './pages/ScheduledPage';
+import { SearchPage } from './pages/SearchPage';
+import { API_BASE, MAX_LIVETAIL_EVENTS } from './constants';
+import {
+  ALERT_TEMPLATE_PRESETS,
+  ALERT_THRESHOLD_OPERATOR_OPTIONS,
+  MAX_QUERY_SUGGESTION_CACHE_SIZE,
+  QUERY_SUGGESTION_CACHE_TTL_MS,
+  QUERY_SUGGESTION_DEBOUNCE_MS,
+  STREAM_FLUSH_INTERVAL_MS,
+  TIME_RANGE_PRESETS
+} from './constants';
+import {
+  buildAskAiPlan,
+  buildLocalFallbackSuggestions,
+  buildTraceContextPplFromEvent,
+  extractHighlightTerms,
+  formatDateTime,
+  formatDateTimeLocalValue,
+  formatTimeCompact,
+  formatTimelineTick,
+  highlightText,
+  jsonSyntaxHtml,
+  maxFacetCount,
+  modeLabel,
+  parseErrorPayload,
+  parseViewMode,
+  prettyJsonOrNull,
+  readLevelCount,
+  readStoredThemePreference,
+  readSystemPrefersDark,
+  readViewFromLocation,
+  renderNavIcon,
+  resolveAlertTemplatePreset,
+  sortEventsNewestFirst,
+  toFacet,
+  toUtcIso,
+  writeViewToLocation
+} from './utils';
+import type {
+  AlertDefinition,
+  AlertQueryTemplate,
+  AlertThresholdOperator,
+  DashboardRow,
+  GuardrailExplanation,
+  LiveTailFilters,
+  LogEvent,
+  QueryInputMode,
+  QuerySuggestionItem,
+  SearchFilterState,
+  SearchRequestPayload,
+  SearchStats,
+  SearchStreamChunk,
+  SearchSummaryResponse,
+  ThemePreference,
+  ViewMode
+} from './types';
 
 const DashboardPage = lazy(async () => {
   const mod = await import('./dashboard/DashboardPage');
   return { default: mod.DashboardPage };
 });
 
-type ViewMode = 'search' | 'dashboard' | 'saved' | 'scheduled' | 'alerts' | 'admin' | 'livetail' | 'workspace';
-type SearchMode = 'structured' | 'token' | 'phrase';
-type QueryInputMode = 'search' | 'ask_ai';
-type ThemeMode = 'light' | 'dark';
-type ThemePreference = 'system' | ThemeMode;
-type NavIconKey = ViewMode | 'signout' | 'user';
-type AlertThresholdOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq';
-type AlertQueryTemplate = 'error_rate_over_threshold' | 'latency_p95_over_threshold' | 'token_spike';
-type AlertType = 'wae_sql' | 'r2sql_token_spike';
-
-interface AlertTemplatePreset {
-  id: AlertQueryTemplate;
-  label: string;
-  description: string;
-  type: AlertType;
-  defaultWindowMinutes: number;
-  defaultThresholdOperator: AlertThresholdOperator;
-  defaultThresholdValue: number;
-  defaultScheduleSeconds: number;
-  defaultCooldownSeconds: number;
-  defaultSeverity: 'critical' | 'warn' | 'info';
-  defaultToken?: string;
-}
-
-const TAB_QUERY_PARAM = 'tab';
-const THEME_STORAGE_KEY = 'edgedata.theme';
-const VIEW_MODES = new Set<ViewMode>(['search', 'dashboard', 'saved', 'scheduled', 'alerts', 'admin', 'livetail', 'workspace']);
-const TIME_RANGE_PRESETS: Array<{ label: string; fromOffsetMinutes: number; toOffsetMinutes: number }> = [
-  { label: 'Last 15m', fromOffsetMinutes: 15, toOffsetMinutes: 0 },
-  { label: 'Last 1h', fromOffsetMinutes: 60, toOffsetMinutes: 0 },
-  { label: 'Last 6h', fromOffsetMinutes: 6 * 60, toOffsetMinutes: 0 },
-  { label: 'Last 24h', fromOffsetMinutes: 24 * 60, toOffsetMinutes: 0 },
-  { label: 'Previous 24h', fromOffsetMinutes: 48 * 60, toOffsetMinutes: 24 * 60 },
-  { label: 'Last 7d', fromOffsetMinutes: 7 * 24 * 60, toOffsetMinutes: 0 },
-  { label: 'Last 30d', fromOffsetMinutes: 30 * 24 * 60, toOffsetMinutes: 0 }
-];
-
-const ALERT_TEMPLATE_PRESETS: AlertTemplatePreset[] = [
-  {
-    id: 'error_rate_over_threshold',
-    label: 'Service Error Rate Spike',
-    description: 'Alert when error percentage rises above a threshold.',
-    type: 'wae_sql',
-    defaultWindowMinutes: 5,
-    defaultThresholdOperator: 'gt',
-    defaultThresholdValue: 5,
-    defaultScheduleSeconds: 60,
-    defaultCooldownSeconds: 300,
-    defaultSeverity: 'critical'
-  },
-  {
-    id: 'latency_p95_over_threshold',
-    label: 'Service Latency p95 Regression',
-    description: 'Alert when p95 latency stays above a threshold.',
-    type: 'wae_sql',
-    defaultWindowMinutes: 10,
-    defaultThresholdOperator: 'gt',
-    defaultThresholdValue: 1200,
-    defaultScheduleSeconds: 60,
-    defaultCooldownSeconds: 300,
-    defaultSeverity: 'warn'
-  },
-  {
-    id: 'token_spike',
-    label: 'Keyword / Token Spike',
-    description: 'Alert when a token appears unusually often in the selected window.',
-    type: 'r2sql_token_spike',
-    defaultWindowMinutes: 5,
-    defaultThresholdOperator: 'gt',
-    defaultThresholdValue: 20,
-    defaultScheduleSeconds: 60,
-    defaultCooldownSeconds: 300,
-    defaultSeverity: 'critical',
-    defaultToken: 'unauthorized'
+function evictOldest<V>(map: Map<string, V>, maxSize: number): void {
+  if (map.size <= maxSize) return;
+  const toDelete = map.size - maxSize;
+  const iter = map.keys();
+  for (let i = 0; i < toDelete; i++) {
+    const next = iter.next();
+    if (!next.done) map.delete(next.value);
   }
-];
-
-const ALERT_THRESHOLD_OPERATOR_OPTIONS: Array<{ value: AlertThresholdOperator; label: string }> = [
-  { value: 'gt', label: 'Greater than (>)' },
-  { value: 'gte', label: 'Greater than or equal (>=)' },
-  { value: 'lt', label: 'Less than (<)' },
-  { value: 'lte', label: 'Less than or equal (<=)' },
-  { value: 'eq', label: 'Equal (=)' }
-];
-
-function parseViewMode(raw: string | null): ViewMode | null {
-  if (!raw) return null;
-  const normalized = raw.trim().replace(/^#/, '');
-  if (!normalized) return null;
-  if (VIEW_MODES.has(normalized as ViewMode)) return normalized as ViewMode;
-
-  const hashParams = new URLSearchParams(normalized.startsWith('?') ? normalized.slice(1) : normalized);
-  const nested = hashParams.get(TAB_QUERY_PARAM);
-  if (!nested) return null;
-  return VIEW_MODES.has(nested as ViewMode) ? (nested as ViewMode) : null;
-}
-
-function readViewFromLocation(loc: Pick<Location, 'search' | 'hash'>): ViewMode | null {
-  const params = new URLSearchParams(loc.search);
-  return parseViewMode(params.get(TAB_QUERY_PARAM)) || parseViewMode(loc.hash);
-}
-
-function writeViewToLocation(view: ViewMode, options?: { replace?: boolean }): void {
-  if (typeof window === 'undefined') return;
-  const url = new URL(window.location.href);
-  if (url.searchParams.get(TAB_QUERY_PARAM) === view) return;
-
-  url.searchParams.set(TAB_QUERY_PARAM, view);
-  const nextUrl = `${url.pathname}${url.search}${url.hash}`;
-  if (options?.replace) {
-    window.history.replaceState({}, '', nextUrl);
-  } else {
-    window.history.pushState({}, '', nextUrl);
-  }
-}
-
-function readStoredThemePreference(): ThemePreference {
-  if (typeof window === 'undefined') return 'system';
-  const raw = window.localStorage.getItem(THEME_STORAGE_KEY);
-  return raw === 'light' || raw === 'dark' ? raw : 'system';
-}
-
-function readSystemPrefersDark(): boolean {
-  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
-  return window.matchMedia('(prefers-color-scheme: dark)').matches;
-}
-
-function formatDateTimeLocalValue(date: Date): string {
-  const pad2 = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
-}
-
-function toUtcIsoFromLocalDateTime(value: string): string {
-  const parsed = new Date(value);
-  if (!Number.isFinite(parsed.getTime())) {
-    throw new Error(`Invalid local datetime: ${value}`);
-  }
-  return parsed.toISOString();
-}
-
-function toUtcIso(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    throw new Error('Datetime value is required');
-  }
-  // Accept full ISO input from workspace/session handoff without truncating precision.
-  if (/z$/i.test(trimmed) || /[+-]\d{2}:\d{2}$/.test(trimmed)) {
-    const parsed = new Date(trimmed);
-    if (!Number.isFinite(parsed.getTime())) {
-      throw new Error(`Invalid datetime: ${value}`);
-    }
-    return parsed.toISOString();
-  }
-  return toUtcIsoFromLocalDateTime(trimmed);
-}
-
-const NAV_ICONS: Record<NavIconKey, LucideIcon> = {
-  search: Search,
-  dashboard: LayoutDashboard,
-  alerts: Bell,
-  saved: Bookmark,
-  scheduled: Clock3,
-  livetail: Activity,
-  workspace: Briefcase,
-  admin: Settings,
-  signout: LogOut,
-  user: UserRound
-};
-
-function renderNavIcon(icon: NavIconKey): JSX.Element {
-  const Icon = NAV_ICONS[icon];
-  return <Icon strokeWidth={2.15} />;
-}
-
-function quotePplLiteral(value: string): string {
-  if (!/[\s"'=<>]/.test(value)) return value;
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-}
-
-const PPL_COMMAND_PREFIX = /^(search|where|fields|sort|head|stats|timechart|top|rare|dedup|eval|lookup|rex|transaction|rename|table)\b/i;
-const ASK_AI_STOPWORDS = new Set([
-  'a', 'an', 'and', 'are', 'at', 'be', 'by', 'do', 'find', 'for', 'from', 'get', 'how',
-  'i', 'in', 'into', 'is', 'last', 'me', 'of', 'on', 'over', 'show', 'that', 'the', 'these',
-  'those', 'to', 'under', 'using', 'was', 'what', 'where', 'which', 'who', 'with', 'within'
-]);
-const ASK_AI_INTENT_WORDS = new Set([
-  'error', 'errors', 'fail', 'failed', 'failing', 'failure', 'latency', 'slow', 'slower',
-  'trace', 'request', 'requests', 'status', 'warn', 'warning', 'warnings', 'timeout',
-  'timeouts', 'spike', 'spikes', 'investigate', 'look', 'lookup', 'up'
-]);
-
-function buildScopedConditions(filterState: SearchFilterState, pivots: InvestigationPivots): string[] {
-  const conditions: string[] = [];
-  if (filterState.indexName.trim()) conditions.push(`index=${quotePplLiteral(filterState.indexName.trim().toLowerCase())}`);
-  if (filterState.service.trim()) conditions.push(`service=${quotePplLiteral(filterState.service.trim())}`);
-  if (filterState.environment.trim()) conditions.push(`env=${quotePplLiteral(filterState.environment.trim())}`);
-  if (filterState.host.trim()) conditions.push(`host=${quotePplLiteral(filterState.host.trim())}`);
-  if (filterState.level.trim()) conditions.push(`level=${quotePplLiteral(filterState.level.trim().toLowerCase())}`);
-  if (filterState.statusCode.trim()) {
-    const numeric = Number(filterState.statusCode.trim());
-    if (!Number.isNaN(numeric)) conditions.push(`status=${Math.trunc(numeric)}`);
-  }
-  if (pivots.trace_id) conditions.push(`trace_id=${quotePplLiteral(pivots.trace_id)}`);
-  if (pivots.request_id) conditions.push(`request_id=${quotePplLiteral(pivots.request_id)}`);
-  if (pivots.user_id) conditions.push(`user_id=${quotePplLiteral(pivots.user_id)}`);
-  if (pivots.msg_hash) conditions.push(`msg_hash=${quotePplLiteral(pivots.msg_hash)}`);
-  return conditions;
-}
-
-function tokenizeAskPrompt(prompt: string): string[] {
-  return prompt
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/["',!?()[\]{}]/g, ' ')
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter(Boolean)
-    .filter((token) => !ASK_AI_STOPWORDS.has(token))
-    .filter((token) => token.length >= 2)
-    .filter((token) => !ASK_AI_INTENT_WORDS.has(token))
-    .filter((token) => !/^(last|next|past)\d+$/.test(token))
-    .filter((token) => !/^\d+(ms|s|m|h|d)?$/.test(token));
-}
-
-function buildAskAiPlan(options: {
-  prompt: string;
-  filters: SearchFilterState;
-  pivots: InvestigationPivots;
-  topTerms: string[];
-}): AskAiPlan {
-  const prompt = String(options.prompt || '').trim();
-  const scopedConditions = buildScopedConditions(options.filters, options.pivots);
-  const reasoning: string[] = ['Runs in the current Log Explorer so results, facets, and pivots stay in one place.'];
-
-  if (scopedConditions.length > 0) {
-    reasoning.push('Keeps the current explorer filters and investigation pivots in scope.');
-  } else {
-    reasoning.push('Uses the current time range and keeps index/service scope broad unless the prompt narrows it.');
-  }
-
-  if (!prompt) {
-    const generatedPpl = scopedConditions.length > 0
-      ? `search * | where ${scopedConditions.join(' and ')} | sort -ts | head 200`
-      : 'search * | sort -ts | head 200';
-    reasoning.push('No AI prompt entered yet, so this stays as a broad recent-events search.');
-    return {
-      intentLabel: 'Broad exploration',
-      confidence: 'low',
-      generatedPpl,
-      reasoning,
-      passthrough: false
-    };
-  }
-
-  if (prompt.includes('|') || PPL_COMMAND_PREFIX.test(prompt)) {
-    reasoning.push('Input already looks like PPL, so Ask AI will pass it through unchanged.');
-    return {
-      intentLabel: 'Direct PPL passthrough',
-      confidence: 'high',
-      generatedPpl: prompt,
-      reasoning,
-      passthrough: true
-    };
-  }
-
-  const lower = prompt.toLowerCase();
-  const inferredConditions: string[] = [];
-  let confidence: AskAiPlan['confidence'] = 'medium';
-  let intentLabel = 'Guided exploration';
-
-  const quotedPhrase = prompt.match(/"([^"]+)"/)?.[1]?.trim();
-  const routeToken = prompt.match(/\/[A-Za-z0-9._~!$&'()*+,;=:@%-]+(?:\/[A-Za-z0-9._~!$&'()*+,;=:@%-]+)*/)?.[0]?.trim();
-  const traceId = /\btrace(?:[_\s-]?id)?\b/i.test(prompt)
-    ? prompt.match(/\b([0-9a-f]{16,32})\b/i)?.[1]
-    : undefined;
-  const requestId = /\brequest(?:[_\s-]?id)?\b/i.test(prompt)
-    ? prompt.match(/\brequest(?:[_\s-]?id)?[:=\s]+([A-Za-z0-9._:-]{6,})\b/i)?.[1]
-    : undefined;
-  const explicitStatus = lower.match(/\bstatus(?: code)?\s*(?:=|is|of)?\s*(\d{3})\b/)?.[1];
-  const statusClass = lower.match(/\b([45])xx\b/)?.[1];
-  const durationMs = lower.match(/\b(?:over|above|greater than|slower than|longer than)\s*(\d+)\s*ms\b/)?.[1];
-  const durationSeconds = lower.match(/\b(?:over|above|greater than|slower than|longer than)\s*(\d+)\s*(?:s|sec|secs|seconds)\b/)?.[1];
-
-  if (traceId) {
-    intentLabel = 'Trace investigation';
-    confidence = 'high';
-    inferredConditions.push(`trace_id=${quotePplLiteral(traceId)}`);
-    reasoning.push(`Detected trace lookup for ${traceId}.`);
-  } else if (requestId) {
-    intentLabel = 'Request investigation';
-    confidence = 'high';
-    inferredConditions.push(`request_id=${quotePplLiteral(requestId)}`);
-    reasoning.push(`Detected request lookup for ${requestId}.`);
-  } else if (/\b(latency|slow|slower|duration|p95|performance)\b/i.test(prompt)) {
-    intentLabel = 'Latency investigation';
-    const threshold = durationMs
-      ? Number(durationMs)
-      : durationSeconds
-        ? Number(durationSeconds) * 1000
-        : 1000;
-    inferredConditions.push(`duration_ms>=${Math.trunc(threshold)}`);
-    reasoning.push(`Interpreted this as a latency investigation and added duration_ms>=${Math.trunc(threshold)}.`);
-  } else if (/\b(error|errors|fail|failed|failure|exception|5xx)\b/i.test(prompt)) {
-    intentLabel = 'Error investigation';
-    if (statusClass) {
-      inferredConditions.push(`status>=${Number(statusClass) * 100}`);
-      reasoning.push(`Detected ${statusClass}xx status focus and constrained status accordingly.`);
-    } else if (explicitStatus) {
-      inferredConditions.push(`status=${Math.trunc(Number(explicitStatus))}`);
-      reasoning.push(`Detected explicit status ${explicitStatus}.`);
-      confidence = 'high';
-    } else {
-      inferredConditions.push('level="error"');
-      reasoning.push('Interpreted this as an error-focused query and constrained level="error".');
-    }
-  } else if (/\b(warn|warning|warnings)\b/i.test(prompt)) {
-    intentLabel = 'Warning investigation';
-    inferredConditions.push('level="warn"');
-    reasoning.push('Interpreted this as a warning-focused query and constrained level="warn".');
-  }
-
-  if (explicitStatus && !inferredConditions.some((condition) => condition.startsWith('status='))) {
-    inferredConditions.push(`status=${Math.trunc(Number(explicitStatus))}`);
-    reasoning.push(`Added explicit status=${explicitStatus} from the prompt.`);
-    confidence = 'high';
-  }
-
-  const rawTokens = tokenizeAskPrompt(prompt);
-  const routeAwareTokens = routeToken
-    ? [routeToken, ...rawTokens.filter((token) => token !== routeToken.toLowerCase())]
-    : rawTokens;
-  const searchTokens = routeAwareTokens
-    .filter((token) => !traceId || token !== traceId.toLowerCase())
-    .filter((token) => !requestId || token !== requestId.toLowerCase())
-    .slice(0, 6);
-
-  let searchExpr = '*';
-  if (quotedPhrase) {
-    searchExpr = quotePplLiteral(quotedPhrase);
-    reasoning.push('Treats the quoted text as an exact phrase search.');
-    if (confidence === 'low') confidence = 'medium';
-  } else if (searchTokens.length > 0) {
-    searchExpr = searchTokens
-      .map((token) => (/^[a-z0-9:_/-]+$/i.test(token) ? token : quotePplLiteral(token)))
-      .join(' ');
-    reasoning.push(`Uses prompt keywords as search terms: ${searchTokens.join(', ')}.`);
-  } else if (options.topTerms.length > 0) {
-    searchExpr = options.topTerms.slice(0, 2).map((term) => quotePplLiteral(term)).join(' ');
-    reasoning.push('No strong keywords were detected, so this falls back to recent top terms from the current dataset.');
-    confidence = 'low';
-  }
-
-  const whereConditions = [...scopedConditions, ...inferredConditions];
-  let generatedPpl = `search ${searchExpr}`;
-  if (whereConditions.length > 0) {
-    generatedPpl += ` | where ${whereConditions.join(' and ')}`;
-  }
-  generatedPpl += ' | sort -ts | head 200';
-
-  return {
-    intentLabel,
-    confidence,
-    generatedPpl,
-    reasoning,
-    passthrough: false
-  };
-}
-
-function buildTraceContextPplFromEvent(event: Pick<LogEvent, 'trace_id' | 'index' | 'service' | 'env'>): string {
-  const traceId = String(event.trace_id || '').trim();
-  if (!traceId) return 'search *';
-
-  const conditions: string[] = [`trace_id=${quotePplLiteral(traceId)}`];
-  const indexValue = String(event.index || '').trim().toLowerCase();
-  const serviceValue = String(event.service || '').trim();
-  const envValue = String(event.env || '').trim();
-  if (indexValue) conditions.push(`index=${quotePplLiteral(indexValue)}`);
-  if (serviceValue) conditions.push(`service=${quotePplLiteral(serviceValue)}`);
-  if (envValue) conditions.push(`env=${quotePplLiteral(envValue)}`);
-
-  return `search * | where ${conditions.join(' and ')} | transaction trace_id maxspan=5m maxevents=200 | sort -ts | head 200`;
-}
-
-interface LogEvent {
-  event_id: string;
-  ts: string;
-  index?: string;
-  service: string;
-  env: string;
-  host: string;
-  level: string;
-  message: string;
-  message_lc?: string;
-  trace_id?: string;
-  request_id?: string;
-  msg_hash?: string;
-  status?: number;
-  duration_ms?: number;
-  span_id?: string;
-  parent_span_id?: string;
-  user_id?: string;
-  src_ip?: string;
-  attrs_json?: string;
-}
-
-interface SearchStats {
-  mode: SearchMode;
-  scanned_partitions: number;
-  scanned_objects: number;
-  candidates: number;
-  returned: number;
-}
-
-interface GuardrailExplanation {
-  code: string;
-  title: string;
-  reason: string;
-  suggestion: string;
-}
-
-interface SearchResponse {
-  result_type?: 'events' | 'table';
-  results: Array<LogEvent | DashboardRow>;
-  next_cursor: { before_ts: string; before_event_id: string } | null;
-  stats: SearchStats;
-  warning?: string;
-  error?: string;
-  guardrail?: GuardrailExplanation;
-}
-
-interface FacetItem {
-  value: string;
-  count: number;
-}
-
-interface SearchSummaryResponse {
-  mode: SearchMode;
-  sampled_events: number;
-  sampled_candidates: number;
-  scanned_objects: number;
-  truncated: boolean;
-  top_terms: FacetItem[];
-  field_presence: {
-    trace_id: number;
-    span_id: number;
-    parent_span_id: number;
-    request_id: number;
-    user_id: number;
-    src_ip: number;
-    status: number;
-    duration_ms: number;
-    attrs_json: number;
-  };
-  facets: {
-    indexes: FacetItem[];
-    services: FacetItem[];
-    levels: FacetItem[];
-    statuses: FacetItem[];
-    hosts: FacetItem[];
-  };
-  timeline: Array<{ minute: string; count: number }>;
-  error?: string;
-  guardrail?: GuardrailExplanation;
-}
-
-interface SavedSearch {
-  id: string;
-  name: string;
-  query: string;
-  created_at: string;
-  updated_at?: string;
-}
-
-interface ScheduledSearchItem {
-  id: string;
-  name: string;
-  ppl: string;
-  time_window_minutes: number;
-  schedule_cron: string;
-  enabled: number;
-  max_results: number;
-  created_by?: string | null;
-  created_at: string;
-  updated_at?: string | null;
-}
-
-interface ScheduledSearchRunSummary {
-  headline?: string | null;
-  status?: string;
-  result_count?: number;
-  warning?: string | null;
-  error_message?: string | null;
-  preview_fields?: string[];
-  has_results?: boolean;
-}
-
-interface ScheduledSearchResult {
-  id: string;
-  scheduled_search_id: string;
-  run_at: string;
-  time_from: string;
-  time_to: string;
-  status: string;
-  result_count: number;
-  trigger_type?: string;
-  requested_by?: string | null;
-  summary?: ScheduledSearchRunSummary;
-  stats?: Record<string, unknown>;
-  started_at?: string | null;
-  completed_at?: string | null;
-  materialized_result_id?: string | null;
-  has_full_results?: boolean;
-  error_message?: string | null;
-}
-
-interface ScheduledSearchRunDetail extends ScheduledSearchResult {
-  preview?: Record<string, unknown>[];
-  query_request?: Record<string, unknown>;
-  artifact?: {
-    id: string;
-    status: string;
-    result_count: number;
-    computed_at: string;
-    expires_at: string;
-  } | null;
-}
-
-interface ScheduledSearchRunResultsPayload {
-  run_id: string;
-  scheduled_search_id: string;
-  result_type: 'events' | 'table';
-  results: Record<string, unknown>[];
-  total_results: number;
-  partial?: boolean;
-  warning?: string | null;
-  stats?: Record<string, unknown>;
-}
-
-interface AlertDefinition {
-  id: string;
-  name: string;
-  enabled: number;
-  type: string;
-  query_template: string;
-  params_json: string;
-  schedule_seconds: number;
-  threshold_json: string;
-  notify_json: string;
-  cooldown_seconds: number;
-  created_at: string;
-  updated_at?: string;
-}
-
-interface AlertNotifyConfig {
-  slack?: boolean;
-  webhook?: boolean;
-  severity?: string;
-  deep_link?: string;
-  runbook_url?: string;
-  owner_team?: string;
-}
-
-interface AlertParamsConfig {
-  index?: string;
-  service?: string;
-  env?: string;
-  window_minutes?: number;
-  token?: string;
-  _starter_id?: string;
-  _starter_version?: string;
-}
-
-interface AdminUserRow {
-  id: string;
-  email: string;
-  enabled: number;
-  legacy_role?: string;
-  role_ids: string[];
-  created_at: string;
-  updated_at?: string | null;
-  last_login_at?: string | null;
-}
-
-interface RoleRow {
-  id: string;
-  name: string;
-  system_role: number;
-  enabled: number;
-  permissions_json: string;
-  scope_json: string;
-  created_at: string;
-  updated_at?: string | null;
-}
-
-interface GroupRoleMappingRow {
-  id: string;
-  access_group: string;
-  role_id: string;
-  created_at: string;
-  updated_at?: string | null;
-}
-
-interface AdminInviteRow {
-  id: string;
-  email: string;
-  auth_mode: 'access_sso' | 'local_password';
-  role_ids: string[];
-  expires_at: string;
-  invited_by: string;
-  status: 'pending' | 'accepted' | 'revoked' | 'expired';
-  created_at: string;
-  accepted_at?: string | null;
-}
-
-interface OnboardingChecklistItem {
-  key: string;
-  title: string;
-  done: boolean;
-  detail: string;
-}
-
-interface AuditLogRow {
-  id: string;
-  actor_principal?: string | null;
-  actor_email?: string | null;
-  action: string;
-  target_type?: string | null;
-  target_id?: string | null;
-  metadata_json?: string | null;
-  created_at: string;
-}
-
-interface SyntheticIngestControl {
-  ok?: boolean;
-  enabled: boolean;
-  configured_enabled: boolean;
-  persisted_enabled?: boolean | null;
-  updated_at?: string | null;
-}
-
-interface DashboardRow {
-  [key: string]: string | number;
-}
-
-interface DashboardData {
-  error_rate_by_service: DashboardRow[];
-  latency_p95_by_service: DashboardRow[];
-  top_errors: DashboardRow[];
-  throughput: DashboardRow[];
-  top_hosts: DashboardRow[];
-}
-
-interface SearchFilterState {
-  indexName: string;
-  service: string;
-  environment: string;
-  host: string;
-  level: string;
-  statusCode: string;
-}
-
-interface SearchRequestPayload {
-  time: { from: string; to: string };
-  ppl: string;
-  limit: number;
-  cursor: { before_ts: string; before_event_id: string } | null;
-}
-
-interface AskAiPlan {
-  intentLabel: string;
-  confidence: 'high' | 'medium' | 'low';
-  generatedPpl: string;
-  reasoning: string[];
-  passthrough: boolean;
-}
-
-interface SearchStreamChunk {
-  type: 'meta' | 'event' | 'row' | 'progress' | 'final' | 'error';
-  event?: LogEvent;
-  row?: DashboardRow;
-  mode?: SearchMode;
-  stream_mode?: 'incremental' | 'buffered';
-  result_type?: 'events' | 'table';
-  next_cursor?: { before_ts: string; before_event_id: string } | null;
-  stats?: SearchStats;
-  scanned_objects?: number;
-  candidates?: number;
-  returned?: number;
-  warning?: string;
-  error?: string;
-  guardrail?: GuardrailExplanation;
-}
-
-interface QuerySuggestionItem {
-  label: string;
-  kind: 'command' | 'template' | 'field' | 'term';
-  detail?: string;
-  example?: string;
-  next_query: string;
-  score?: number;
-}
-
-interface QuerySuggestionResponse {
-  suggestions?: QuerySuggestionItem[];
-  meta?: {
-    context_stage?: string;
-    latency_ms?: number;
-  };
-}
-
-const API_BASE = ((import.meta as { env?: Record<string, string> }).env?.VITE_QUERY_API_BASE || '').trim();
-const API_BASE_MISSING_ERROR = 'Missing VITE_QUERY_API_BASE. Configure your deployed query-worker URL.';
-const STREAM_FLUSH_INTERVAL_MS = 250;
-const QUERY_SUGGESTION_DEBOUNCE_MS = 120;
-const QUERY_SUGGESTION_CACHE_TTL_MS = 30_000;
-
-const LOCAL_FALLBACK_SNIPPETS = [
-  { label: 'search', kind: 'command', detail: 'Search logs by free text', insert: 'search ' },
-  { label: 'where', kind: 'command', detail: 'Filter fields and values', insert: 'where service=' },
-  { label: 'stats', kind: 'template', detail: 'Count by service', insert: 'stats count() by service' },
-  { label: 'timechart', kind: 'template', detail: 'Trend by 5-minute buckets', insert: 'timechart span=5m count()' },
-  { label: 'sort', kind: 'command', detail: 'Sort newest first', insert: 'sort -ts' },
-  { label: 'head', kind: 'command', detail: 'Limit returned rows', insert: 'head 100' }
-] as const;
-
-function buildInlineSuggestionQuery(currentQuery: string, replacement: string): string {
-  const segmentStart = currentQuery.lastIndexOf('|') + 1;
-  const prefix = currentQuery.slice(0, segmentStart);
-  if (!prefix) return replacement;
-  if (prefix.endsWith('|')) return `${prefix} ${replacement}`;
-  return `${prefix}${replacement}`;
-}
-
-function buildLocalFallbackSuggestions(query: string): QuerySuggestionItem[] {
-  const segment = query.slice(query.lastIndexOf('|') + 1).trim().toLowerCase();
-  return LOCAL_FALLBACK_SNIPPETS
-    .filter((item) => !segment || item.label.startsWith(segment))
-    .map((item, index) => ({
-      label: item.label,
-      kind: item.kind,
-      detail: item.detail,
-      next_query: buildInlineSuggestionQuery(query, item.insert),
-      score: 30 - index
-    }))
-    .slice(0, 6);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function escapeHtml(input: string): string {
-  return input
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function extractHighlightTerms(query: string): string[] {
-  if (!query.trim()) return [];
-
-  const phraseMatches = Array.from(query.matchAll(/"([^"]+)"/g)).map((match) => match[1]);
-  const raw = query
-    .replace(/"[^"]+"/g, ' ')
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter(Boolean)
-    .filter((token) => !/[=<>]/.test(token))
-    .filter((token) => token.length >= 2);
-
-  const phraseTerms = phraseMatches.flatMap((phrase) => phrase.split(/\s+/).filter((t) => t.length >= 2));
-  const set = new Set([...raw, ...phraseTerms].map((term) => term.toLowerCase()));
-  return Array.from(set).slice(0, 18);
-}
-
-function highlightText(text: string, terms: string[]): JSX.Element {
-  if (!terms.length) return <>{text}</>;
-
-  const pattern = new RegExp(`(${terms.map(escapeRegExp).join('|')})`, 'ig');
-  const parts = text.split(pattern);
-  const lowerTerms = new Set(terms.map((term) => term.toLowerCase()));
-
-  return (
-    <>
-      {parts.map((part, index) => {
-        const matched = lowerTerms.has(part.toLowerCase());
-        return matched ? <mark key={`${part}-${index}`}>{part}</mark> : <span key={`${part}-${index}`}>{part}</span>;
-      })}
-    </>
-  );
-}
-
-function jsonSyntaxHtml(raw: string): string {
-  const escaped = escapeHtml(raw);
-  return escaped.replace(
-    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"\s*:?)|(\btrue\b|\bfalse\b|\bnull\b)|(-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?)/g,
-    (match) => {
-      if (match.endsWith(':')) return `<span class="json-key">${match}</span>`;
-      if (match.startsWith('"')) return `<span class="json-string">${match}</span>`;
-      if (match === 'true' || match === 'false') return `<span class="json-bool">${match}</span>`;
-      if (match === 'null') return `<span class="json-null">${match}</span>`;
-      return `<span class="json-number">${match}</span>`;
-    }
-  );
-}
-
-function prettyJsonOrNull(value: string | undefined): string | null {
-  if (!value) return null;
-  try {
-    return JSON.stringify(JSON.parse(value), null, 2);
-  } catch {
-    return null;
-  }
-}
-
-function attrsPreviewPairs(attrsJson: string | undefined, limit = 3): Array<{ key: string; value: string }> {
-  if (!attrsJson) return [];
-  try {
-    const parsed = JSON.parse(attrsJson) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
-    return Object.entries(parsed)
-      .slice(0, limit)
-      .map(([key, value]) => ({ key, value: String(value) }));
-  } catch {
-    return [];
-  }
-}
-
-function toFacet(items: Array<string | number | undefined>, limit = 10): FacetItem[] {
-  const counts = new Map<string, number>();
-
-  for (const item of items) {
-    if (item === undefined || item === null || item === '') continue;
-    const key = String(item);
-    counts.set(key, (counts.get(key) || 0) + 1);
-  }
-
-  return Array.from(counts.entries())
-    .map(([value, count]) => ({ value, count }))
-    .sort((a, b) => b.count - a.count)
-    .slice(0, limit);
-}
-
-function modeLabel(mode: SearchMode | null): string {
-  if (!mode) return 'Auto';
-  if (mode === 'structured') return 'Structured';
-  if (mode === 'token') return 'Token';
-  return 'Phrase';
-}
-
-function toGuardrailExplanation(value: unknown): GuardrailExplanation | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const candidate = value as Record<string, unknown>;
-  const code = String(candidate.code || '').trim();
-  const title = String(candidate.title || '').trim();
-  const reason = String(candidate.reason || '').trim();
-  const suggestion = String(candidate.suggestion || '').trim();
-  if (!code || !title || !reason || !suggestion) return null;
-  return { code, title, reason, suggestion };
-}
-
-function parseErrorPayload(
-  rawText: string,
-  fallbackMessage: string
-): { message: string; guardrail: GuardrailExplanation | null } {
-  const text = String(rawText || '').trim();
-  if (!text) return { message: fallbackMessage, guardrail: null };
-  try {
-    const parsed = JSON.parse(text) as Record<string, unknown>;
-    const message = String(parsed.error || fallbackMessage).trim() || fallbackMessage;
-    return {
-      message,
-      guardrail: toGuardrailExplanation(parsed.guardrail)
-    };
-  } catch {
-    return { message: text, guardrail: null };
-  }
-}
-
-function formatDateTime(value: string): string {
-  return new Date(value).toLocaleString();
-}
-
-function formatTimelineTick(value: string): string {
-  const date = new Date(value);
-  return date.toLocaleTimeString([], {
-    hour: '2-digit',
-    minute: '2-digit'
-  });
-}
-
-function compareEventsDesc(left: LogEvent, right: LogEvent): number {
-  const tsCompare = right.ts.localeCompare(left.ts);
-  if (tsCompare !== 0) return tsCompare;
-  return right.event_id.localeCompare(left.event_id);
-}
-
-function sortEventsNewestFirst(events: LogEvent[]): LogEvent[] {
-  return [...events].sort(compareEventsDesc);
-}
-
-function readLevelCount(levels: FacetItem[], target: string): number {
-  return levels.find((item) => item.value === target)?.count || 0;
-}
-
-function maxFacetCount(items: FacetItem[]): number {
-  return Math.max(1, ...items.map((item) => item.count));
-}
-
-function parseStringArray(raw: string | undefined, fallback: string[] = []): string[] {
-  if (!raw) return fallback;
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return fallback;
-    return parsed.map((item) => String(item)).filter(Boolean);
-  } catch {
-    return fallback;
-  }
-}
-
-function resolveAlertTemplatePreset(id: string): AlertTemplatePreset {
-  return ALERT_TEMPLATE_PRESETS.find((preset) => preset.id === id) || ALERT_TEMPLATE_PRESETS[0];
-}
-
-function buildAlertDeepQuery(
-  template: AlertQueryTemplate,
-  params: { index?: string; service?: string; env?: string; token?: string },
-  thresholdValue: number
-): string {
-  const whereFilters: string[] = [];
-  const indexValue = String(params.index || '').trim().toLowerCase();
-  const serviceValue = String(params.service || '').trim();
-  const envValue = String(params.env || '').trim();
-
-  if (indexValue) whereFilters.push(`index=${quotePplLiteral(indexValue)}`);
-  if (serviceValue) whereFilters.push(`service=${quotePplLiteral(serviceValue)}`);
-  if (envValue) whereFilters.push(`env=${quotePplLiteral(envValue)}`);
-
-  if (template === 'error_rate_over_threshold') {
-    const filters = [...whereFilters, 'level="error"'];
-    return `search * | where ${filters.join(' and ')}`;
-  }
-
-  if (template === 'latency_p95_over_threshold') {
-    const cutoff = Number.isFinite(thresholdValue) ? Math.max(1, Math.floor(thresholdValue)) : 1;
-    const filters = [...whereFilters, `duration_ms>=${cutoff}`];
-    return `search * | where ${filters.join(' and ')}`;
-  }
-
-  const tokenValue = String(params.token || '').trim();
-  const searchTerm = tokenValue ? quotePplLiteral(tokenValue) : '*';
-  if (whereFilters.length === 0) return `search ${searchTerm}`;
-  return `search ${searchTerm} | where ${whereFilters.join(' and ')}`;
-}
-
-function buildDefaultAlertDeepLink(query: string): string {
-  if (typeof window === 'undefined') return '';
-  const base = window.location.origin.replace(/\/+$/, '');
-  if (!base || !query.trim()) return '';
-  return `${base}/?view=search&query=${encodeURIComponent(query)}`;
-}
-
-function parseAlertNotifyConfig(raw: string): AlertNotifyConfig {
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    return {
-      slack: parsed.slack === true,
-      webhook: parsed.webhook === true,
-      severity: String(parsed.severity || '').trim() || undefined,
-      deep_link: String(parsed.deep_link || '').trim() || undefined,
-      runbook_url: String(parsed.runbook_url || '').trim() || undefined,
-      owner_team: String(parsed.owner_team || '').trim() || undefined
-    };
-  } catch {
-    return {};
-  }
-}
-
-function parseAlertParamsConfig(raw: string): AlertParamsConfig {
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    const windowMinutesRaw = Number(parsed.window_minutes);
-    return {
-      index: String(parsed.index || '').trim() || undefined,
-      service: String(parsed.service || '').trim() || undefined,
-      env: String(parsed.env || '').trim() || undefined,
-      window_minutes: Number.isFinite(windowMinutesRaw) && windowMinutesRaw > 0
-        ? Math.trunc(windowMinutesRaw)
-        : undefined,
-      token: String(parsed.token || '').trim() || undefined,
-      _starter_id: String(parsed._starter_id || '').trim() || undefined,
-      _starter_version: String(parsed._starter_version || '').trim() || undefined
-    };
-  } catch {
-    return {};
-  }
-}
-
-function buildAlertWorkspaceHref(alert: AlertDefinition): string | null {
-  const params = parseAlertParamsConfig(alert.params_json);
-  const service = String(params.service || '').trim();
-  if (!service) return null;
-  const query = new URLSearchParams();
-  query.set('view', 'workspace');
-  query.set('source', 'alert');
-  query.set('service', service);
-  if (params.index) query.set('index', params.index);
-  if (params.env) query.set('env', params.env);
-  return `?${query.toString()}`;
-}
-
-function formatTimeCompact(ts: string): string {
-  const d = new Date(ts);
-  const h = d.getHours().toString().padStart(2, '0');
-  const m = d.getMinutes().toString().padStart(2, '0');
-  const s = d.getSeconds().toString().padStart(2, '0');
-  const ms = d.getMilliseconds().toString().padStart(3, '0');
-  return `${h}:${m}:${s}.${ms}`;
-}
-
-const MAX_LIVETAIL_EVENTS = 2000;
-
-interface LiveTailFilters {
-  service: string;
-  env: string;
-  level: string;
-  keywords: string;
 }
 
 function LiveTailView({
@@ -1493,6 +514,7 @@ function App() {
   const [workspaceLaunchInfo, setWorkspaceLaunchInfo] = useState<string | null>(null);
   const { user, token: authToken, loading: authLoading, logout } = useAuth();
   const apiToken = authToken || '';
+  const { apiFetch } = useApiClient(apiToken);
 
   const [activeIndex, setActiveIndex] = useState(-1);
   const [selectedEvent, setSelectedEvent] = useState<LogEvent | null>(null);
@@ -1589,6 +611,7 @@ function App() {
   const summaryAbortRef = useRef<AbortController | null>(null);
   const querySuggestionsAbortRef = useRef<AbortController | null>(null);
   const querySuggestionsCacheRef = useRef<Map<string, { at: number; items: QuerySuggestionItem[] }>>(new Map());
+  const searchVersionRef = useRef(0);
   const searchActionsRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const queryTypeaheadRef = useRef<HTMLDivElement | null>(null);
@@ -1961,20 +984,6 @@ function App() {
     }));
   }, [timeline]);
 
-  const apiFetch = useCallback((path: string, init: RequestInit = {}) => {
-    if (!API_BASE) {
-      return Promise.reject(new Error(API_BASE_MISSING_ERROR));
-    }
-    const headers = new Headers(init.headers || {});
-    if (init.body && !headers.has('Content-Type')) {
-      headers.set('Content-Type', 'application/json');
-    }
-    if (apiToken) {
-      headers.set('Authorization', `Bearer ${apiToken}`);
-    }
-    return fetch(`${API_BASE}${path}`, { ...init, headers, credentials: init.credentials ?? 'include' });
-  }, [apiToken]);
-
   const closeQuerySuggestions = useCallback(() => {
     setQuerySuggestionsOpen(false);
     setQuerySuggestionIndex(-1);
@@ -2030,6 +1039,7 @@ function App() {
           throw new Error('suggestions unavailable');
         }
         const nextItems = body.suggestions.slice(0, 8);
+        evictOldest(querySuggestionsCacheRef.current, MAX_QUERY_SUGGESTION_CACHE_SIZE);
         querySuggestionsCacheRef.current.set(cacheKey, { at: Date.now(), items: nextItems });
         setQuerySuggestions(nextItems);
         setQuerySuggestionsOpen(nextItems.length > 0);
@@ -2223,6 +1233,9 @@ function App() {
     pivotOverrides?: InvestigationPivots;
     timeOverride?: { from: string; to: string };
   }) => {
+    const thisVersion = ++searchVersionRef.current;
+    const isStale = (): boolean => searchVersionRef.current !== thisVersion;
+
     if (streamAbortRef.current) {
       streamAbortRef.current.abort();
       streamAbortRef.current = null;
@@ -2275,7 +1288,7 @@ function App() {
             errorText,
             `Search stream failed with status ${response.status}`
           );
-          if (parsedError.guardrail) {
+          if (!isStale() && parsedError.guardrail) {
             setGuardrailDetail(parsedError.guardrail);
           }
           throw new Error(parsedError.message);
@@ -2292,6 +1305,7 @@ function App() {
         let pendingProgress: { scanned_objects?: number; candidates?: number; returned?: number } | null = null;
 
         const flushPending = (): void => {
+          if (isStale()) return;
           if (pendingProgress) {
             const snapshot = pendingProgress;
             pendingProgress = null;
@@ -2349,7 +1363,7 @@ function App() {
               continue;
             }
             if (chunk.type === 'error') {
-              if (chunk.guardrail) {
+              if (!isStale() && chunk.guardrail) {
                 setGuardrailDetail(chunk.guardrail);
               }
               throw new Error(chunk.error || 'Search stream failed');
@@ -2397,6 +1411,7 @@ function App() {
         }
 
         if (finalChunk) {
+          if (isStale()) return;
           const finalResultType = finalChunk.result_type || streamResultType;
           setResultType(finalResultType);
           setCursor(finalResultType === 'events' ? finalChunk.next_cursor || null : null);
@@ -2409,7 +1424,7 @@ function App() {
             });
           }
         }
-        setHasCompletedSearch(true);
+        if (!isStale()) setHasCompletedSearch(true);
         return;
       }
 
@@ -2421,12 +1436,15 @@ function App() {
 
       const body = await response.json() as SearchResponse;
       if (!response.ok || body.error) {
-        setGuardrailDetail(body.guardrail || null);
-        setError(body.error || `Search failed with status ${response.status}`);
-        setLoading(false);
+        if (!isStale()) {
+          setGuardrailDetail(body.guardrail || null);
+          setError(body.error || `Search failed with status ${response.status}`);
+          setLoading(false);
+        }
         return;
       }
 
+      if (isStale()) return;
       setStats(body.stats);
       const nextResultType = body.result_type || 'events';
       setResultType(nextResultType);
@@ -3523,6 +2541,10 @@ function App() {
   }, [cancelOngoingSearch, loading, runSearch, streaming]);
 
   useEffect(() => {
+    cancelOngoingSearch();
+  }, [view, cancelOngoingSearch]);
+
+  useEffect(() => {
     if (view === 'saved') {
       void loadSavedSearches();
     } else if (view === 'scheduled') {
@@ -3632,45 +2654,16 @@ function App() {
   }
 
   return (
-    <div className="app">
-      <aside className={`side-nav ${navExpanded ? 'expanded' : 'collapsed'}`} aria-label="Application navigation">
-        <div className="side-nav-top">
-          <a className="nav-brand nav-brand-link" href="/" aria-label="Go to home page">
-            <span className="nav-brand-mark" aria-hidden="true">
-              <Database size={14} strokeWidth={2.1} />
-            </span>
-            {navExpanded && <span className="nav-brand-text">EdgeData</span>}
-            {navExpanded && <span className="nav-brand-badge">Cloud</span>}
-          </a>
-          <button
-            type="button"
-            className="side-nav-toggle"
-            onClick={() => setNavExpanded((value) => !value)}
-            aria-label={navExpanded ? 'Collapse navigation' : 'Expand navigation'}
-            data-tooltip={navExpanded ? 'Collapse navigation' : 'Expand navigation'}
-            {...getTooltipHandlers(navExpanded ? 'Collapse navigation' : 'Expand navigation')}
-          >
-            {navExpanded ? <ChevronLeft size={14} /> : <ChevronRight size={14} />}
-          </button>
-        </div>
-
-        <div className="side-nav-tabs" role="tablist" aria-label="Primary">
-          {navItems.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              className={`side-nav-tab ${view === item.key ? 'active' : ''}`}
-              onClick={() => setAddressableView(item.key)}
-              data-tooltip={item.label}
-              {...getTooltipHandlers(item.label)}
-            >
-              <span className="side-nav-tab-icon" aria-hidden="true">{renderNavIcon(item.key)}</span>
-              {navExpanded && <span className="side-nav-tab-label">{item.label}</span>}
-            </button>
-          ))}
-        </div>
-
-      </aside>
+    <ErrorBoundary>
+      <div className="app">
+        <Sidebar
+        navExpanded={navExpanded}
+        setNavExpanded={setNavExpanded}
+        navItems={navItems}
+        view={view}
+        setAddressableView={setAddressableView}
+        getTooltipHandlers={getTooltipHandlers}
+      />
       {sidebarTooltip && (
         <div
           className="side-nav-flyout-tooltip"
@@ -3747,1660 +2740,251 @@ function App() {
           />
         )}
         {view === 'search' && (
-          <div className="search-view">
-            {workspaceLaunchInfo && <div className="success-banner">{workspaceLaunchInfo}</div>}
-            <div className="search-bar sticky">
-              <div className="search-filters search-filters-primary">
-                <div className="filter-group">
-                  <label>Time Range</label>
-                  <div className="time-inputs">
-                    <input
-                      type="datetime-local"
-                      value={timeFrom}
-                      onChange={(event) => {
-                        setTimeFrom(event.target.value);
-                        setActiveTimePreset(null);
-                      }}
-                    />
-                    <span>to</span>
-                    <input
-                      type="datetime-local"
-                      value={timeTo}
-                      onChange={(event) => {
-                        setTimeTo(event.target.value);
-                        setActiveTimePreset(null);
-                      }}
-                    />
-                  </div>
-                  <div className="time-presets">
-                    {TIME_RANGE_PRESETS.map((preset) => (
-                      <button
-                        key={preset.label}
-                        type="button"
-                        className={activeTimePreset === preset.label ? 'active' : ''}
-                        onClick={() => applyTimePreset(preset.fromOffsetMinutes, preset.toOffsetMinutes, preset.label)}
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="search-top-actions">
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => setShowAdvancedFilters((value) => !value)}
-                  >
-                    {showAdvancedFilters ? 'Hide Filters' : `Advanced Filters${activeAdvancedFilterCount > 0 ? ` (${activeAdvancedFilterCount})` : ''}`}
-                  </button>
-                </div>
-              </div>
-
-              {showAdvancedFilters && (
-                <div className="search-filters search-filters-advanced">
-                  <div className="filter-group">
-                    <label>Index</label>
-                    <input type="text" value={indexName} onChange={(event) => setIndexName(event.target.value)} placeholder="all indexes" />
-                  </div>
-
-                  <div className="filter-group">
-                    <label>Service</label>
-                    <input type="text" value={service} onChange={(event) => setService(event.target.value)} placeholder="paymentservice" />
-                  </div>
-
-                  <div className="filter-group">
-                    <label>Env</label>
-                    <input type="text" value={environment} onChange={(event) => setEnvironment(event.target.value)} placeholder="demo" />
-                  </div>
-
-                  <div className="filter-group">
-                    <label>Host</label>
-                    <input type="text" value={host} onChange={(event) => setHost(event.target.value)} placeholder="otel-demo-node-1" />
-                  </div>
-
-                  <div className="filter-group">
-                    <label>Level</label>
-                    <input type="text" value={level} onChange={(event) => setLevel(event.target.value)} placeholder="error" />
-                  </div>
-
-                  <div className="filter-group">
-                    <label>Status</label>
-                    <input type="number" value={statusCode} onChange={(event) => setStatusCode(event.target.value)} placeholder="500" />
-                  </div>
-                </div>
-              )}
-
-              <div className="query-mode-toggle" role="tablist" aria-label="Search input mode">
-                <button
-                  type="button"
-                  className={queryInputMode === 'search' ? 'active' : ''}
-                  aria-pressed={queryInputMode === 'search'}
-                  onClick={() => {
-                    setQueryInputMode('search');
-                    setQuerySuggestionsOpen(queryFocused && querySuggestions.length > 0);
-                  }}
-                >
-                  Search
-                </button>
-                <button
-                  type="button"
-                  className={queryInputMode === 'ask_ai' ? 'active' : ''}
-                  aria-pressed={queryInputMode === 'ask_ai'}
-                  onClick={() => {
-                    setQueryInputMode('ask_ai');
-                    closeQuerySuggestions();
-                  }}
-                >
-                  Ask AI
-                </button>
-              </div>
-
-              <div className="search-input">
-                <div className="query-input-wrapper" ref={queryTypeaheadRef}>
-                  <input
-                    ref={searchInputRef}
-                    type="text"
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    onFocus={() => {
-                      setQueryFocused(true);
-                      if (queryInputMode === 'search') {
-                        setQuerySuggestionsOpen(querySuggestions.length > 0);
-                      }
-                    }}
-                    onBlur={() => {
-                      setQueryFocused(false);
-                    }}
-                    placeholder={queryInputMode === 'ask_ai'
-                      ? 'Why is checkout latency high in otel-demo?'
-                      : 'search * | where index="otel-demo" | sort -ts | head 200'}
-                    onKeyDown={(event) => {
-                      if ((event.ctrlKey || event.metaKey) && event.key === ' ') {
-                        event.preventDefault();
-                        if (queryInputMode === 'search') {
-                          setQuerySuggestionsOpen(querySuggestions.length > 0);
-                          setQuerySuggestionIndex(querySuggestions.length > 0 ? 0 : -1);
-                        }
-                        return;
-                      }
-
-                      if (queryInputMode === 'search' && querySuggestionsOpen && querySuggestions.length > 0) {
-                        if (event.key === 'ArrowDown') {
-                          event.preventDefault();
-                          setQuerySuggestionIndex((index) => (index + 1) % querySuggestions.length);
-                          return;
-                        }
-                        if (event.key === 'ArrowUp') {
-                          event.preventDefault();
-                          setQuerySuggestionIndex((index) => (index <= 0 ? querySuggestions.length - 1 : index - 1));
-                          return;
-                        }
-                        if (event.key === 'Escape') {
-                          event.preventDefault();
-                          closeQuerySuggestions();
-                          return;
-                        }
-                        if (event.key === 'Enter' || event.key === 'Tab') {
-                          if (querySuggestionIndex >= 0 && querySuggestionIndex < querySuggestions.length) {
-                            event.preventDefault();
-                            applyQuerySuggestion(querySuggestions[querySuggestionIndex]);
-                            return;
-                          }
-                        }
-                      }
-
-                      if (event.key === 'Enter') {
-                        setCursor(null);
-                        setActiveIndex(-1);
-                        closeQuerySuggestions();
-                        void runSearch({ append: false, cursor: null });
-                      }
-                    }}
-                  />
-                  {queryInputMode === 'search' && querySuggestionsOpen && (
-                    <div className="query-typeahead-dropdown" role="listbox" aria-label="Search suggestions">
-                      {querySuggestionsLoading && (
-                        <div className="query-typeahead-status">Loading suggestions...</div>
-                      )}
-                      {!querySuggestionsLoading && querySuggestions.length === 0 && (
-                        <div className="query-typeahead-status">No suggestions yet.</div>
-                      )}
-                      {querySuggestions.map((item, index) => (
-                        <button
-                          key={`${item.kind}-${item.label}-${index}`}
-                          type="button"
-                          className={`query-typeahead-item ${index === querySuggestionIndex ? 'active' : ''}`}
-                          onMouseDown={(event) => {
-                            event.preventDefault();
-                            applyQuerySuggestion(item);
-                          }}
-                          onMouseEnter={() => setQuerySuggestionIndex(index)}
-                        >
-                          <span className="query-typeahead-row">
-                            <strong>{item.label}</strong>
-                            <span className="query-typeahead-kind">{item.kind}</span>
-                          </span>
-                          {item.detail && <span className="query-typeahead-detail">{item.detail}</span>}
-                          {item.example && <span className="query-typeahead-example">{item.example}</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                <button
-                  onClick={() => {
-                    setCursor(null);
-                    setActiveIndex(-1);
-                    closeQuerySuggestions();
-                    void runSearch({ append: false, cursor: null });
-                  }}
-                  disabled={loading}
-                >
-                  {loading ? (queryInputMode === 'ask_ai' ? 'Thinking...' : 'Searching...') : (queryInputMode === 'ask_ai' ? 'Ask AI' : 'Search')}
-                </button>
-                {loading && (
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={cancelOngoingSearch}
-                  >
-                    Cancel
-                  </button>
-                )}
-                <label className="stream-toggle">
-                  <input
-                    type="checkbox"
-                    checked={streamSearch}
-                    onChange={(event) => setStreamSearch(event.target.checked)}
-                  />
-                  Stream
-                </label>
-                <div className="search-actions-anchor" ref={searchActionsRef}>
-                  <button
-                    type="button"
-                    className="secondary"
-                    aria-label="More search actions"
-                    onClick={() => setShowSearchActions((value) => !value)}
-                  >
-                    ...
-                  </button>
-                  {showSearchActions && (
-                    <div className="search-actions-menu">
-                      <button
-                        className="secondary search-action-item"
-                        type="button"
-                        onClick={() => {
-                          setShowSaveSearchInline(true);
-                          setShowSearchActions(false);
-                        }}
-                      >
-                        <span className="action-icon" aria-hidden="true">S</span>
-                        Save current search
-                      </button>
-                      {query.trim() && (
-                        <button
-                          className="secondary search-action-item"
-                          type="button"
-                          onClick={() => {
-                            scheduleCurrentSearch();
-                            setShowSearchActions(false);
-                          }}
-                        >
-                          <span className="action-icon" aria-hidden="true">T</span>
-                          Schedule current search
-                        </button>
-                      )}
-                      {hasActiveAdvancedFilters && (
-                        <button
-                          className="secondary search-action-item"
-                          type="button"
-                          onClick={() => {
-                            setIndexName('');
-                            setService('');
-                            setEnvironment('');
-                            setHost('');
-                            setLevel('');
-                            setStatusCode('');
-                            setShowAdvancedFilters(false);
-                            setShowSearchActions(false);
-                          }}
-                        >
-                          <span className="action-icon" aria-hidden="true">C</span>
-                          Clear advanced filters
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {queryInputMode === 'ask_ai' && (
-                <div className="ask-ai-plan">
-                  <div className="ask-ai-plan-header">
-                    <strong>{assistantPlan.intentLabel}</strong>
-                    <span className={`ask-ai-confidence ${assistantPlan.confidence}`}>{assistantPlan.confidence} confidence</span>
-                  </div>
-                  <p className="ask-ai-plan-summary">
-                    {assistantPlan.passthrough
-                      ? 'Ask AI detected direct PPL and will run it unchanged.'
-                      : 'Ask AI will compile this prompt into PPL and execute it in the current explorer.'}
-                  </p>
-                  <pre className="ask-ai-plan-query">{assistantPlan.generatedPpl}</pre>
-                  <div className="ask-ai-plan-reasons">
-                    {assistantPlan.reasoning.map((reason, index) => (
-                      <span key={`ask-ai-reason-${index}`}>{reason}</span>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {showSaveSearchInline && (
-                <div className="save-search-row">
-                  <input
-                    type="text"
-                    value={saveName}
-                    onChange={(event) => setSaveName(event.target.value)}
-                    placeholder="Saved search name"
-                  />
-                  <button className="secondary" type="button" onClick={() => void saveCurrentSearch()}>Save Search</button>
-                  <button
-                    className="secondary"
-                    type="button"
-                    onClick={() => {
-                      setShowSaveSearchInline(false);
-                      setSaveName('');
-                    }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              )}
-
-              {hasPivots(investigationPivots) && (
-                <PivotChips pivots={investigationPivots} onPivotClick={handlePivotClick} />
-              )}
-            </div>
-
-            {error && <div className="error-banner">{error}</div>}
-            {guardrailDetail && (
-              <div className="guardrail-banner" role="status" aria-live="polite">
-                <div className="guardrail-title">{guardrailDetail.title}</div>
-                <div className="guardrail-reason">{guardrailDetail.reason}</div>
-                <div className="guardrail-suggestion"><strong>Try:</strong> {guardrailDetail.suggestion}</div>
-              </div>
-            )}
-
-            {stats && (
-              <div className="search-stats">
-                {streaming && <span className="streaming-pill">Streaming results...</span>}
-                {!streaming && summaryLoading && <span className="streaming-pill">Updating summary...</span>}
-                <span><strong>Mode:</strong> {modeLabel(stats.mode)}</span>
-                <span><strong>Lang:</strong> PPL</span>
-                <span><strong>Returned:</strong> {stats.returned}</span>
-                <span><strong>Partitions:</strong> {stats.scanned_partitions}</span>
-                <span><strong>Objects:</strong> {stats.scanned_objects}</span>
-                <span><strong>Indexes:</strong> {facets.indexes.length}</span>
-                <span><strong>Services:</strong> {facets.services.length}</span>
-                <span><strong>Hosts:</strong> {facets.hosts.length}</span>
-                {stats.candidates > 0 && <span><strong>Candidates:</strong> {stats.candidates}</span>}
-                {resultType === 'events' && <span><strong>Keys:</strong> j/k move, Enter open, Esc close</span>}
-              </div>
-            )}
-
-            <div className="level-strip">
-              <div className="pill error">Error {levelTotals.error}</div>
-              <div className="pill warn">Warn {levelTotals.warn}</div>
-              <div className="pill info">Info {levelTotals.info}</div>
-              <div className="pill debug">Debug {levelTotals.debug}</div>
-            </div>
-
-            <div className="timeline-card card">
-              <div className="timeline-head">
-                <h4>Activity Timeline</h4>
-                <span>
-                  {streaming
-                    ? 'Streaming...'
-                    : summary
-                      ? (summary.truncated ? 'Sampled timeline' : 'Timeline')
-                      : results.length > 0
-                        ? 'Timeline'
-                        : summaryLoading
-                          ? 'Updating summary...'
-                          : 'Run a search to load summary'}
-                </span>
-              </div>
-              <div className="timeline-bars">
-                {timeline.length === 0 ? (
-                  <p className="facet-empty">No timeline data yet.</p>
-                ) : (
-                  timeline.map((point) => (
-                    <div
-                      key={point.minute}
-                      className="timeline-col"
-                      title={`${formatDateTime(point.minute)} to ${formatDateTime(new Date(new Date(point.minute).getTime() + timelineStepMs).toISOString())} - ${point.count} events`}
-                    >
-                      <div className="timeline-bar" style={{ height: `${Math.max(8, (point.count / timelineMax) * 58)}px` }} />
-                    </div>
-                  ))
-                )}
-              </div>
-              {timelineAxisMarks.length > 0 && (
-                <div className="timeline-axis">
-                  {timelineAxisMarks.map((mark) => (
-                    <span key={mark.key} className={`timeline-axis-label ${mark.align}`}>{mark.label}</span>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {loading && results.length === 0 && !error ? (
-              <div className="search-loading-state card" role="status" aria-live="polite">
-                <div className="search-loading-header">
-                  <div className="search-loading-dot" aria-hidden="true" />
-                  <div>
-                    <h4>Searching logs...</h4>
-                    <p>
-                      {streamSearch
-                        ? 'Streaming first matches as soon as they arrive.'
-                        : 'Scanning partitions and preparing your results.'}
-                    </p>
-                  </div>
-                </div>
-                <div className="search-loading-meta">
-                  <span>
-                    <strong>Query:</strong>{' '}
-                    {query.trim()
-                      ? (query.trim().length > 90 ? `${query.trim().slice(0, 90)}...` : query.trim())
-                      : 'search *'}
-                  </span>
-                  <span>
-                    <strong>Window:</strong>{' '}
-                    {Number.isNaN(Date.parse(timeFrom)) || Number.isNaN(Date.parse(timeTo))
-                      ? 'Custom range'
-                      : `${formatDateTime(new Date(timeFrom).toISOString())} to ${formatDateTime(new Date(timeTo).toISOString())}`}
-                  </span>
-                  <span><strong>Tip:</strong> Use Cancel to stop long-running scans.</span>
-                </div>
-                <div className="search-loading-grid" aria-hidden="true">
-                  <div className="search-loading-col search-loading-col-facets">
-                    <div className="search-loading-col-title">Facets</div>
-                    <div className="search-loading-skeleton" />
-                    <div className="search-loading-skeleton short" />
-                    <div className="search-loading-skeleton" />
-                    <div className="search-loading-skeleton short" />
-                  </div>
-                  <div className="search-loading-col">
-                    <div className="search-loading-col-title">Results</div>
-                    <div className="search-loading-skeleton tall" />
-                    <div className="search-loading-skeleton" />
-                    <div className="search-loading-skeleton" />
-                    <div className="search-loading-skeleton short" />
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div
-                className="explorer-layout"
-                ref={explorerLayoutRef}
-                style={explorerPanelHeight ? { height: `${explorerPanelHeight}px` } : undefined}
-              >
-                <aside className="facet-panel">
-                <div className="facet-card">
-                  <h4>Indexes</h4>
-                  {facets.indexes.length === 0 && <p className="facet-empty">No data</p>}
-                  {facets.indexes.map((facet) => (
-                    <button key={`idx-${facet.value}`} className="facet-item" onClick={() => applyFacetFilter('indexName', facet.value)}>
-                      <span>{facet.value}</span>
-                      <div className="facet-right">
-                        <strong>{facet.count}</strong>
-                        <div className="facet-track"><div className="facet-bar" style={{ width: `${(facet.count / maxFacetCount(facets.indexes)) * 100}%` }} /></div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="facet-card">
-                  <h4>Services</h4>
-                  {facets.services.length === 0 && <p className="facet-empty">No data</p>}
-                  {facets.services.map((facet) => (
-                    <button key={`svc-${facet.value}`} className="facet-item" onClick={() => applyFacetFilter('service', facet.value)}>
-                      <span>{facet.value}</span>
-                      <div className="facet-right">
-                        <strong>{facet.count}</strong>
-                        <div className="facet-track"><div className="facet-bar" style={{ width: `${(facet.count / maxFacetCount(facets.services)) * 100}%` }} /></div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="facet-card">
-                  <h4>Levels</h4>
-                  {facets.levels.length === 0 && <p className="facet-empty">No data</p>}
-                  {facets.levels.map((facet) => (
-                    <button key={`lvl-${facet.value}`} className="facet-item" onClick={() => applyFacetFilter('level', facet.value)}>
-                      <span>{facet.value}</span>
-                      <div className="facet-right">
-                        <strong>{facet.count}</strong>
-                        <div className="facet-track"><div className="facet-bar" style={{ width: `${(facet.count / maxFacetCount(facets.levels)) * 100}%` }} /></div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="facet-card">
-                  <h4>Status</h4>
-                  {facets.statuses.length === 0 && <p className="facet-empty">No data</p>}
-                  {facets.statuses.map((facet) => (
-                    <button key={`status-${facet.value}`} className="facet-item" onClick={() => applyFacetFilter('statusCode', facet.value)}>
-                      <span>{facet.value}</span>
-                      <div className="facet-right">
-                        <strong>{facet.count}</strong>
-                        <div className="facet-track"><div className="facet-bar" style={{ width: `${(facet.count / maxFacetCount(facets.statuses)) * 100}%` }} /></div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="facet-card">
-                  <h4>Hosts</h4>
-                  {facets.hosts.length === 0 && <p className="facet-empty">No data</p>}
-                  {facets.hosts.map((facet) => (
-                    <button key={`host-${facet.value}`} className="facet-item" onClick={() => applyFacetFilter('host', facet.value)}>
-                      <span>{facet.value}</span>
-                      <div className="facet-right">
-                        <strong>{facet.count}</strong>
-                        <div className="facet-track"><div className="facet-bar" style={{ width: `${(facet.count / maxFacetCount(facets.hosts)) * 100}%` }} /></div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="facet-card">
-                  <h4>Top Terms</h4>
-                  {topTerms.length === 0 && <p className="facet-empty">No data</p>}
-                  {topTerms.map((facet) => (
-                    <button key={`term-${facet.value}`} className="facet-item" onClick={() => runPivot(facet.value)}>
-                      <span>{facet.value}</span>
-                      <div className="facet-right">
-                        <strong>{facet.count}</strong>
-                        <div className="facet-track"><div className="facet-bar" style={{ width: `${(facet.count / maxFacetCount(topTerms)) * 100}%` }} /></div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-
-                {hasPivots(investigationPivots) && (
-                  <RelatedEventsPanel
-                    apiFetch={apiFetch}
-                    scope={{
-                      index: indexName.trim() || 'default',
-                      service: service.trim() || 'unknown',
-                      env: environment.trim() || 'prod'
-                    }}
-                    time={{
-                      from: new Date(timeFrom).toISOString(),
-                      to: new Date(timeTo).toISOString()
-                    }}
-                    pivots={investigationPivots}
-                    onSelectRelatedEvent={handleSelectRelatedEvent}
-                  />
-                )}
-
-                <div className="facet-card">
-                  <h4>Field Coverage</h4>
-                  <p className="field-coverage-subtitle">
-                    {fieldPresenceSampleSize > 0
-                      ? `Coverage across ${fieldPresenceSampleSize} event${fieldPresenceSampleSize === 1 ? '' : 's'}`
-                      : 'Run a search to calculate field coverage'}
-                  </p>
-                  <div className="field-coverage-kpis">
-                    <div className="field-coverage-kpi">
-                      <span className="field-coverage-kpi-label">Overall</span>
-                      <strong>{fieldCoverageAverage}%</strong>
-                    </div>
-                    <div className="field-coverage-kpi">
-                      <span className="field-coverage-kpi-label">Quality</span>
-                      <strong>{fieldCoverageQuality}</strong>
-                    </div>
-                  </div>
-                  {summaryUnavailable && (
-                    <p className="field-coverage-warning">
-                      Summary endpoint unavailable (404). Showing coverage from loaded results only.
-                    </p>
-                  )}
-                  {fieldCoverageFilter && (
-                    <div className="field-coverage-filter-chip">
-                      <span>
-                        Applied filter: {fieldCoverageFilter.field} {fieldCoverageFilter.mode === 'present' ? 'present' : 'missing'}
-                      </span>
-                      <button type="button" onClick={clearFieldCoverageFilter}>Clear</button>
-                    </div>
-                  )}
-                  <div className="field-presence-list">
-                    {fieldPresenceGroups.map((group) => (
-                      <details key={group.key} className="field-coverage-group" open>
-                        <summary className="field-coverage-group-summary">
-                          <span>{group.title}</span>
-                          <strong>{group.average}%</strong>
-                        </summary>
-                        {group.rows.map((row) => (
-                          <div key={row.key} className={`field-presence-row coverage-${row.percent >= 80 ? 'strong' : row.percent >= 50 ? 'mixed' : 'sparse'}`}>
-                            <div className="field-coverage-topline">
-                              <button
-                                type="button"
-                                className="field-coverage-action field-label-action"
-                                onClick={() => runFieldCoverageQuery(row.key, 'present')}
-                                title={`Filter to events where ${row.key} is present`}
-                              >
-                                {row.label}
-                              </button>
-                              <strong>{row.percent}%</strong>
-                            </div>
-                            <div className="field-coverage-track">
-                              <div className="field-coverage-bar" style={{ width: `${row.percent}%` }} />
-                            </div>
-                            <div className="field-coverage-footnote">
-                              <span>{row.count} present</span>
-                              {fieldPresenceSampleSize > 0 && (
-                                <button
-                                  type="button"
-                                  className="field-coverage-action field-missing-action"
-                                  onClick={() => runFieldCoverageQuery(row.key, 'missing')}
-                                  title={`Filter to events where ${row.key} is missing`}
-                                >
-                                  {row.missing} missing
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-                      </details>
-                    ))}
-                    {fieldPresenceGroups.length === 0 && (
-                      <div className="field-presence-row">
-                        <div className="field-coverage-topline">
-                          <span>No field coverage data yet</span>
-                          <strong>0%</strong>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </aside>
-
-                <section className="events-panel">
-                {resultType === 'events' && hasCompletedSearch && results.length === 0 && !loading && !error && (
-                  <div className="empty-state card">
-                    <p>No results found. Adjust time range, filters, or PPL query.</p>
-                  </div>
-                )}
-
-                {resultType === 'table' ? (
-                  <div className="card tabular-results">
-                    {tableRows.length === 0 ? (
-                      <p className="empty-card">No tabular rows returned.</p>
-                    ) : (
-                      <table className="tabular-results-table">
-                        <thead>
-                          <tr>
-                            {Object.keys(tableRows[0]).map((key) => (
-                              <th key={key}>{key}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {tableRows.map((row, index) => (
-                            <tr key={`row-${index}`}>
-                              {Object.keys(tableRows[0]).map((key) => (
-                                <td key={`${index}-${key}`}>
-                                  {String(row[key] ?? '')}
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
-                  </div>
-                ) : (
-                  <div className="event-feed">
-                    {results.map((event, index) => {
-                      const preview = event.message.length > 340 ? `${event.message.slice(0, 340)}...` : event.message;
-                      const attrPairs = attrsPreviewPairs(event.attrs_json);
-                      return (
-                        <article
-                          key={event.event_id}
-                          data-event-index={index}
-                          className={`event-card level-${event.level} ${index === activeIndex ? 'active' : ''}`}
-                          onMouseEnter={() => setActiveIndex(index)}
-                          onClick={() => {
-                            setActiveIndex(index);
-                            setSelectedEvent(event);
-                          }}
-                        >
-                          <header className="event-head">
-                            <div className="event-time">{formatDateTime(event.ts)}</div>
-                            <div className="event-service">{event.service}</div>
-                            <span className={`badge ${event.level}`}>{event.level}</span>
-                          </header>
-
-                          <div className="event-message">{highlightText(preview, highlightTerms)}</div>
-
-                          <footer className="event-meta">
-                            <span className="meta-chip">idx:{event.index || 'default'}</span>
-                            <span className="meta-chip">env:{event.env}</span>
-                            <span className="meta-chip">host:{event.host}</span>
-                            {event.status !== undefined && <span className="meta-chip">status:{event.status}</span>}
-                            {event.duration_ms !== undefined && <span className="meta-chip">dur:{event.duration_ms}ms</span>}
-                            {event.trace_id && <span className="meta-chip">trace:{event.trace_id.slice(0, 16)}</span>}
-                            {event.span_id && <span className="meta-chip">span:{event.span_id.slice(0, 16)}</span>}
-                            {event.request_id && <span className="meta-chip">req:{event.request_id.slice(0, 16)}</span>}
-                            {attrPairs.map((pair) => (
-                              <span key={`${event.event_id}-${pair.key}`} className="meta-chip attr-chip">
-                                {pair.key}:{pair.value}
-                              </span>
-                            ))}
-                          </footer>
-                        </article>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {resultType === 'events' && cursor && results.length > 0 && (
-                  <button className="load-more" disabled={loading} onClick={() => void runSearch({ append: true, cursor })}>
-                    {loading ? 'Loading...' : 'Load More'}
-                  </button>
-                )}
-                </section>
-              </div>
-            )}
-          </div>
+          <SearchPage
+            workspaceLaunchInfo={workspaceLaunchInfo}
+            timeFrom={timeFrom}
+            setTimeFrom={setTimeFrom}
+            timeTo={timeTo}
+            setTimeTo={setTimeTo}
+            activeTimePreset={activeTimePreset}
+            applyTimePreset={applyTimePreset}
+            showAdvancedFilters={showAdvancedFilters}
+            setShowAdvancedFilters={setShowAdvancedFilters}
+            activeAdvancedFilterCount={activeAdvancedFilterCount}
+            indexName={indexName}
+            setIndexName={setIndexName}
+            service={service}
+            setService={setService}
+            environment={environment}
+            setEnvironment={setEnvironment}
+            host={host}
+            setHost={setHost}
+            level={level}
+            setLevel={setLevel}
+            statusCode={statusCode}
+            setStatusCode={setStatusCode}
+            queryInputMode={queryInputMode}
+            setQueryInputMode={setQueryInputMode}
+            query={query}
+            setQuery={setQuery}
+            querySuggestions={querySuggestions}
+            querySuggestionsOpen={querySuggestionsOpen}
+            querySuggestionsLoading={querySuggestionsLoading}
+            querySuggestionIndex={querySuggestionIndex}
+            setQuerySuggestionIndex={setQuerySuggestionIndex}
+            closeQuerySuggestions={closeQuerySuggestions}
+            applyQuerySuggestion={applyQuerySuggestion}
+            runSearch={runSearch}
+            cancelOngoingSearch={cancelOngoingSearch}
+            loading={loading}
+            streamSearch={streamSearch}
+            setStreamSearch={setStreamSearch}
+            streaming={streaming}
+            showSearchActions={showSearchActions}
+            setShowSearchActions={setShowSearchActions}
+            setShowSaveSearchInline={setShowSaveSearchInline}
+            scheduleCurrentSearch={scheduleCurrentSearch}
+            hasActiveAdvancedFilters={hasActiveAdvancedFilters}
+            setActiveTimePreset={setActiveTimePreset}
+            setQuerySuggestionsOpen={setQuerySuggestionsOpen}
+            setQueryFocused={setQueryFocused}
+            setCursor={setCursor}
+            queryTypeaheadRef={queryTypeaheadRef}
+            searchInputRef={searchInputRef}
+            searchActionsRef={searchActionsRef}
+            assistantPlan={assistantPlan}
+            showSaveSearchInline={showSaveSearchInline}
+            saveName={saveName}
+            setSaveName={setSaveName}
+            saveCurrentSearch={saveCurrentSearch}
+            investigationPivots={investigationPivots}
+            apiFetch={apiFetch}
+            error={error}
+            guardrailDetail={guardrailDetail}
+            stats={stats}
+            summary={summary}
+            summaryLoading={summaryLoading}
+            results={results}
+            tableRows={tableRows}
+            resultType={resultType}
+            cursor={cursor}
+            hasCompletedSearch={hasCompletedSearch}
+            levelTotals={levelTotals}
+            timeline={timeline}
+            timelineStepMs={timelineStepMs}
+            timelineMax={timelineMax}
+            timelineAxisMarks={timelineAxisMarks}
+            facets={facets}
+            topTerms={topTerms}
+            fieldPresenceSampleSize={fieldPresenceSampleSize}
+            fieldCoverageAverage={fieldCoverageAverage}
+            fieldCoverageQuality={fieldCoverageQuality}
+            fieldPresenceGroups={fieldPresenceGroups}
+            fieldCoverageFilter={fieldCoverageFilter}
+            summaryUnavailable={summaryUnavailable}
+            applyFacetFilter={applyFacetFilter}
+            runPivot={runPivot}
+            runFieldCoverageQuery={runFieldCoverageQuery}
+            clearFieldCoverageFilter={clearFieldCoverageFilter}
+            handlePivotClick={handlePivotClick}
+            handleSelectRelatedEvent={handleSelectRelatedEvent}
+            activeIndex={activeIndex}
+            setActiveIndex={setActiveIndex}
+            setSelectedEvent={setSelectedEvent}
+            explorerLayoutRef={explorerLayoutRef}
+            explorerPanelHeight={explorerPanelHeight}
+          />
         )}
 
-        {view === 'dashboard' && (
+                {view === 'dashboard' && (
           <Suspense fallback={<div className="empty-state"><p>Loading dashboard builder...</p></div>}>
             <DashboardPage apiFetch={apiFetch} />
           </Suspense>
         )}
 
         {view === 'alerts' && (
-          <div className="alerts-view">
-            {alertsError && <div className="error-banner">{alertsError}</div>}
-            {alertsInfo && <p className="empty-card">{alertsInfo}</p>}
-
-            <div className="alerts-layout">
-              <div className="card alert-form-card">
-                <h3>Create Alert</h3>
-                <div className="alert-form-grid">
-                  <label className="alert-form-field">
-                    <span>Alert Name</span>
-                    <input
-                      type="text"
-                      value={newAlertName}
-                      onChange={(event) => setNewAlertName(event.target.value)}
-                      placeholder="API error spike in prod"
-                    />
-                  </label>
-
-                  <label className="alert-form-field">
-                    <span>Template</span>
-                    <select
-                      value={newAlertTemplateId}
-                      onChange={(event) => setNewAlertTemplateId(event.target.value as AlertQueryTemplate)}
-                    >
-                      {ALERT_TEMPLATE_PRESETS.map((preset) => (
-                        <option key={preset.id} value={preset.id}>{preset.label}</option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <p className="alert-template-hint">{selectedAlertTemplate.description}</p>
-
-                  <div className="alert-form-row cols-3">
-                    <label className="alert-form-field">
-                      <span>Window (minutes)</span>
-                      <input
-                        type="number"
-                        min={1}
-                        value={newAlertWindowMinutes}
-                        onChange={(event) => setNewAlertWindowMinutes(event.target.value)}
-                      />
-                    </label>
-                    <label className="alert-form-field">
-                      <span>Schedule (seconds)</span>
-                      <input
-                        type="number"
-                        min={1}
-                        value={newAlertSchedule}
-                        onChange={(event) => setNewAlertSchedule(event.target.value)}
-                      />
-                    </label>
-                    <label className="alert-form-field">
-                      <span>Cooldown (seconds)</span>
-                      <input
-                        type="number"
-                        min={1}
-                        value={newAlertCooldown}
-                        onChange={(event) => setNewAlertCooldown(event.target.value)}
-                      />
-                    </label>
-                  </div>
-
-                  <div className="alert-form-row cols-2">
-                    <label className="alert-form-field">
-                      <span>Threshold Rule</span>
-                      <select
-                        value={newAlertThresholdOperator}
-                        onChange={(event) => setNewAlertThresholdOperator(event.target.value as AlertThresholdOperator)}
-                      >
-                        {ALERT_THRESHOLD_OPERATOR_OPTIONS.map((operator) => (
-                          <option key={operator.value} value={operator.value}>{operator.label}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="alert-form-field">
-                      <span>Threshold Value</span>
-                      <input
-                        type="number"
-                        value={newAlertThresholdValue}
-                        onChange={(event) => setNewAlertThresholdValue(event.target.value)}
-                      />
-                    </label>
-                  </div>
-
-                  <div className="alert-form-row cols-3">
-                    <label className="alert-form-field">
-                      <span>Index (optional)</span>
-                      <input
-                        type="text"
-                        value={newAlertIndex}
-                        onChange={(event) => setNewAlertIndex(event.target.value)}
-                        placeholder={indexName.trim().toLowerCase() || 'default'}
-                      />
-                    </label>
-                    <label className="alert-form-field">
-                      <span>Service (optional)</span>
-                      <input
-                        type="text"
-                        value={newAlertService}
-                        onChange={(event) => setNewAlertService(event.target.value)}
-                        placeholder="checkout-api"
-                      />
-                    </label>
-                    <label className="alert-form-field">
-                      <span>Environment (optional)</span>
-                      <input
-                        type="text"
-                        value={newAlertEnv}
-                        onChange={(event) => setNewAlertEnv(event.target.value)}
-                        placeholder="prod"
-                      />
-                    </label>
-                  </div>
-
-                  {isTokenAlertTemplate && (
-                    <label className="alert-form-field">
-                      <span>Token</span>
-                      <input
-                        type="text"
-                        value={newAlertToken}
-                        onChange={(event) => setNewAlertToken(event.target.value)}
-                        placeholder="unauthorized"
-                      />
-                    </label>
-                  )}
-
-                  <div className="alert-form-row cols-2">
-                    <label className="alert-form-field">
-                      <span>Severity</span>
-                      <select
-                        value={newAlertSeverity}
-                        onChange={(event) => setNewAlertSeverity(event.target.value as 'critical' | 'warn' | 'info')}
-                      >
-                        <option value="critical">critical</option>
-                        <option value="warn">warn</option>
-                        <option value="info">info</option>
-                      </select>
-                    </label>
-                    <div className="alert-form-field">
-                      <span>Notify Channels</span>
-                      <div className="alert-channel-group">
-                        <label className="alert-check">
-                          <input
-                            type="checkbox"
-                            checked={newAlertNotifySlack}
-                            onChange={(event) => setNewAlertNotifySlack(event.target.checked)}
-                          />
-                          Slack
-                        </label>
-                        <label className="alert-check">
-                          <input
-                            type="checkbox"
-                            checked={newAlertNotifyWebhook}
-                            onChange={(event) => setNewAlertNotifyWebhook(event.target.checked)}
-                          />
-                          Webhook
-                        </label>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="alert-form-row cols-2">
-                    <label className="alert-form-field">
-                      <span>Owner Team (optional)</span>
-                      <input
-                        type="text"
-                        value={newAlertOwnerTeam}
-                        onChange={(event) => setNewAlertOwnerTeam(event.target.value)}
-                        placeholder="edge-ops"
-                      />
-                    </label>
-                    <label className="alert-form-field">
-                      <span>Runbook URL (optional)</span>
-                      <input
-                        type="url"
-                        value={newAlertRunbookUrl}
-                        onChange={(event) => setNewAlertRunbookUrl(event.target.value)}
-                        placeholder="https://runbooks.example.com/edge/error-rate"
-                      />
-                    </label>
-                  </div>
-
-                  <label className="alert-form-field">
-                    <span>Deep Link URL Override (optional)</span>
-                    <input
-                      type="url"
-                      value={newAlertDeepLink}
-                      onChange={(event) => setNewAlertDeepLink(event.target.value)}
-                      placeholder="Auto-generated from template + filters"
-                    />
-                  </label>
-
-                  <div className="alert-starter-pack">
-                    <h4>Starter Pack Defaults</h4>
-                    <div className="alert-form-row cols-2">
-                      <label className="alert-form-field">
-                        <span>Runbook Base URL</span>
-                        <input
-                          type="text"
-                          value={starterRunbookBase}
-                          onChange={(event) => setStarterRunbookBase(event.target.value)}
-                          placeholder="https://runbooks.example.com/edge"
-                        />
-                      </label>
-                      <label className="alert-form-field">
-                        <span>Owner Team</span>
-                        <input
-                          type="text"
-                          value={starterOwnerTeam}
-                          onChange={(event) => setStarterOwnerTeam(event.target.value)}
-                          placeholder="edge-ops"
-                        />
-                      </label>
-                    </div>
-                  </div>
-
-                  <div className="alert-json-preview">
-                    <strong>Payload Preview</strong>
-                    <pre>{JSON.stringify(alertPayloadPreview, null, 2)}</pre>
-                  </div>
-                </div>
-                <div className="alert-actions">
-                  <button className="secondary" onClick={() => void createAlert()}>Create Alert</button>
-                  <button className="secondary" disabled={starterPackApplying} onClick={() => void applyStarterAlertPack()}>
-                    {starterPackApplying ? 'Applying...' : 'Apply Starter Pack'}
-                  </button>
-                </div>
-              </div>
-
-              <div className="card alerts-list-card">
-                <h3>Alert Definitions</h3>
-                <div className="alert-governance-summary">
-                  <span><strong>Total:</strong> {alertGovernance.total}</span>
-                  <span><strong>Deep links:</strong> {alertGovernance.withDeepLink}/{alertGovernance.total}</span>
-                  <span><strong>Runbooks:</strong> {alertGovernance.withRunbook}/{alertGovernance.total}</span>
-                  <span><strong>Owner team:</strong> {alertGovernance.withOwnerTeam}/{alertGovernance.total}</span>
-                </div>
-                {alertsLoading && <p className="empty-card">Loading alerts...</p>}
-                {!alertsLoading && alerts.length === 0 && <p className="empty-card">No alerts configured.</p>}
-                {!alertsLoading && alerts.map((alert) => {
-                  const notify = parseAlertNotifyConfig(alert.notify_json);
-                  const params = parseAlertParamsConfig(alert.params_json);
-                  const workspaceHref = buildAlertWorkspaceHref(alert);
-                  const missing: string[] = [];
-                  if (!notify.deep_link) missing.push('deep-link');
-                  if (!notify.runbook_url) missing.push('runbook');
-                  if (!notify.owner_team) missing.push('owner-team');
-
-                  return (
-                    <div key={alert.id} className="alert-row">
-                      <div className="alert-main">
-                        <div className="alert-name">{alert.name}</div>
-                        <div className="alert-meta">
-                          <span>{alert.type}</span>
-                          <span>template:{alert.query_template}</span>
-                          <span>every {alert.schedule_seconds}s</span>
-                          <span>{alert.enabled ? 'enabled' : 'disabled'}</span>
-                          {notify.severity && <span>severity:{notify.severity}</span>}
-                          {params.window_minutes && <span>window:{params.window_minutes}m</span>}
-                          {params.token && <span>token:{params.token}</span>}
-                          {params.service && <span>service:{params.service}</span>}
-                          {params.env && <span>env:{params.env}</span>}
-                          {params.index && <span>index:{params.index}</span>}
-                        </div>
-                        <div className="alert-governance">
-                          {notify.owner_team && <span className="alert-governance-pill ok">team:{notify.owner_team}</span>}
-                          {notify.runbook_url && <span className="alert-governance-pill ok">runbook attached</span>}
-                          {notify.deep_link && <span className="alert-governance-pill ok">deep-link attached</span>}
-                          {missing.length > 0 && (
-                            <span className="alert-governance-pill missing">missing {missing.join(', ')}</span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="alert-actions">
-                        {workspaceHref && (
-                          <a className="secondary alert-link-btn" href={workspaceHref}>Investigate</a>
-                        )}
-                        {notify.deep_link && (
-                          <a className="secondary alert-link-btn" href={notify.deep_link} target="_blank" rel="noreferrer">Open Deep Link</a>
-                        )}
-                        {notify.runbook_url && (
-                          <a className="secondary alert-link-btn" href={notify.runbook_url} target="_blank" rel="noreferrer">Runbook</a>
-                        )}
-                        <button className="secondary" onClick={() => void toggleAlertEnabled(alert)}>
-                          {alert.enabled ? 'Disable' : 'Enable'}
-                        </button>
-                        <button className="danger" onClick={() => void deleteAlert(alert.id)}>Delete</button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
+          <AlertsPage
+            alertsError={alertsError}
+            alertsInfo={alertsInfo}
+            alertsLoading={alertsLoading}
+            alerts={alerts}
+            alertGovernance={alertGovernance}
+            newAlertName={newAlertName}
+            setNewAlertName={setNewAlertName}
+            newAlertTemplateId={newAlertTemplateId}
+            setNewAlertTemplateId={setNewAlertTemplateId}
+            selectedAlertTemplate={selectedAlertTemplate}
+            isTokenAlertTemplate={isTokenAlertTemplate}
+            newAlertWindowMinutes={newAlertWindowMinutes}
+            setNewAlertWindowMinutes={setNewAlertWindowMinutes}
+            newAlertSchedule={newAlertSchedule}
+            setNewAlertSchedule={setNewAlertSchedule}
+            newAlertCooldown={newAlertCooldown}
+            setNewAlertCooldown={setNewAlertCooldown}
+            newAlertThresholdOperator={newAlertThresholdOperator}
+            setNewAlertThresholdOperator={setNewAlertThresholdOperator}
+            newAlertThresholdValue={newAlertThresholdValue}
+            setNewAlertThresholdValue={setNewAlertThresholdValue}
+            newAlertIndex={newAlertIndex}
+            setNewAlertIndex={setNewAlertIndex}
+            newAlertService={newAlertService}
+            setNewAlertService={setNewAlertService}
+            newAlertEnv={newAlertEnv}
+            setNewAlertEnv={setNewAlertEnv}
+            newAlertToken={newAlertToken}
+            setNewAlertToken={setNewAlertToken}
+            newAlertSeverity={newAlertSeverity}
+            setNewAlertSeverity={setNewAlertSeverity}
+            newAlertNotifySlack={newAlertNotifySlack}
+            setNewAlertNotifySlack={setNewAlertNotifySlack}
+            newAlertNotifyWebhook={newAlertNotifyWebhook}
+            setNewAlertNotifyWebhook={setNewAlertNotifyWebhook}
+            newAlertOwnerTeam={newAlertOwnerTeam}
+            setNewAlertOwnerTeam={setNewAlertOwnerTeam}
+            newAlertRunbookUrl={newAlertRunbookUrl}
+            setNewAlertRunbookUrl={setNewAlertRunbookUrl}
+            newAlertDeepLink={newAlertDeepLink}
+            setNewAlertDeepLink={setNewAlertDeepLink}
+            starterRunbookBase={starterRunbookBase}
+            setStarterRunbookBase={setStarterRunbookBase}
+            starterOwnerTeam={starterOwnerTeam}
+            setStarterOwnerTeam={setStarterOwnerTeam}
+            indexName={indexName}
+            alertPayloadPreview={alertPayloadPreview}
+            starterPackApplying={starterPackApplying}
+            createAlert={createAlert}
+            applyStarterAlertPack={applyStarterAlertPack}
+            toggleAlertEnabled={toggleAlertEnabled}
+            deleteAlert={deleteAlert}
+          />
         )}
 
         {view === 'admin' && (
-          <div className="admin-view">
-            <div className="admin-header">
-              <h2>Administration</h2>
-              <span className="admin-subtitle">{adminUsers.length} user{adminUsers.length !== 1 ? 's' : ''} &middot; {adminRoles.length} role{adminRoles.length !== 1 ? 's' : ''}</span>
-            </div>
-
-            {adminToast && <div className="success-banner">{adminToast}</div>}
-            {adminError && <div className="error-banner">{adminError}</div>}
-            {adminLoading && <div className="empty-state"><p>Loading admin data...</p></div>}
-
-            {!adminLoading && (
-              <div className="admin-grid">
-                <div className="admin-card">
-                  <div className="admin-section-title">
-                    <span className="section-icon synthetic">S</span>
-                    Synthetic Ingest Control
-                  </div>
-                  <div className="admin-form-row">
-                    <div className="admin-form-group">
-                      <label>Current runtime state</label>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <span className={`status-badge ${syntheticIngestControl?.enabled ? 'active' : 'disabled'}`}>
-                          {syntheticIngestControl?.enabled ? 'enabled' : 'disabled'}
-                        </span>
-                        {syntheticIngestControl?.updated_at && (
-                          <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-                            updated {formatDateTime(syntheticIngestControl.updated_at)}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button
-                      className="admin-submit"
-                      onClick={() => void setSyntheticIngestEnabled(true)}
-                      disabled={syntheticControlLoading || !!syntheticIngestControl?.enabled}
-                    >
-                      {syntheticControlLoading ? 'Updating...' : 'Start Synthetic Ingest'}
-                    </button>
-                    <button
-                      className="secondary"
-                      onClick={() => void runSyntheticIngestNow()}
-                      disabled={syntheticControlLoading}
-                    >
-                      Run Once Now
-                    </button>
-                    <button
-                      className="danger"
-                      onClick={() => void setSyntheticIngestEnabled(false)}
-                      disabled={syntheticControlLoading || !syntheticIngestControl?.enabled}
-                    >
-                      Stop
-                    </button>
-                  </div>
-                  <p style={{ marginTop: 10, fontSize: 12, color: 'var(--muted)' }}>
-                    Start also triggers an immediate synthetic run so Live Tail shows fresh events quickly.
-                  </p>
-                </div>
-
-                <div className="admin-card">
-                  <div className="admin-section-title">
-                    <span className="section-icon invite">+</span>
-                    Invite User
-                  </div>
-                  <div className="admin-form-row">
-                    <div className="admin-form-group">
-                      <label>Email address</label>
-                      <input
-                        type="email"
-                        value={inviteEmail}
-                        onChange={(event) => setInviteEmail(event.target.value)}
-                        placeholder="user@company.com"
-                      />
-                    </div>
-                  </div>
-                  <div className="admin-form-row cols-2">
-                    <div className="admin-form-group">
-                      <label>Auth mode</label>
-                      <select value={inviteAuthMode} onChange={(event) => setInviteAuthMode(event.target.value as 'access_sso' | 'local_password')}>
-                        <option value="access_sso">Access SSO</option>
-                        <option value="local_password">Local Password</option>
-                      </select>
-                    </div>
-                    <div className="admin-form-group">
-                      <label>Roles</label>
-                      <input
-                        type="text"
-                        value={inviteRoleIds}
-                        onChange={(event) => setInviteRoleIds(event.target.value)}
-                        placeholder="viewer, analyst"
-                      />
-                    </div>
-                  </div>
-                  <button className="admin-submit" onClick={() => void createInvite()}>Create Invite</button>
-                  {inviteTokenPreview && (
-                    <div className="invite-token-box">
-                      <strong>One-time invite token</strong>
-                      <code>{inviteTokenPreview}</code>
-                    </div>
-                  )}
-                </div>
-
-                <div className="admin-card admin-span-2">
-                  <div className="admin-section-title">
-                    <span className="section-icon onboarding">O</span>
-                    Onboarding Checklist
-                  </div>
-                  <div className="onboarding-summary">
-                    <strong>{onboardingDoneCount}/{onboardingChecklist.length}</strong> steps complete
-                  </div>
-                  <div className="onboarding-checklist">
-                    {onboardingChecklist.map((item) => (
-                      <div key={item.key} className={`onboarding-check ${item.done ? 'done' : 'todo'}`}>
-                        <span className={`status-badge ${item.done ? 'active' : 'disabled'}`}>
-                          {item.done ? 'Done' : 'Pending'}
-                        </span>
-                        <div className="onboarding-check-copy">
-                          <strong>{item.title}</strong>
-                          <span>{item.detail}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="admin-card">
-                  <div className="admin-section-title">
-                    <span className="section-icon invite">I</span>
-                    Invite Queue
-                  </div>
-                  <div className="table-wrap">
-                    <table className="admin-table">
-                      <thead>
-                        <tr>
-                          <th>Email</th>
-                          <th>Auth Mode</th>
-                          <th>Roles</th>
-                          <th>Expires</th>
-                          <th>Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {adminInvites.map((invite) => (
-                          <tr key={invite.id}>
-                            <td><strong>{invite.email}</strong></td>
-                            <td>{invite.auth_mode === 'access_sso' ? 'Access SSO' : 'Local Password'}</td>
-                            <td>{invite.role_ids.map((roleId) => <span key={roleId} className="permission-tag">{roleId}</span>)}</td>
-                            <td style={{ whiteSpace: 'nowrap' }}>{formatDateTime(invite.expires_at)}</td>
-                            <td>
-                              <div className="invite-actions">
-                                <button className="secondary" onClick={() => void resendInvite(invite)}>Resend</button>
-                                <button className="danger" onClick={() => void revokeInvite(invite)}>Revoke</button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                        {adminInvites.length === 0 && (
-                          <tr className="empty-row">
-                            <td colSpan={5}>No pending invites</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                <div className="admin-card">
-                  <div className="admin-section-title">
-                    <span className="section-icon role">R</span>
-                    Create Role
-                  </div>
-                  <div className="admin-form-row cols-2">
-                    <div className="admin-form-group">
-                      <label>Role ID</label>
-                      <input
-                        type="text"
-                        value={newRoleId}
-                        onChange={(event) => setNewRoleId(event.target.value)}
-                        placeholder="e.g. zeek_viewer"
-                      />
-                    </div>
-                    <div className="admin-form-group">
-                      <label>Display name</label>
-                      <input
-                        type="text"
-                        value={newRoleName}
-                        onChange={(event) => setNewRoleName(event.target.value)}
-                        placeholder="Zeek Viewer"
-                      />
-                    </div>
-                  </div>
-                  <div className="admin-form-row">
-                    <div className="admin-form-group">
-                      <label>Permissions</label>
-                      <input
-                        type="text"
-                        value={newRolePermissions}
-                        onChange={(event) => setNewRolePermissions(event.target.value)}
-                        placeholder="search.read, dashboard.read"
-                      />
-                    </div>
-                  </div>
-                  <div className="admin-form-row">
-                    <div className="admin-form-group">
-                      <label>Data scope (JSON)</label>
-                      <textarea
-                        value={newRoleScope}
-                        onChange={(event) => setNewRoleScope(event.target.value)}
-                        placeholder='{"indexes":["*"],"services":["*"],"envs":["*"],"hosts":["*"]}'
-                      />
-                    </div>
-                  </div>
-                  <button className="admin-submit" onClick={() => void createRole()}>Create Role</button>
-                </div>
-
-                <div className="admin-card">
-                  <div className="admin-section-title">
-                    <span className="section-icon mapping">G</span>
-                    Access Group Mapping
-                  </div>
-                  <div className="admin-form-row cols-2">
-                    <div className="admin-form-group">
-                      <label>IdP / Access group</label>
-                      <input
-                        type="text"
-                        value={newMappingGroup}
-                        onChange={(event) => setNewMappingGroup(event.target.value)}
-                        placeholder="engineering-team"
-                      />
-                    </div>
-                    <div className="admin-form-group">
-                      <label>Role ID</label>
-                      <input
-                        type="text"
-                        value={newMappingRoleId}
-                        onChange={(event) => setNewMappingRoleId(event.target.value)}
-                        placeholder="analyst"
-                      />
-                    </div>
-                  </div>
-                  <button className="admin-submit" onClick={() => void createMapping()}>Add Mapping</button>
-
-                  <div className="table-wrap">
-                    <table className="admin-table">
-                      <thead>
-                        <tr>
-                          <th>Access Group</th>
-                          <th>Role</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {adminMappings.map((mapping) => (
-                          <tr key={mapping.id}>
-                            <td>{mapping.access_group}</td>
-                            <td><span className="permission-tag">{mapping.role_id}</span></td>
-                          </tr>
-                        ))}
-                        {adminMappings.length === 0 && (
-                          <tr className="empty-row">
-                            <td colSpan={2}>No mappings yet</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                <div className="admin-card admin-span-2">
-                  <div className="admin-section-title">
-                    <span className="section-icon users">U</span>
-                    Users
-                  </div>
-                  <div className="table-wrap">
-                    <table className="admin-table">
-                      <thead>
-                        <tr>
-                          <th>Email</th>
-                          <th>Roles</th>
-                          <th>Status</th>
-                          <th>Last Login</th>
-                          <th>Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {adminUsers.map((row) => (
-                          <tr key={row.id}>
-                            <td><strong>{row.email}</strong></td>
-                            <td>
-                              <form
-                                className="admin-inline-form"
-                                onSubmit={(event) => {
-                                  event.preventDefault();
-                                  const form = event.currentTarget as HTMLFormElement;
-                                  const input = form.elements.namedItem(`roles-${row.id}`) as HTMLInputElement | null;
-                                  if (!input) return;
-                                  void updateUserRoles(row, input.value);
-                                }}
-                              >
-                                <input
-                                  name={`roles-${row.id}`}
-                                  defaultValue={row.role_ids.join(',')}
-                                  placeholder="viewer,analyst"
-                                />
-                                <button className="secondary" type="submit">Set</button>
-                              </form>
-                            </td>
-                            <td>
-                              <span className={`status-badge ${row.enabled ? 'active' : 'disabled'}`}>
-                                {row.enabled ? 'Active' : 'Disabled'}
-                              </span>
-                            </td>
-                            <td>{row.last_login_at ? formatDateTime(row.last_login_at) : <span style={{ color: 'var(--muted)', fontStyle: 'italic' }}>never</span>}</td>
-                            <td>
-                              {row.enabled ? (
-                                <button className="danger" onClick={() => void updateUserEnabled(row, 0)}>Disable</button>
-                              ) : (
-                                <button className="secondary" onClick={() => void updateUserEnabled(row, 1)}>Enable</button>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                        {adminUsers.length === 0 && (
-                          <tr className="empty-row">
-                            <td colSpan={5}>No users</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                <div className="admin-card">
-                  <div className="admin-section-title">
-                    <span className="section-icon roles">R</span>
-                    Roles
-                  </div>
-                  <div className="table-wrap">
-                    <table className="admin-table">
-                      <thead>
-                        <tr>
-                          <th>Role</th>
-                          <th>Permissions</th>
-                          <th>Scope</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {adminRoles.map((role) => (
-                          <tr key={role.id}>
-                            <td>
-                              <strong>{role.id}</strong>
-                              {role.system_role && <span className="system-badge">system</span>}
-                            </td>
-                            <td>{parseStringArray(role.permissions_json).map((p) => <span key={p} className="permission-tag">{p}</span>)}</td>
-                            <td><span className="scope-cell" title={role.scope_json}>{role.scope_json}</span></td>
-                          </tr>
-                        ))}
-                        {adminRoles.length === 0 && (
-                          <tr className="empty-row">
-                            <td colSpan={3}>No roles</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                <div className="admin-card">
-                  <div className="admin-section-title">
-                    <span className="section-icon audit">A</span>
-                    Audit Log
-                  </div>
-                  <div className="table-wrap">
-                    <table className="admin-table">
-                      <thead>
-                        <tr>
-                          <th>Time</th>
-                          <th>Actor</th>
-                          <th>Action</th>
-                          <th>Target</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {auditRows.map((row) => (
-                          <tr key={row.id}>
-                            <td style={{ whiteSpace: 'nowrap' }}>{formatDateTime(row.created_at)}</td>
-                            <td>{row.actor_email || row.actor_principal || <span style={{ color: 'var(--muted)', fontStyle: 'italic' }}>system</span>}</td>
-                            <td><span className="audit-action">{row.action}</span></td>
-                            <td><span className="audit-target">{row.target_type || '-'}:{row.target_id || '-'}</span></td>
-                          </tr>
-                        ))}
-                        {auditRows.length === 0 && (
-                          <tr className="empty-row">
-                            <td colSpan={4}>No audit records</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
+          <AdminPage
+            adminToast={adminToast}
+            adminError={adminError}
+            adminLoading={adminLoading}
+            adminUsers={adminUsers}
+            adminRoles={adminRoles}
+            adminMappings={adminMappings}
+            adminInvites={adminInvites}
+            auditRows={auditRows}
+            syntheticIngestControl={syntheticIngestControl}
+            syntheticControlLoading={syntheticControlLoading}
+            onboardingChecklist={onboardingChecklist}
+            onboardingDoneCount={onboardingDoneCount}
+            inviteEmail={inviteEmail}
+            setInviteEmail={setInviteEmail}
+            inviteAuthMode={inviteAuthMode}
+            setInviteAuthMode={setInviteAuthMode}
+            inviteRoleIds={inviteRoleIds}
+            setInviteRoleIds={setInviteRoleIds}
+            inviteTokenPreview={inviteTokenPreview}
+            newRoleId={newRoleId}
+            setNewRoleId={setNewRoleId}
+            newRoleName={newRoleName}
+            setNewRoleName={setNewRoleName}
+            newRolePermissions={newRolePermissions}
+            setNewRolePermissions={setNewRolePermissions}
+            newRoleScope={newRoleScope}
+            setNewRoleScope={setNewRoleScope}
+            newMappingGroup={newMappingGroup}
+            setNewMappingGroup={setNewMappingGroup}
+            newMappingRoleId={newMappingRoleId}
+            setNewMappingRoleId={setNewMappingRoleId}
+            setSyntheticIngestEnabled={setSyntheticIngestEnabled}
+            runSyntheticIngestNow={runSyntheticIngestNow}
+            createInvite={createInvite}
+            resendInvite={resendInvite}
+            revokeInvite={revokeInvite}
+            updateUserEnabled={updateUserEnabled}
+            updateUserRoles={updateUserRoles}
+            createRole={createRole}
+            createMapping={createMapping}
+          />
         )}
 
-        {view === 'scheduled' && (
-          <div className="saved-view">
-            {scheduledError && <div className="error-banner">{scheduledError}</div>}
-
-            <div className="saved-list card">
-              <div className="scheduled-header">
-                <h3>Scheduled Searches</h3>
-                <button onClick={() => setShowScheduleForm(f => !f)}>{showScheduleForm ? 'Cancel' : '+ New'}</button>
-              </div>
-
-              {showScheduleForm && (
-                <div className="card scheduled-form-card">
-                  <input type="text" value={scheduleFormName} onChange={e => setScheduleFormName(e.target.value)} placeholder="Search name" />
-                  <input type="text" value={scheduleFormPpl} onChange={e => setScheduleFormPpl(e.target.value)} placeholder="PPL query (e.g. search * | where level=&quot;error&quot; | stats count() by service)" />
-                  <div className="scheduled-form-row">
-                    <input type="text" value={scheduleFormCron} onChange={e => setScheduleFormCron(e.target.value)} placeholder="Cron (0 * * * *)" className="scheduled-form-cron" />
-                    <input type="number" value={scheduleFormWindow} onChange={e => setScheduleFormWindow(Number(e.target.value) || 60)} placeholder="Window (min)" className="scheduled-form-window" />
-                  </div>
-                  <button onClick={() => void createScheduledSearch()}>Create Scheduled Search</button>
-                </div>
-              )}
-
-              {scheduledLoading && <p className="empty-card">Loading...</p>}
-
-              {!scheduledLoading && scheduledSearches.length === 0 && <p className="empty-card">No scheduled searches yet.</p>}
-
-              {scheduledSearches.map(ss => (
-                <div key={ss.id} className="saved-row scheduled-row">
-                  <div className="scheduled-row-top">
-                    <div className="scheduled-row-main">
-                      <div className="saved-name">
-                        {ss.name}
-                        <span className={`status-badge ${ss.enabled ? 'active' : 'disabled'}`}>
-                          {ss.enabled ? 'Enabled' : 'Disabled'}
-                        </span>
-                        <span className="scheduled-meta-inline">
-                          {ss.schedule_cron} · {ss.time_window_minutes}m window
-                        </span>
-                      </div>
-                      <div className="saved-query">{ss.ppl}</div>
-                    </div>
-                    <div className="saved-actions">
-                      <button
-                        className="secondary"
-                        disabled={scheduledRunTriggering[ss.id]}
-                        onClick={() => void runScheduledSearch(ss.id)}
-                      >
-                        {scheduledRunTriggering[ss.id] ? 'Running...' : 'Run Now'}
-                      </button>
-                      <button className="secondary" onClick={() => { void toggleScheduledSearch(ss.id, !ss.enabled); }}>
-                        {ss.enabled ? 'Disable' : 'Enable'}
-                      </button>
-                      <button
-                        className="secondary"
-                        onClick={() => {
-                          if (scheduledResults[ss.id]) {
-                            setScheduledResults((prev) => {
-                              const next = { ...prev };
-                              delete next[ss.id];
-                              return next;
-                            });
-                            setScheduledActiveRunBySearch((prev) => {
-                              const next = { ...prev };
-                              delete next[ss.id];
-                              return next;
-                            });
-                            return;
-                          }
-                          void loadScheduledResults(ss.id);
-                        }}
-                      >
-                        {scheduledResults[ss.id] ? 'Hide Runs' : 'Results'}
-                      </button>
-                      <button className="danger" onClick={() => void deleteScheduledSearch(ss.id)}>Delete</button>
-                    </div>
-                  </div>
-
-                  {scheduledResults[ss.id] && (
-                    <div className="scheduled-runs">
-                      <div className="scheduled-runs-header">
-                        <strong>Recent runs</strong>
-                        <span>{scheduledResults[ss.id].slice(0, 5).length} shown</span>
-                      </div>
-                      {scheduledResults[ss.id].length === 0 && <span className="scheduled-runs-empty">No runs yet</span>}
-                      <div className="scheduled-run-list">
-                        {scheduledResults[ss.id].slice(0, 5).map((r) => (
-                          <div key={r.id} className="scheduled-run-card">
-                            <div className="scheduled-run-row">
-                              <span className="scheduled-run-time">{formatDateTime(r.run_at)}</span>
-                              <span className={`scheduled-run-status status-${r.status === 'success' ? 'success' : 'error'}`}>
-                                {r.status}
-                              </span>
-                              <span className="scheduled-run-count">{r.result_count} results</span>
-                              <span className="scheduled-run-summary-text">
-                                {r.summary?.headline || (r.error_message || 'Run completed')}
-                              </span>
-                            </div>
-                            <div className="scheduled-run-subrow">
-                              <span>{formatDateTime(r.time_from)} to {formatDateTime(r.time_to)}</span>
-                              <span>{r.trigger_type || 'schedule'}</span>
-                              {r.requested_by && <span>{r.requested_by}</span>}
-                            </div>
-                            {r.error_message && <span className="scheduled-run-error">{r.error_message}</span>}
-                            <div className="scheduled-run-actions">
-                              <button
-                                className="secondary"
-                                disabled={scheduledRunLoading[r.id]}
-                                onClick={() => {
-                                  void Promise.all([
-                                    loadScheduledRunDetail(ss.id, r.id),
-                                    loadScheduledRunResults(ss.id, r.id)
-                                  ]);
-                                }}
-                              >
-                                {scheduledRunLoading[r.id] ? 'Loading...' : 'View Run'}
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-
-                      {scheduledActiveRunBySearch[ss.id] && scheduledRunDetails[scheduledActiveRunBySearch[ss.id]] && (
-                        <div className="scheduled-run-detail">
-                          {(() => {
-                            const activeRunId = scheduledActiveRunBySearch[ss.id];
-                            const detail = scheduledRunDetails[activeRunId];
-                            const runPayload = scheduledRunResults[activeRunId];
-                            const rows = runPayload?.results || detail.preview || [];
-                            const columnKeys = rows.length > 0 ? Object.keys(rows[0]).slice(0, 6) : [];
-                            return (
-                              <>
-                                <div className="scheduled-run-detail-header">
-                                  <div>
-                                    <strong>{detail.summary?.headline || 'Run detail'}</strong>
-                                    <div className="scheduled-run-subrow">
-                                      <span>{formatDateTime(detail.run_at)}</span>
-                                      <span>{detail.status}</span>
-                                      <span>{detail.result_count} results</span>
-                                    </div>
-                                  </div>
-                                  {detail.artifact && (
-                                    <span className="scheduled-run-artifact-meta">
-                                      Artifact expires {formatDateTime(detail.artifact.expires_at)}
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="scheduled-run-subrow">
-                                  <span>Window: {formatDateTime(detail.time_from)} to {formatDateTime(detail.time_to)}</span>
-                                  {runPayload?.partial && <span>Preview only</span>}
-                                  {detail.query_request?.time && <span>On-demand result view ready</span>}
-                                </div>
-                                {detail.error_message && <div className="scheduled-run-error">{detail.error_message}</div>}
-                                {rows.length === 0 ? (
-                                  <p className="scheduled-runs-empty">No rows captured for this run.</p>
-                                ) : (
-                                  <div className="scheduled-run-preview">
-                                    <table>
-                                      <thead>
-                                        <tr>
-                                          {columnKeys.map((key) => (
-                                            <th key={key}>{key}</th>
-                                          ))}
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {rows.slice(0, 10).map((row, rowIndex) => (
-                                          <tr key={`${activeRunId}-${rowIndex}`}>
-                                            {columnKeys.map((key) => (
-                                              <td key={`${activeRunId}-${rowIndex}-${key}`}>{String(row[key] ?? '')}</td>
-                                            ))}
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                )}
-                              </>
-                            );
-                          })()}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
+                {view === 'scheduled' && (
+          <ScheduledPage
+            scheduledError={scheduledError}
+            scheduledLoading={scheduledLoading}
+            scheduledSearches={scheduledSearches}
+            scheduledResults={scheduledResults}
+            scheduledRunDetails={scheduledRunDetails}
+            scheduledRunResults={scheduledRunResults}
+            scheduledActiveRunBySearch={scheduledActiveRunBySearch}
+            scheduledRunLoading={scheduledRunLoading}
+            scheduledRunTriggering={scheduledRunTriggering}
+            showScheduleForm={showScheduleForm}
+            setShowScheduleForm={setShowScheduleForm}
+            scheduleFormName={scheduleFormName}
+            setScheduleFormName={setScheduleFormName}
+            scheduleFormPpl={scheduleFormPpl}
+            setScheduleFormPpl={setScheduleFormPpl}
+            scheduleFormCron={scheduleFormCron}
+            setScheduleFormCron={setScheduleFormCron}
+            scheduleFormWindow={scheduleFormWindow}
+            setScheduleFormWindow={setScheduleFormWindow}
+            createScheduledSearch={createScheduledSearch}
+            deleteScheduledSearch={deleteScheduledSearch}
+            toggleScheduledSearch={toggleScheduledSearch}
+            loadScheduledResults={loadScheduledResults}
+            loadScheduledRunDetail={loadScheduledRunDetail}
+            loadScheduledRunResults={loadScheduledRunResults}
+            runScheduledSearch={runScheduledSearch}
+            setScheduledResults={setScheduledResults}
+            setScheduledActiveRunBySearch={setScheduledActiveRunBySearch}
+          />
         )}
 
-        {view === 'saved' && (
-          <div className="saved-view">
-            {savedError && <div className="error-banner">{savedError}</div>}
-            {savedLoading && <div className="empty-state"><p>Loading saved searches...</p></div>}
-
-            {!savedLoading && (
-              <div className="saved-list card">
-                <h3>Saved Searches</h3>
-                {savedSearches.length === 0 && <p className="empty-card">No saved searches yet.</p>}
-
-                {savedSearches.map((saved) => (
-                  <div key={saved.id} className="saved-row">
-                    <div>
-                      <div className="saved-name">{saved.name}</div>
-                      <div className="saved-query">{saved.query}</div>
-                    </div>
-                    <div className="saved-actions">
-                      <button className="secondary" onClick={() => applySavedSearch(saved)}>Apply</button>
-                      <button className="danger" onClick={() => void deleteSavedSearch(saved.id)}>Delete</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+                {view === 'saved' && (
+          <SavedPage
+            savedError={savedError}
+            savedLoading={savedLoading}
+            savedSearches={savedSearches}
+            applySavedSearch={applySavedSearch}
+            deleteSavedSearch={deleteSavedSearch}
+          />
         )}
       </main>
 
@@ -5409,7 +2993,7 @@ function App() {
           <div className="drawer" onClick={(event) => event.stopPropagation()}>
             <div className="drawer-header">
               <h3>Event Inspector</h3>
-              <button onClick={() => setSelectedEvent(null)}>x</button>
+              <button onClick={() => setSelectedEvent(null)} aria-label="Close event inspector">x</button>
             </div>
 
             <div className="drawer-content">
@@ -5457,21 +3041,22 @@ function App() {
               </div>
 
               <div className="pivot-row">
-                <button onClick={() => runPivot(`index=${selectedEvent.index || 'default'}`)}>Pivot Index</button>
-                {selectedEvent.trace_id && <button onClick={() => runPivot(`trace_id=${selectedEvent.trace_id}`)}>Pivot Trace</button>}
+                <button onClick={() => runPivot(`index=${selectedEvent.index || 'default'}`)} aria-label="Pivot by index">Pivot Index</button>
+                {selectedEvent.trace_id && <button onClick={() => runPivot(`trace_id=${selectedEvent.trace_id}`)} aria-label="Pivot by trace_id">Pivot Trace</button>}
                 {selectedEvent.trace_id && <button onClick={() => openTraceContextFromEvent(selectedEvent)}>Trace Context</button>}
-                {selectedEvent.span_id && <button onClick={() => runPivot(`span_id=${selectedEvent.span_id}`)}>Pivot Span</button>}
-                {selectedEvent.parent_span_id && <button onClick={() => runPivot(`parent_span_id=${selectedEvent.parent_span_id}`)}>Pivot Parent Span</button>}
-                {selectedEvent.request_id && <button onClick={() => runPivot(`request_id=${selectedEvent.request_id}`)}>Pivot Request</button>}
-                {selectedEvent.user_id && <button onClick={() => runPivot(`user_id=${selectedEvent.user_id}`)}>Pivot User</button>}
-                {selectedEvent.src_ip && <button onClick={() => runPivot(`src_ip=${selectedEvent.src_ip}`)}>Pivot IP</button>}
-                {selectedEvent.msg_hash && <button onClick={() => runPivot(`msg_hash=${selectedEvent.msg_hash}`)}>Pivot MsgHash</button>}
+                {selectedEvent.span_id && <button onClick={() => runPivot(`span_id=${selectedEvent.span_id}`)} aria-label="Pivot by span_id">Pivot Span</button>}
+                {selectedEvent.parent_span_id && <button onClick={() => runPivot(`parent_span_id=${selectedEvent.parent_span_id}`)} aria-label="Pivot by parent_span_id">Pivot Parent Span</button>}
+                {selectedEvent.request_id && <button onClick={() => runPivot(`request_id=${selectedEvent.request_id}`)} aria-label="Pivot by request_id">Pivot Request</button>}
+                {selectedEvent.user_id && <button onClick={() => runPivot(`user_id=${selectedEvent.user_id}`)} aria-label="Pivot by user_id">Pivot User</button>}
+                {selectedEvent.src_ip && <button onClick={() => runPivot(`src_ip=${selectedEvent.src_ip}`)} aria-label="Pivot by src_ip">Pivot IP</button>}
+                {selectedEvent.msg_hash && <button onClick={() => runPivot(`msg_hash=${selectedEvent.msg_hash}`)} aria-label="Pivot by msg_hash">Pivot MsgHash</button>}
               </div>
             </div>
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </ErrorBoundary>
   );
 }
 

@@ -18,7 +18,18 @@ const TIME_PRESETS = [
 ] as const;
 
 const FRONTEND_WIDGET_CACHE_TTL_MS = 60_000;
+const MAX_DASHBOARD_WIDGET_CACHE_SIZE = 200;
 const dashboardWidgetResultCache = new Map<string, { expiresAt: number; rows: DashboardRow[] }>();
+
+function evictOldest<V>(map: Map<string, V>, maxSize: number): void {
+  if (map.size <= maxSize) return;
+  const toDelete = map.size - maxSize;
+  const iter = map.keys();
+  for (let i = 0; i < toDelete; i++) {
+    const next = iter.next();
+    if (!next.done) map.delete(next.value);
+  }
+}
 
 function buildFrontendWidgetCacheKey(dashboardId: string, widget: DashboardWidget, minutes: number): string {
   return `${dashboardId}|${widget.id}|${minutes}|${widget.query_text.trim().toLowerCase().replace(/\s+/g, ' ')}`;
@@ -196,7 +207,9 @@ export function DashboardPage({
         }
         const rows = result.response?.results || [];
         setWidgetData((prev) => ({ ...prev, [widget.id]: rows }));
-        dashboardWidgetResultCache.set(buildFrontendWidgetCacheKey(dashboardId, widget, effectiveMinutes), {
+        const cacheKey = buildFrontendWidgetCacheKey(dashboardId, widget, effectiveMinutes);
+        evictOldest(dashboardWidgetResultCache, MAX_DASHBOARD_WIDGET_CACHE_SIZE);
+        dashboardWidgetResultCache.set(cacheKey, {
           expiresAt: Date.now() + FRONTEND_WIDGET_CACHE_TTL_MS,
           rows
         });
@@ -216,6 +229,73 @@ export function DashboardPage({
       });
     }
   }, [apiFetch, dashboardMinutes, selectedDashboardId, widgets]);
+
+  const refreshSingleWidget = useCallback(async (widget: DashboardWidget) => {
+    if (widget.widget_type === 'markdown') {
+      setWidgetData((prev) => ({ ...prev, [widget.id]: [] }));
+      setWidgetErrors((prev) => ({ ...prev, [widget.id]: null }));
+      setWidgetLoading((prev) => ({ ...prev, [widget.id]: false }));
+      return;
+    }
+    if (!widget.query_text.trim()) {
+      setWidgetErrors((prev) => ({ ...prev, [widget.id]: 'Widget query is empty.' }));
+      setWidgetLoading((prev) => ({ ...prev, [widget.id]: false }));
+      return;
+    }
+    const effectiveMinutes = dashboardMinutes;
+    const now = new Date();
+    const from = new Date(now.getTime() - effectiveMinutes * 60 * 1000).toISOString();
+    const to = now.toISOString();
+    const dashboardId = selectedDashboardId || '_';
+    const cacheKey = buildFrontendWidgetCacheKey(dashboardId, widget, effectiveMinutes);
+    const cached = dashboardWidgetResultCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      setWidgetData((prev) => ({ ...prev, [widget.id]: cached.rows }));
+      setWidgetErrors((prev) => ({ ...prev, [widget.id]: null }));
+      setWidgetLoading((prev) => ({ ...prev, [widget.id]: false }));
+      return;
+    }
+
+    setWidgetLoading((prev) => ({ ...prev, [widget.id]: true }));
+    setWidgetErrors((prev) => ({ ...prev, [widget.id]: null }));
+
+    try {
+      const response = await apiFetch('/dashboards/widgets/query-batch', {
+        method: 'POST',
+        body: JSON.stringify({
+          time: { from, to },
+          widgets: [{ widget_id: widget.id, ppl: widget.query_text, limit: 500 }]
+        })
+      });
+      const body = await response.json() as {
+        widgets?: Record<string, { response?: { results?: DashboardRow[]; error?: string }; error?: string }>;
+        error?: string;
+      };
+      if (!response.ok || body.error) {
+        throw new Error(body.error || 'Widget batch query failed');
+      }
+      const result = (body.widgets || {})[widget.id];
+      if (!result) {
+        setWidgetErrors((prev) => ({ ...prev, [widget.id]: 'Widget result missing.' }));
+        return;
+      }
+      if (result.error || result.response?.error) {
+        setWidgetErrors((prev) => ({ ...prev, [widget.id]: String(result.error || result.response?.error || 'Widget query failed') }));
+        return;
+      }
+      const rows = result.response?.results || [];
+      setWidgetData((prev) => ({ ...prev, [widget.id]: rows }));
+      evictOldest(dashboardWidgetResultCache, MAX_DASHBOARD_WIDGET_CACHE_SIZE);
+      dashboardWidgetResultCache.set(cacheKey, {
+        expiresAt: Date.now() + FRONTEND_WIDGET_CACHE_TTL_MS,
+        rows
+      });
+    } catch (requestError) {
+      setWidgetErrors((prev) => ({ ...prev, [widget.id]: String(requestError) }));
+    } finally {
+      setWidgetLoading((prev) => ({ ...prev, [widget.id]: false }));
+    }
+  }, [apiFetch, dashboardMinutes, selectedDashboardId]);
 
   const saveLayout = useCallback(async () => {
     if (!selectedDashboardId) return;
@@ -401,6 +481,7 @@ export function DashboardPage({
             className="dashboard-toolbar-select"
             value={selectedDashboardId || ''}
             onChange={(event) => setSelectedDashboardId(event.target.value)}
+            aria-label="Select dashboard"
           >
             {dashboards.map((dashboard) => (
               <option key={dashboard.id} value={dashboard.id}>{dashboard.name}</option>
@@ -416,22 +497,23 @@ export function DashboardPage({
                   setDashboardMinutes(preset.value);
                   void refreshAll(preset.value);
                 }}
+                aria-label={`Time range ${preset.label}`}
               >
                 {preset.label}
               </button>
             ))}
           </div>
-          <button type="button" className="secondary" onClick={() => void refreshAll()}>
+          <button type="button" className="secondary" onClick={() => void refreshAll()} aria-label="Refresh all widgets">
             Refresh All
           </button>
-          <label className="dashboard-edit-toggle">
+          <label className="dashboard-edit-toggle" aria-label="Toggle edit mode">
             <input type="checkbox" checked={editMode} onChange={(event) => setEditMode(event.target.checked)} />
             <span>Edit</span>
           </label>
           {editMode && (
             <>
-              <button type="button" className="secondary" onClick={openCreateDrawer}>Add Widget</button>
-              <button type="button" className="secondary" disabled={saving} onClick={() => void saveLayout()}>
+              <button type="button" className="secondary" onClick={openCreateDrawer} aria-label="Add new widget">Add Widget</button>
+              <button type="button" className="secondary" disabled={saving} onClick={() => void saveLayout()} aria-label="Save dashboard layout">
                 {saving ? 'Saving...' : 'Save Layout'}
               </button>
             </>
@@ -454,7 +536,7 @@ export function DashboardPage({
           widgetErrors={widgetErrors}
           onRefreshWidget={(widgetId) => {
             const widget = widgets.find((item) => item.id === widgetId);
-            if (widget) void runWidget(widget);
+            if (widget) void refreshSingleWidget(widget);
           }}
           onEditWidget={openEditDrawer}
           onDuplicateWidget={(widgetId) => void duplicateWidget(widgetId)}

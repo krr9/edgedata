@@ -1480,6 +1480,26 @@ button.danger {
   color: #8b1f26;
 }
 
+.error-boundary-fallback {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  padding: 24px;
+  text-align: center;
+}
+
+.error-boundary-fallback h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.error-boundary-fallback p {
+  margin: 0 0 16px;
+  color: var(--muted);
+}
+
 .guardrail-banner {
   border: 1px solid #b8d2f2;
   border-radius: 9px;

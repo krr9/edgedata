@@ -5,6 +5,7 @@ import { GridComponent, LegendComponent, TitleComponent, TooltipComponent } from
 import { CanvasRenderer } from 'echarts/renderers';
 import type { EChartsOption } from 'echarts';
 import ReactMarkdown from 'react-markdown';
+import rehypeSanitize from 'rehype-sanitize';
 import type { DashboardRow, DashboardWidget, WidgetType } from './types';
 
 echarts.use([
@@ -205,7 +206,7 @@ export function WidgetRenderer({
   if (widgetType === 'markdown') {
     return (
       <div className="widget-markdown">
-        {markdown ? <ReactMarkdown>{markdown}</ReactMarkdown> : <div className="widget-empty">Add markdown content.</div>}
+        {markdown ? <ReactMarkdown rehypePlugins={[rehypeSanitize]}>{markdown}</ReactMarkdown> : <div className="widget-empty">Add markdown content.</div>}
       </div>
     );
   }

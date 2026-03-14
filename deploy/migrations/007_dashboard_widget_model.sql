@@ -1,4 +1,5 @@
 -- 007: Dashboard widget model evolution (schema-backed widgets + layout)
+-- NOTE: Not idempotent. Do not re-run on databases where these columns already exist.
 
 ALTER TABLE dashboard_panels ADD COLUMN widget_type TEXT NOT NULL DEFAULT 'table';
 ALTER TABLE dashboard_panels ADD COLUMN query_text TEXT NOT NULL DEFAULT '';

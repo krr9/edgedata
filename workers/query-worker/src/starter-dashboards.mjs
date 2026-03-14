@@ -1,4 +1,12 @@
 export const STARTER_DASHBOARDS_VERSION = 'v1';
+const STARTER_DASHBOARD_POLICY = {
+  execution_mode: 'cached',
+  cache_ttl_seconds: 300,
+  materialize_enabled: 1,
+  materialize_interval_seconds: 300,
+  max_staleness_seconds: 900,
+  priority: 10
+};
 
 const DEFAULT_SERVICE_HEALTH_SCOPE = {
   index: 'otel-demo',
@@ -92,20 +100,28 @@ async function upgradeScopedServiceHealthDashboard(db, now) {
 
   await db.prepare(
     `UPDATE dashboards
-     SET name = ?, description = ?, updated_at = ?
+     SET name = ?, description = ?, default_execution_mode = ?, updated_at = ?
      WHERE id = ?`
-  ).bind(SERVICE_HEALTH.name, SERVICE_HEALTH.description || '', now, dashboard.id).run();
+  ).bind(SERVICE_HEALTH.name, SERVICE_HEALTH.description || '', STARTER_DASHBOARD_POLICY.execution_mode, now, dashboard.id).run();
 
   for (const panel of SCOPED_SERVICE_HEALTH_PANELS) {
     await db.prepare(
       `UPDATE dashboard_panels
-       SET ppl = ?, viz_type = ?, time_window_minutes = ?, position = ?, updated_at = ?
+       SET ppl = ?, viz_type = ?, time_window_minutes = ?, position = ?,
+           execution_mode = ?, cache_ttl_seconds = ?, materialize_enabled = ?,
+           materialize_interval_seconds = ?, max_staleness_seconds = ?, priority = ?, updated_at = ?
        WHERE dashboard_id = ? AND title = ?`
     ).bind(
       panel.ppl,
       panel.viz_type,
       panel.time_window_minutes,
       panel.position,
+      STARTER_DASHBOARD_POLICY.execution_mode,
+      STARTER_DASHBOARD_POLICY.cache_ttl_seconds,
+      STARTER_DASHBOARD_POLICY.materialize_enabled,
+      STARTER_DASHBOARD_POLICY.materialize_interval_seconds,
+      STARTER_DASHBOARD_POLICY.max_staleness_seconds,
+      STARTER_DASHBOARD_POLICY.priority,
       now,
       dashboard.id,
       panel.title
@@ -115,9 +131,54 @@ async function upgradeScopedServiceHealthDashboard(db, now) {
   return true;
 }
 
+async function applyStarterDashboardPolicy(db, dashId, panels, now) {
+  await db.prepare(
+    `UPDATE dashboards
+     SET default_execution_mode = ?, updated_at = ?
+     WHERE id = ?`
+  ).bind(STARTER_DASHBOARD_POLICY.execution_mode, now, dashId).run();
+
+  for (const panel of panels) {
+    await db.prepare(
+      `UPDATE dashboard_panels
+       SET execution_mode = ?, cache_ttl_seconds = ?, materialize_enabled = ?,
+           materialize_interval_seconds = ?, max_staleness_seconds = ?, priority = ?, updated_at = ?
+       WHERE dashboard_id = ? AND title = ?`
+    ).bind(
+      STARTER_DASHBOARD_POLICY.execution_mode,
+      STARTER_DASHBOARD_POLICY.cache_ttl_seconds,
+      STARTER_DASHBOARD_POLICY.materialize_enabled,
+      STARTER_DASHBOARD_POLICY.materialize_interval_seconds,
+      STARTER_DASHBOARD_POLICY.max_staleness_seconds,
+      STARTER_DASHBOARD_POLICY.priority,
+      now,
+      dashId,
+      panel.title
+    ).run();
+  }
+}
+
+async function upgradeStarterDashboardPolicies(db, now) {
+  for (const dash of getStarterDashboards()) {
+    const existing = await db.prepare(
+      `SELECT id
+       FROM dashboards
+       WHERE is_default = 1
+         AND created_by = 'system'
+         AND name = ?
+       ORDER BY updated_at DESC
+       LIMIT 1`
+    ).bind(dash.name).first();
+
+    if (!existing?.id) continue;
+    await applyStarterDashboardPolicy(db, existing.id, dash.panels, now);
+  }
+}
+
 export async function seedStarterDashboards(db) {
   const now = new Date().toISOString();
   const upgradedServiceHealth = await upgradeScopedServiceHealthDashboard(db, now);
+  await upgradeStarterDashboardPolicies(db, now);
   const existing = await db.prepare(
     "SELECT COUNT(*) as cnt FROM dashboards WHERE is_default = 1"
   ).first();
@@ -128,16 +189,36 @@ export async function seedStarterDashboards(db) {
   for (const dash of dashboards) {
     const dashId = crypto.randomUUID();
     await db.prepare(
-      `INSERT INTO dashboards (id, name, description, layout_json, is_default, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, '[]', 1, 'system', ?, ?)`
-    ).bind(dashId, dash.name, dash.description || '', now, now).run();
+      `INSERT INTO dashboards (id, name, description, layout_json, is_default, performance_profile, default_execution_mode, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, '[]', 1, 'economy', ?, 'system', ?, ?)`
+    ).bind(dashId, dash.name, dash.description || '', STARTER_DASHBOARD_POLICY.execution_mode, now, now).run();
 
     for (const panel of dash.panels) {
       const panelId = crypto.randomUUID();
       await db.prepare(
-        `INSERT INTO dashboard_panels (id, dashboard_id, title, ppl, viz_type, time_window_minutes, refresh_seconds, options_json, position, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, '{}', ?, ?, ?)`
-      ).bind(panelId, dashId, panel.title, panel.ppl, panel.viz_type, panel.time_window_minutes, panel.position, now, now).run();
+        `INSERT INTO dashboard_panels (
+          id, dashboard_id, title, ppl, viz_type, time_window_minutes, refresh_seconds,
+          execution_mode, cache_ttl_seconds, materialize_enabled, materialize_interval_seconds,
+          max_staleness_seconds, priority, options_json, position, created_at, updated_at
+        )
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?)`
+      ).bind(
+        panelId,
+        dashId,
+        panel.title,
+        panel.ppl,
+        panel.viz_type,
+        panel.time_window_minutes,
+        STARTER_DASHBOARD_POLICY.execution_mode,
+        STARTER_DASHBOARD_POLICY.cache_ttl_seconds,
+        STARTER_DASHBOARD_POLICY.materialize_enabled,
+        STARTER_DASHBOARD_POLICY.materialize_interval_seconds,
+        STARTER_DASHBOARD_POLICY.max_staleness_seconds,
+        STARTER_DASHBOARD_POLICY.priority,
+        panel.position,
+        now,
+        now
+      ).run();
     }
   }
 

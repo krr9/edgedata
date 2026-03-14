@@ -21,7 +21,9 @@ import type {
 } from './types.js';
 import { MAX_SUMMARY_EVENTS, PPL_MAX_LIMIT } from './types.js';
 import { jsonResponse } from './helpers.js';
-import { DEFAULT_EXECUTION_POLICY } from './helpers.js';
+import {
+  DEFAULT_DASHBOARD_EXECUTION_POLICY
+} from './helpers.js';
 import { asPositiveInt, clampLimit } from './helpers.js';
 import {
   buildSearchContext,
@@ -85,12 +87,12 @@ export function normalizeExecutionPolicyRow(row: {
   priority?: number | null;
 }): ExecutionPolicy {
   return {
-    execution_mode: normalizeExecutionMode(row.execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode) as import('./types.js').ExecutionMode,
-    cache_ttl_seconds: normalizeCacheTtlSeconds(row.cache_ttl_seconds, DEFAULT_EXECUTION_POLICY.cache_ttl_seconds),
-    materialize_enabled: normalizeBooleanFlag(row.materialize_enabled, DEFAULT_EXECUTION_POLICY.materialize_enabled),
-    materialize_interval_seconds: normalizeMaterializeIntervalSeconds(row.materialize_interval_seconds, DEFAULT_EXECUTION_POLICY.materialize_interval_seconds),
-    max_staleness_seconds: normalizeMaxStalenessSeconds(row.max_staleness_seconds, DEFAULT_EXECUTION_POLICY.max_staleness_seconds),
-    priority: Number.isFinite(Number(row.priority)) ? Math.max(0, Math.trunc(Number(row.priority))) : DEFAULT_EXECUTION_POLICY.priority
+    execution_mode: normalizeExecutionMode(row.execution_mode, DEFAULT_DASHBOARD_EXECUTION_POLICY.execution_mode) as import('./types.js').ExecutionMode,
+    cache_ttl_seconds: normalizeCacheTtlSeconds(row.cache_ttl_seconds, DEFAULT_DASHBOARD_EXECUTION_POLICY.cache_ttl_seconds),
+    materialize_enabled: normalizeBooleanFlag(row.materialize_enabled, DEFAULT_DASHBOARD_EXECUTION_POLICY.materialize_enabled),
+    materialize_interval_seconds: normalizeMaterializeIntervalSeconds(row.materialize_interval_seconds, DEFAULT_DASHBOARD_EXECUTION_POLICY.materialize_interval_seconds),
+    max_staleness_seconds: normalizeMaxStalenessSeconds(row.max_staleness_seconds, DEFAULT_DASHBOARD_EXECUTION_POLICY.max_staleness_seconds),
+    priority: Number.isFinite(Number(row.priority)) ? Math.max(0, Math.trunc(Number(row.priority))) : DEFAULT_DASHBOARD_EXECUTION_POLICY.priority
   };
 }
 
@@ -521,8 +523,8 @@ export async function handleDashboardWidgetQuery(
   }
   const widgetId = body.widget_id ? String(body.widget_id) : null;
   const policy = widgetId
-    ? (await loadDashboardPanelPolicies(env, [widgetId])).get(widgetId) || DEFAULT_EXECUTION_POLICY
-    : DEFAULT_EXECUTION_POLICY;
+    ? (await loadDashboardPanelPolicies(env, [widgetId])).get(widgetId) || DEFAULT_DASHBOARD_EXECUTION_POLICY
+    : DEFAULT_DASHBOARD_EXECUTION_POLICY;
   const cacheKey = buildDashboardWidgetCacheKey(req, auth.scope, widgetId);
   const cacheKeyHash = hashCacheKey(cacheKey);
   const toMs = Date.parse(req.time.to);
@@ -637,7 +639,7 @@ export async function handleDashboardWidgetBatchQuery(
       limit: Math.max(1, Math.min(2000, Number(widget.limit) || 500)),
       cursor: null
     };
-    const policy = policyByWidgetId.get(widgetId) || DEFAULT_EXECUTION_POLICY;
+    const policy = policyByWidgetId.get(widgetId) || DEFAULT_DASHBOARD_EXECUTION_POLICY;
     const cacheKey = buildDashboardWidgetCacheKey(req, auth.scope, widgetId);
     const materialized = await readMaterializedWidgetResult(env, req, auth.scope, widgetId, policy);
     if (materialized) {
@@ -680,7 +682,7 @@ export async function handleDashboardWidgetBatchQuery(
       payloads[widgetId] = result;
       if (result.response) {
         const req = group.find((item) => item.widgetId === widgetId)?.request;
-        const policy = policyByWidgetId.get(widgetId) || DEFAULT_EXECUTION_POLICY;
+        const policy = policyByWidgetId.get(widgetId) || DEFAULT_DASHBOARD_EXECUTION_POLICY;
         if (req) {
           const cacheKey = buildDashboardWidgetCacheKey(req, auth.scope, widgetId);
           result.response.source = result.response.source || 'live';

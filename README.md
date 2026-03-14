@@ -62,9 +62,15 @@ Run workers/pages locally:
 npm run dev:ingest
 npm run dev:query
 npm run dev:alert
+npm run dev:materialize
 npm run dev:synthetic
 npm run dev:pages
 ```
+
+Dashboard performance note:
+
+- Starter dashboards now default to cached execution and opt into materialization when `materialize-worker` is deployed.
+- On the free tier, keep dashboards on cached/materialized modes and reserve live deep-search for drilldown and investigations.
 
 Build Pages:
 

@@ -36,6 +36,14 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   max_staleness_seconds: 600,
   priority: 0
 };
+export const DEFAULT_DASHBOARD_EXECUTION_POLICY: ExecutionPolicy = {
+  execution_mode: 'cached',
+  cache_ttl_seconds: 300,
+  materialize_enabled: false,
+  materialize_interval_seconds: 300,
+  max_staleness_seconds: 900,
+  priority: 0
+};
 
 // --- Response helpers ---
 

@@ -218,6 +218,19 @@
   color: #ffdca5;
 }
 
+[data-theme='dark'] .billing-notice {
+  background: linear-gradient(180deg, rgba(45, 34, 14, 0.92) 0%, rgba(34, 26, 12, 0.92) 100%);
+  border-color: #6d5531;
+}
+
+[data-theme='dark'] .billing-notice strong {
+  color: #ffe3a6;
+}
+
+[data-theme='dark'] .billing-notice p {
+  color: #f1dcc0;
+}
+
 [data-theme='dark'] .alert-template-hint,
 [data-theme='dark'] .alert-starter-pack,
 [data-theme='dark'] .alert-json-preview {
@@ -2372,6 +2385,40 @@ button.danger {
   margin-left: auto;
 }
 
+.billing-notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid #efcf9a;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fff8ec 0%, #fff3dc 100%);
+}
+
+.billing-notice-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.billing-notice strong {
+  font-size: 13px;
+  color: #8a5e11;
+}
+
+.billing-notice p {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #73501d;
+}
+
+.billing-notice-dismiss {
+  flex-shrink: 0;
+}
+
 .admin-section-title {
   font-size: 13px;
   font-weight: 700;
@@ -3340,6 +3387,14 @@ button.danger {
 
   .admin-span-2 {
     grid-column: auto;
+  }
+
+  .billing-notice {
+    flex-direction: column;
+  }
+
+  .billing-notice-dismiss {
+    align-self: flex-start;
   }
 
   .admin-form-row.cols-2 {

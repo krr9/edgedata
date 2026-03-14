@@ -12,7 +12,7 @@ import {
   normalizeWidgetType,
   mapWidgetTypeToLegacyViz,
   defaultLayoutForPanel,
-  DEFAULT_EXECUTION_POLICY
+  DEFAULT_DASHBOARD_EXECUTION_POLICY
 } from './helpers.js';
 import { assertPermission } from './rbac.js';
 import {
@@ -50,7 +50,7 @@ export async function handleDashboards(
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
     const performanceProfile = normalizePerformanceProfile(body.performance_profile, 'economy');
-    const defaultExecutionMode = normalizeExecutionMode(body.default_execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode);
+    const defaultExecutionMode = normalizeExecutionMode(body.default_execution_mode, DEFAULT_DASHBOARD_EXECUTION_POLICY.execution_mode);
     await env.DB.prepare(
       `INSERT INTO dashboards (id, name, description, layout_json, is_default, performance_profile, default_execution_mode, created_by, created_at, updated_at)
        VALUES (?, ?, ?, '[]', 0, ?, ?, ?, ?, ?)`
@@ -124,15 +124,22 @@ export async function handleDashboards(
       const id = crypto.randomUUID();
       const now = new Date().toISOString();
       const vizType = mapWidgetTypeToLegacyViz(widgetType);
+      const dashboardDefaults = await env.DB.prepare(
+        'SELECT default_execution_mode FROM dashboards WHERE id = ?'
+      ).bind(dashboardId).first<{ default_execution_mode?: string | null }>();
+      const defaultExecutionMode = normalizeExecutionMode(
+        dashboardDefaults?.default_execution_mode,
+        DEFAULT_DASHBOARD_EXECUTION_POLICY.execution_mode
+      );
       const timeWindow = Math.max(1, Math.min(10080, Number(body.time_window_minutes) || 60));
       const refreshSec = Math.max(0, Math.min(3600, Number(body.refresh_seconds) || 0));
       const position = Math.max(0, Number(body.position) || 0);
       const queryMode = String(body.query_mode || 'ppl');
-      const executionMode = normalizeExecutionMode(body.execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode);
-      const cacheTtlSeconds = normalizeCacheTtlSeconds(body.cache_ttl_seconds, DEFAULT_EXECUTION_POLICY.cache_ttl_seconds);
-      const materializeEnabled = normalizeBooleanFlag(body.materialize_enabled, DEFAULT_EXECUTION_POLICY.materialize_enabled) ? 1 : 0;
-      const materializeIntervalSeconds = normalizeMaterializeIntervalSeconds(body.materialize_interval_seconds, DEFAULT_EXECUTION_POLICY.materialize_interval_seconds);
-      const maxStalenessSeconds = normalizeMaxStalenessSeconds(body.max_staleness_seconds, DEFAULT_EXECUTION_POLICY.max_staleness_seconds);
+      const executionMode = normalizeExecutionMode(body.execution_mode, defaultExecutionMode);
+      const cacheTtlSeconds = normalizeCacheTtlSeconds(body.cache_ttl_seconds, DEFAULT_DASHBOARD_EXECUTION_POLICY.cache_ttl_seconds);
+      const materializeEnabled = normalizeBooleanFlag(body.materialize_enabled, DEFAULT_DASHBOARD_EXECUTION_POLICY.materialize_enabled) ? 1 : 0;
+      const materializeIntervalSeconds = normalizeMaterializeIntervalSeconds(body.materialize_interval_seconds, DEFAULT_DASHBOARD_EXECUTION_POLICY.materialize_interval_seconds);
+      const maxStalenessSeconds = normalizeMaxStalenessSeconds(body.max_staleness_seconds, DEFAULT_DASHBOARD_EXECUTION_POLICY.max_staleness_seconds);
       const priority = Math.max(0, Math.min(100, Number(body.priority) || 0));
       const vizConfigJson = normalizeJsonInput(body.viz_config_json ?? body.viz_config ?? body.options_json, '{}');
       const layoutJson = normalizeJsonInput(body.layout_json ?? body.layout, defaultLayoutForPanel(position, widgetType));
@@ -231,23 +238,23 @@ export async function handleDashboards(
       if (body.query_mode !== undefined) { updates.push('query_mode = ?'); values.push(String(body.query_mode || 'ppl')); }
       if (body.execution_mode !== undefined) {
         updates.push('execution_mode = ?');
-        values.push(normalizeExecutionMode(body.execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode));
+        values.push(normalizeExecutionMode(body.execution_mode, DEFAULT_DASHBOARD_EXECUTION_POLICY.execution_mode));
       }
       if (body.cache_ttl_seconds !== undefined) {
         updates.push('cache_ttl_seconds = ?');
-        values.push(normalizeCacheTtlSeconds(body.cache_ttl_seconds, DEFAULT_EXECUTION_POLICY.cache_ttl_seconds));
+        values.push(normalizeCacheTtlSeconds(body.cache_ttl_seconds, DEFAULT_DASHBOARD_EXECUTION_POLICY.cache_ttl_seconds));
       }
       if (body.materialize_enabled !== undefined) {
         updates.push('materialize_enabled = ?');
-        values.push(normalizeBooleanFlag(body.materialize_enabled, DEFAULT_EXECUTION_POLICY.materialize_enabled) ? 1 : 0);
+        values.push(normalizeBooleanFlag(body.materialize_enabled, DEFAULT_DASHBOARD_EXECUTION_POLICY.materialize_enabled) ? 1 : 0);
       }
       if (body.materialize_interval_seconds !== undefined) {
         updates.push('materialize_interval_seconds = ?');
-        values.push(normalizeMaterializeIntervalSeconds(body.materialize_interval_seconds, DEFAULT_EXECUTION_POLICY.materialize_interval_seconds));
+        values.push(normalizeMaterializeIntervalSeconds(body.materialize_interval_seconds, DEFAULT_DASHBOARD_EXECUTION_POLICY.materialize_interval_seconds));
       }
       if (body.max_staleness_seconds !== undefined) {
         updates.push('max_staleness_seconds = ?');
-        values.push(normalizeMaxStalenessSeconds(body.max_staleness_seconds, DEFAULT_EXECUTION_POLICY.max_staleness_seconds));
+        values.push(normalizeMaxStalenessSeconds(body.max_staleness_seconds, DEFAULT_DASHBOARD_EXECUTION_POLICY.max_staleness_seconds));
       }
       if (body.priority !== undefined) {
         updates.push('priority = ?');
@@ -312,7 +319,7 @@ export async function handleDashboards(
     if (body.description !== undefined) { updates.push('description = ?'); values.push(String(body.description)); }
     if (body.layout_json !== undefined) { updates.push('layout_json = ?'); values.push(typeof body.layout_json === 'string' ? body.layout_json : JSON.stringify(body.layout_json)); }
     if (body.performance_profile !== undefined) { updates.push('performance_profile = ?'); values.push(normalizePerformanceProfile(body.performance_profile, 'economy')); }
-    if (body.default_execution_mode !== undefined) { updates.push('default_execution_mode = ?'); values.push(normalizeExecutionMode(body.default_execution_mode, DEFAULT_EXECUTION_POLICY.execution_mode)); }
+    if (body.default_execution_mode !== undefined) { updates.push('default_execution_mode = ?'); values.push(normalizeExecutionMode(body.default_execution_mode, DEFAULT_DASHBOARD_EXECUTION_POLICY.execution_mode)); }
     updates.push('updated_at = ?');
     values.push(now);
     values.push(dashboardId);

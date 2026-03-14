@@ -449,10 +449,6 @@ export function DashboardPage({
 
   useEffect(() => {
     if (!selectedDashboardId) return;
-    const snapshot = snapshotRef.current.get(selectedDashboardId);
-    if (snapshot) {
-      setWidgets(snapshot);
-    }
     void loadWidgets(selectedDashboardId);
   }, [loadWidgets, selectedDashboardId]);
 
@@ -493,10 +489,7 @@ export function DashboardPage({
                 key={preset.value}
                 type="button"
                 className={`secondary ${dashboardMinutes === preset.value ? 'active' : ''}`}
-                onClick={() => {
-                  setDashboardMinutes(preset.value);
-                  void refreshAll(preset.value);
-                }}
+                onClick={() => setDashboardMinutes(preset.value)}
                 aria-label={`Time range ${preset.label}`}
               >
                 {preset.label}

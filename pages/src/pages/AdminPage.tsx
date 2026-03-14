@@ -1,5 +1,8 @@
+import { useEffect, useState } from 'react';
 import type { AdminInviteRow, AdminUserRow, GroupRoleMappingRow, OnboardingChecklistItem, RoleRow, SyntheticIngestControl } from '../types';
 import { formatDateTime, parseStringArray } from '../utils';
+
+const BILLING_NOTICE_DISMISSED_KEY = 'edgedata:billing-notice-dismissed';
 
 export interface AdminPageProps {
   adminToast: string | null;
@@ -86,6 +89,20 @@ export function AdminPage({
   createRole,
   createMapping
 }: AdminPageProps) {
+  const [showBillingNotice, setShowBillingNotice] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    setShowBillingNotice(window.localStorage.getItem(BILLING_NOTICE_DISMISSED_KEY) !== '1');
+  }, []);
+
+  const acknowledgeBillingNotice = () => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(BILLING_NOTICE_DISMISSED_KEY, '1');
+    }
+    setShowBillingNotice(false);
+  };
+
   return (
     <div className="admin-view">
       <div className="admin-header">
@@ -96,6 +113,21 @@ export function AdminPage({
       {adminToast && <div className="success-banner">{adminToast}</div>}
       {adminError && <div className="error-banner">{adminError}</div>}
       {adminLoading && <div className="empty-state"><p>Loading admin data...</p></div>}
+      {showBillingNotice && (
+        <div className="billing-notice" role="note" aria-label="Cloudflare billing acknowledgement">
+          <div className="billing-notice-copy">
+            <strong>Cloudflare billing acknowledgement</strong>
+            <p>
+              EdgeData runs in your Cloudflare account. Using Workers, R2, D1, WAE, Durable Objects, Access,
+              Pages, synthetic ingest, alerts, and dashboard materialization may incur Cloudflare charges. Review
+              your Cloudflare plan and pricing before enabling production workloads.
+            </p>
+          </div>
+          <button type="button" className="secondary billing-notice-dismiss" onClick={acknowledgeBillingNotice}>
+            I understand
+          </button>
+        </div>
+      )}
 
       {!adminLoading && (
         <div className="admin-grid">

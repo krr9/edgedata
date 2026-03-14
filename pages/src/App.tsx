@@ -26,10 +26,13 @@ import {
   QUERY_SUGGESTION_CACHE_TTL_MS,
   QUERY_SUGGESTION_DEBOUNCE_MS,
   STREAM_FLUSH_INTERVAL_MS,
+  THEME_STORAGE_KEY,
   TIME_RANGE_PRESETS
 } from './constants';
 import {
   buildAskAiPlan,
+  buildAlertDeepQuery,
+  buildDefaultAlertDeepLink,
   buildLocalFallbackSuggestions,
   buildTraceContextPplFromEvent,
   extractHighlightTerms,
@@ -41,6 +44,7 @@ import {
   jsonSyntaxHtml,
   maxFacetCount,
   modeLabel,
+  parseAlertNotifyConfig,
   parseErrorPayload,
   parseViewMode,
   prettyJsonOrNull,
@@ -2677,6 +2681,11 @@ function App() {
 
       <main className={`main ${hasScrollableResultsPanel ? 'main-search-scroll-lock' : ''}`}>
         <div className="top-utility-bar">
+          {!navExpanded && (
+            <div className="main-panel-brand" aria-label="EdgeData brand">
+              EdgeData
+            </div>
+          )}
           <div className="theme-toggle-popover">
             <button
               type="button"

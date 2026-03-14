@@ -21,6 +21,23 @@ const FRONTEND_WIDGET_CACHE_TTL_MS = 60_000;
 const MAX_DASHBOARD_WIDGET_CACHE_SIZE = 200;
 const dashboardWidgetResultCache = new Map<string, { expiresAt: number; rows: DashboardRow[] }>();
 
+function resolvePreferredDashboardId(
+  dashboards: DashboardSummary[],
+  current: string | null
+): string | null {
+  if (current) return current;
+  if (dashboards.length === 0) return null;
+
+  const otelDashboard = dashboards.find((dashboard) => {
+    const name = String(dashboard.name || '').toLowerCase();
+    const description = String(dashboard.description || '').toLowerCase();
+    return name.includes('otel') || description.includes('otel');
+  });
+
+  if (otelDashboard) return otelDashboard.id;
+  return dashboards[0].id;
+}
+
 function resolveDashboardDefaultMinutes(widgets: DashboardWidget[], fallback: number): number {
   const counts = new Map<number, number>();
   for (const widget of widgets) {
@@ -121,9 +138,7 @@ export function DashboardPage({
       const body = await response.json() as DashboardSummary[];
       if (!response.ok) throw new Error('Failed to load dashboards');
       setDashboards(body || []);
-      if ((body || []).length > 0) {
-        setSelectedDashboardId((current) => current || body[0].id);
-      }
+      setSelectedDashboardId((current) => resolvePreferredDashboardId(body || [], current));
     } catch (requestError) {
       setError(String(requestError));
     } finally {

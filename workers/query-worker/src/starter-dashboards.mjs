@@ -21,21 +21,21 @@ const SCOPED_SERVICE_HEALTH_PANELS = [
     title: 'Status Distribution',
     ppl: `search * | where index="${DEFAULT_SERVICE_HEALTH_SCOPE.index}" and env="${DEFAULT_SERVICE_HEALTH_SCOPE.env}" and status>=100 | stats count() by status | sort -count`,
     viz_type: 'pie',
-    time_window_minutes: 60,
+    time_window_minutes: 15,
     position: 0
   },
   {
     title: 'Top Hosts by Errors',
     ppl: `search * | where index="${DEFAULT_SERVICE_HEALTH_SCOPE.index}" and env="${DEFAULT_SERVICE_HEALTH_SCOPE.env}" and level="error" | top 10 host`,
     viz_type: 'table',
-    time_window_minutes: 60,
+    time_window_minutes: 15,
     position: 1
   },
   {
     title: 'Slowest Services',
     ppl: `search * | where index="${DEFAULT_SERVICE_HEALTH_SCOPE.index}" and env="${DEFAULT_SERVICE_HEALTH_SCOPE.env}" and duration_ms>0 | stats avg(duration_ms) as avg_latency_ms max(duration_ms) as max_latency_ms by service | sort -avg_latency_ms | head 12`,
     viz_type: 'bar',
-    time_window_minutes: 60,
+    time_window_minutes: 15,
     position: 2
   }
 ];

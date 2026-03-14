@@ -1,4 +1,5 @@
 import React, { createContext, useCallback, useEffect, useState, useContext, type ReactNode } from 'react';
+import { API_BASE, API_BASE_MISSING_ERROR, API_PROXY_BASE } from './constants';
 
 export interface AuthUser {
   id: string;
@@ -37,10 +38,8 @@ export function useAuth(): AuthContextValue {
   return context;
 }
 
-const API_BASE = ((import.meta as { env?: Record<string, string> }).env?.VITE_QUERY_API_BASE || '').trim();
-const API_BASE_MISSING_ERROR = 'Missing VITE_QUERY_API_BASE. Configure your deployed query-worker URL.';
-
 const STORAGE_KEY = 'edgedata_auth';
+const ACCESS_RETURN_PARAM = 'access';
 
 function loadStoredAuth(): AuthState {
   try {
@@ -61,6 +60,20 @@ function storeAuth(user: AuthUser, token: string, expiresAt: string): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ user, token, expiresAt }));
 }
 
+function shouldResumeAccessSession(): boolean {
+  if (typeof window === 'undefined') return false;
+  return new URL(window.location.href).searchParams.get(ACCESS_RETURN_PARAM) === '1';
+}
+
+function clearAccessResumeFlag(): void {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has(ACCESS_RETURN_PARAM)) return;
+  url.searchParams.delete(ACCESS_RETURN_PARAM);
+  const next = `${url.pathname}${url.search}${url.hash}`;
+  window.history.replaceState(window.history.state, '', next);
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>(() => {
     const stored = loadStoredAuth();
@@ -68,7 +81,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   const fetchCurrentUser = useCallback(async (token: string | null): Promise<boolean> => {
-    if (!API_BASE) {
+    if (!token && !API_BASE) {
       localStorage.removeItem(STORAGE_KEY);
       setState({ user: null, token: null, expiresAt: null, loading: false });
       return false;
@@ -78,13 +91,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (token) {
         headers.set('Authorization', `Bearer ${token}`);
       }
-      const response = await fetch(`${API_BASE}/auth/me`, {
+      const response = await fetch(`${token ? API_PROXY_BASE : API_BASE}/auth/me`, {
         headers,
         credentials: 'include'
       });
       if (response.ok) {
-        const body = await response.json() as { user: AuthUser };
-        setState({ user: body.user, token: token || null, expiresAt: null, loading: false });
+        const body = await response.json() as { user: AuthUser; token?: string; expires_at?: string };
+        const sessionToken = body.token || token || null;
+        const expiresAt = body.expires_at || null;
+        if (sessionToken) {
+          storeAuth(body.user, sessionToken, expiresAt || '');
+        }
+        setState({ user: body.user, token: sessionToken, expiresAt, loading: false });
         return true;
       }
     } catch {
@@ -103,18 +121,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setState((prev) => ({ ...prev, loading: false }));
       return;
     }
+    if (!state.token && !shouldResumeAccessSession()) {
+      setState((prev) => ({ ...prev, loading: false }));
+      return;
+    }
     void fetchCurrentUser(state.token);
   }, [state.loading, state.token, state.user, fetchCurrentUser]);
 
+  useEffect(() => {
+    if (state.loading) return;
+    clearAccessResumeFlag();
+  }, [state.loading]);
+
   const login = useCallback(async (email: string, password: string): Promise<{ error?: string }> => {
-    if (!API_BASE) {
-      return { error: API_BASE_MISSING_ERROR };
-    }
     try {
-      const response = await fetch(`${API_BASE}/auth/login`, {
+      const payload = new URLSearchParams();
+      payload.set('email', email);
+      payload.set('password', password);
+      const response = await fetch(`${API_PROXY_BASE}/auth/login`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: payload.toString(),
         credentials: 'include'
       });
 

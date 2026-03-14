@@ -161,7 +161,7 @@ export ALERT_URL="https://<alert-worker>.<subdomain>.workers.dev"
 export VITE_QUERY_API_BASE="$QUERY_URL"
 ```
 
-- If SSO is enabled, `VITE_QUERY_API_BASE` must be the exact Access-protected query API origin that the browser will call.
+- If SSO is enabled, `VITE_QUERY_API_BASE` must be the exact Access-protected query API origin the browser uses for Access bootstrap and live tail.
 - `npm run deploy:pages` now fails fast when `VITE_QUERY_API_BASE` is missing or still set to the legacy `query-worker.rvkishore.workers.dev` default.
 
 How to discover D1 database ID on first deployment:
@@ -343,7 +343,7 @@ Query worker:
 - `GET /health`
 - `POST /auth/login`
 - `GET /auth/access/start`
-- `GET /auth/me`
+- `GET /auth/me` (returns user info and, for Access-authenticated browser sessions, a reusable session bearer token)
 - `POST /auth/logout`
 - `GET /auth/invites`
 - `POST /auth/invite`

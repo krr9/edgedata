@@ -57,3 +57,15 @@ test('seedStarterDashboards assigns cached starter dashboard execution defaults'
   assert.equal(panelInsert.args[9], 300);
   assert.equal(panelInsert.args[10], 900);
 });
+
+test('seedStarterDashboards uses a shorter default window for Service Health panels', async () => {
+  const db = createFakeDb();
+
+  await seedStarterDashboards(db);
+
+  const serviceHealthPanelInsert = db.inserts.find((entry) =>
+    entry.sql.includes('INSERT INTO dashboard_panels') && entry.args[2] === 'Status Distribution'
+  );
+  assert.ok(serviceHealthPanelInsert);
+  assert.equal(serviceHealthPanelInsert.args[5], 15);
+});

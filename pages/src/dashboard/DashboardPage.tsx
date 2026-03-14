@@ -21,6 +21,24 @@ const FRONTEND_WIDGET_CACHE_TTL_MS = 60_000;
 const MAX_DASHBOARD_WIDGET_CACHE_SIZE = 200;
 const dashboardWidgetResultCache = new Map<string, { expiresAt: number; rows: DashboardRow[] }>();
 
+function resolveDashboardDefaultMinutes(widgets: DashboardWidget[], fallback: number): number {
+  const counts = new Map<number, number>();
+  for (const widget of widgets) {
+    const minutes = Number(widget.time_window_minutes);
+    if (!Number.isFinite(minutes) || minutes <= 0) continue;
+    counts.set(minutes, (counts.get(minutes) || 0) + 1);
+  }
+  let selected = fallback;
+  let selectedCount = -1;
+  for (const [minutes, count] of counts.entries()) {
+    if (count > selectedCount) {
+      selected = minutes;
+      selectedCount = count;
+    }
+  }
+  return selected;
+}
+
 function evictOldest<V>(map: Map<string, V>, maxSize: number): void {
   if (map.size <= maxSize) return;
   const toDelete = map.size - maxSize;
@@ -122,6 +140,7 @@ export function DashboardPage({
       if (!response.ok) throw new Error('Failed to load widgets');
       const next = (body || []).map(parseWidget);
       setWidgets(next);
+      setDashboardMinutes((current) => resolveDashboardDefaultMinutes(next, current));
       snapshotRef.current.set(dashboardId, next);
       setDirtyLayout({});
     } catch (requestError) {

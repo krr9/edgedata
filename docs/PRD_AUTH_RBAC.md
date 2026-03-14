@@ -204,7 +204,7 @@ Target customers already manage identity in IdP + Access. Role mapping must inte
 
 - `POST /auth/login` (local mode only or explicitly enabled)
 - `GET /auth/access/start`
-- `GET /auth/me`
+- `GET /auth/me` (returns current user info and can mint a session bearer token after Cloudflare Access auth)
 - `POST /auth/logout`
 - `POST /auth/invite`
 - `POST /auth/invite/accept`

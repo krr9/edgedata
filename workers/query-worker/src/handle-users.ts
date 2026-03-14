@@ -32,6 +32,7 @@ import {
   authenticateRequest,
   authenticateCredentials,
   createSessionToken,
+  issueSessionTokenForBrowserAuth,
   localLoginEnabled,
   parseCsvSet
 } from './auth.js';
@@ -56,6 +57,34 @@ function resolveAccessReturnTo(request: Request, env: Env): string {
 
 async function enforceRateLimit(env: Env, scope: string, key: string, perMinute: number): Promise<void> {
   return sharedEnforceRateLimit(env.DB, scope, key, perMinute);
+}
+
+async function parseBodyFields(request: Request): Promise<Record<string, string>> {
+  const contentType = (request.headers.get('content-type') || '').toLowerCase();
+
+  if (contentType.includes('application/x-www-form-urlencoded')) {
+    const formData = await request.formData();
+    return Object.fromEntries(
+      Array.from(formData.entries()).map(([key, value]) => [key, typeof value === 'string' ? value : ''])
+    );
+  }
+
+  if (contentType.includes('application/json') || !contentType) {
+    const body = await request.json() as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(body || {}).map(([key, value]) => [key, value == null ? '' : String(value)])
+    );
+  }
+
+  const raw = await request.text();
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed || {}).map(([key, value]) => [key, value == null ? '' : String(value)])
+    );
+  } catch {
+    return Object.fromEntries(new URLSearchParams(raw).entries());
+  }
 }
 
 function errorResponse(
@@ -227,7 +256,7 @@ export async function handleAuth(
     const loginLimit = sharedAsRateLimitPerMinute(env.AUTH_LOGIN_RATE_LIMIT_PER_MIN, 60);
     await enforceRateLimit(env, 'auth_login_ip', clientIp(request), loginLimit);
 
-    const body = await request.json() as { email?: string; password?: string };
+    const body = await parseBodyFields(request);
     const email = String(body.email || '').trim().toLowerCase();
     const password = String(body.password || '');
     if (!email || !password) {
@@ -267,6 +296,7 @@ export async function handleAuth(
   if (request.method === 'GET' && pathname === '/auth/me') {
     try {
       const auth = await authenticateRequest(request, env);
+      const session = await issueSessionTokenForBrowserAuth(auth, request, env);
       return jsonResponse({
         authenticated: true,
         user: {
@@ -277,7 +307,13 @@ export async function handleAuth(
           permissions: Array.from(auth.permissions),
           scope: auth.scope
         },
-        auth_mode: auth.authMode
+        auth_mode: auth.authMode,
+        ...(session
+          ? {
+              token: session.token,
+              expires_at: session.expiresAt
+            }
+          : {})
       }, 200, requestCorsHeaders);
     } catch (error) {
       return errorResponse(error, requestCorsHeaders, 401);
@@ -462,7 +498,7 @@ export async function handleAuth(
       return jsonResponse({ error: 'Too many attempts. Please try again later.' }, 429, requestCorsHeaders);
     }
     await expirePendingInvitations(env);
-    const body = await request.json() as { token?: string; password?: string };
+    const body = await parseBodyFields(request);
     const token = String(body.token || '').trim();
     if (!token) {
       return jsonResponse({ error: 'token is required' }, 400, requestCorsHeaders);

@@ -482,6 +482,21 @@ export async function createSessionToken(
   };
 }
 
+export async function issueSessionTokenForBrowserAuth(
+  auth: AuthContext,
+  request: Request,
+  env: Env
+): Promise<{ token: string; expiresAt: string } | null> {
+  const authHeader = request.headers.get('authorization') || '';
+  if (auth.authMode !== 'access_sso' || authHeader.startsWith('Bearer ')) {
+    return null;
+  }
+  if (!env.AUTH_SESSION_SECRET) {
+    return null;
+  }
+  return createSessionToken(auth, env);
+}
+
 export async function verifySessionToken(token: string, env: Env): Promise<AuthContext | null> {
   const secret = env.AUTH_SESSION_SECRET;
   if (!secret) return null;

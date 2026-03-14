@@ -16,6 +16,7 @@ const TIME_PRESETS = [
   { label: '24h', value: 1440 },
   { label: '7d', value: 10080 }
 ] as const;
+const DEFAULT_DASHBOARD_NAME = 'otel demo command center';
 
 const FRONTEND_WIDGET_CACHE_TTL_MS = 60_000;
 const MAX_DASHBOARD_WIDGET_CACHE_SIZE = 200;
@@ -27,6 +28,11 @@ function resolvePreferredDashboardId(
 ): string | null {
   if (current) return current;
   if (dashboards.length === 0) return null;
+
+  const preferredDashboard = dashboards.find(
+    (dashboard) => String(dashboard.name || '').trim().toLowerCase() === DEFAULT_DASHBOARD_NAME
+  );
+  if (preferredDashboard) return preferredDashboard.id;
 
   const otelDashboard = dashboards.find((dashboard) => {
     const name = String(dashboard.name || '').toLowerCase();

@@ -36,3 +36,29 @@ test('sanitizeWaeSqlValue returns empty string for all-special input', () => {
 test('sanitizeWaeSqlValue preserves spaces', () => {
   assert.equal(sanitizeWaeSqlValue('hello world'), 'hello world');
 });
+
+test('sanitizeWaeSqlValue handles nullish and numeric inputs safely', () => {
+  assert.equal(sanitizeWaeSqlValue(null), '');
+  assert.equal(sanitizeWaeSqlValue(undefined), '');
+  assert.equal(sanitizeWaeSqlValue(404), '404');
+});
+
+test('sanitizeWaeSqlValue strips control characters and mixed injection payloads', () => {
+  const sanitized = sanitizeWaeSqlValue("prod'\nOR\t1=1;--");
+  assert.equal(sanitized, 'prodOR11--');
+});
+
+test('sanitizeWaeSqlValue only emits allowlisted characters across fuzzy payloads', () => {
+  const inputs = [
+    "' UNION SELECT password FROM users --",
+    '../etc/passwd',
+    'service=api\tDROP TABLE alerts;',
+    '汉字<script>alert(1)</script>',
+    'user@example.com\r\nx-header: injected'
+  ];
+
+  for (const input of inputs) {
+    const sanitized = sanitizeWaeSqlValue(input);
+    assert.match(sanitized, /^[a-zA-Z0-9_.\-:@/ ]*$/);
+  }
+});

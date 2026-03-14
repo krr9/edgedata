@@ -130,10 +130,31 @@ test('parseScope falls back to default for invalid JSON', () => {
   assert.deepEqual(scope.indexes, ['*']);
 });
 
+test('parseScope trims whitespace, removes duplicates, and drops empty entries', () => {
+  const scope = parseScope(JSON.stringify({
+    indexes: [' logs ', 'logs', '', '   '],
+    services: [' api ', 'api', '\n'],
+    envs: [' prod ', 'prod'],
+    hosts: [' host-1 ', 'host-1']
+  }));
+  assert.deepEqual(scope.indexes, ['logs']);
+  assert.deepEqual(scope.services, ['api']);
+  assert.deepEqual(scope.envs, ['prod']);
+  assert.deepEqual(scope.hosts, ['host-1']);
+});
+
 test('parseScopeInput accepts object input', () => {
   const scope = parseScopeInput({ indexes: ['logs'], services: ['api'] });
   assert.deepEqual(scope.indexes, ['logs']);
   assert.deepEqual(scope.services, ['api']);
+});
+
+test('parseScopeInput tolerates malformed arrays and falls back safely', () => {
+  const scope = parseScopeInput({ indexes: null, services: [' api ', '', 'api'], envs: 'prod', hosts: [null, ' host '] });
+  assert.deepEqual(scope.indexes, ['*']);
+  assert.deepEqual(scope.services, ['api']);
+  assert.deepEqual(scope.envs, ['*']);
+  assert.deepEqual(scope.hosts, ['host']);
 });
 
 test('normalizeScope preserves non-empty arrays', () => {
@@ -175,6 +196,12 @@ test('globToRegExp escapes special chars and converts * to .*', () => {
   assert.equal(re.test('other'), false);
 });
 
+test('globToRegExp treats regex metacharacters literally', () => {
+  const re = globToRegExp('prod.+(admin)');
+  assert.equal(re.test('prod.+(admin)'), true);
+  assert.equal(re.test('production-admin'), false);
+});
+
 test('mergeScope merges multiple scopes', () => {
   const merged = mergeScope([
     { indexes: ['logs'], services: ['api'], envs: ['*'], hosts: ['*'] },
@@ -201,10 +228,21 @@ test('highestRole returns highest role in hierarchy', () => {
 test('ensureRoleId normalizes role string', () => {
   assert.equal(ensureRoleId('Admin'), 'admin');
   assert.equal(ensureRoleId('  SUPERADMIN  '), 'superadmin');
+  assert.equal(ensureRoleId(null), '');
 });
 
 test('parsePermissionsInput accepts string and array', () => {
   assert.deepEqual(parsePermissionsInput('["a","b"]'), ['a', 'b']);
   assert.deepEqual(parsePermissionsInput(['a', 'b']), ['a', 'b']);
   assert.deepEqual(parsePermissionsInput(undefined, ['default']), ['default']);
+});
+
+test('parsePermissionsInput trims duplicates and ignores empty values', () => {
+  assert.deepEqual(parsePermissionsInput('[" search.read ","search.read","","   "]'), ['search.read']);
+  assert.deepEqual(parsePermissionsInput([' alert.read ', null, 'alert.read']), ['alert.read']);
+});
+
+test('matchesScopedValue ignores empty patterns and does not treat regex metacharacters as special', () => {
+  assert.equal(matchesScopedValue('prod.+(admin)', ['', '  ', 'prod.+(admin)']), true);
+  assert.equal(matchesScopedValue('prodX(admin)', ['prod.+(admin)']), false);
 });

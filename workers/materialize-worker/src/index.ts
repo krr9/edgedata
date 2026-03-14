@@ -3,6 +3,7 @@ import {
   buildScopeKey,
   hashQueryText
 } from '../../shared/materialization-core.mjs';
+import { timingSafeTokenCompare } from '../../shared/timing-safe.mjs';
 
 export interface Env {
   DB: D1Database;
@@ -288,12 +289,12 @@ async function runMaterializations(env: Env): Promise<MaterializeSummary> {
   return summary;
 }
 
-async function authorizeManualRun(request: Request, env: Env): Promise<boolean> {
+export async function authorizeManualRun(request: Request, env: Env): Promise<boolean> {
   const authHeader = request.headers.get('authorization') || '';
   if (!env.MATERIALIZE_RUN_SECRET || !authHeader.startsWith('Bearer ')) {
     return false;
   }
-  return authHeader.slice(7) === env.MATERIALIZE_RUN_SECRET;
+  return timingSafeTokenCompare(authHeader.slice(7).trim(), env.MATERIALIZE_RUN_SECRET);
 }
 
 export default {

@@ -4,12 +4,26 @@
 
 const DEFAULT_SCOPE = { indexes: ['*'], services: ['*'], envs: ['*'], hosts: ['*'] };
 
+function normalizeStringArray(input, fallback = []) {
+  if (!Array.isArray(input)) return [...fallback];
+
+  const normalized = [];
+  const seen = new Set();
+  for (const item of input) {
+    const value = String(item ?? '').trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    normalized.push(value);
+  }
+
+  return normalized.length > 0 ? normalized : [...fallback];
+}
+
 export function parseJsonArray(input, fallback = []) {
   if (!input) return [...fallback];
   try {
     const parsed = JSON.parse(input);
-    if (!Array.isArray(parsed)) return [...fallback];
-    return parsed.map((item) => String(item)).filter(Boolean);
+    return normalizeStringArray(parsed, fallback);
   } catch {
     return [...fallback];
   }
@@ -20,7 +34,7 @@ export function parsePermissionsInput(input, fallback = []) {
     return parseJsonArray(input, fallback);
   }
   if (Array.isArray(input)) {
-    return input.map((item) => String(item)).filter(Boolean);
+    return normalizeStringArray(input, fallback);
   }
   return [...fallback];
 }
@@ -30,10 +44,10 @@ export function parseScope(input) {
   try {
     const parsed = JSON.parse(input);
     return {
-      indexes: Array.isArray(parsed.indexes) && parsed.indexes.length > 0 ? parsed.indexes.map(String) : ['*'],
-      services: Array.isArray(parsed.services) && parsed.services.length > 0 ? parsed.services.map(String) : ['*'],
-      envs: Array.isArray(parsed.envs) && parsed.envs.length > 0 ? parsed.envs.map(String) : ['*'],
-      hosts: Array.isArray(parsed.hosts) && parsed.hosts.length > 0 ? parsed.hosts.map(String) : ['*']
+      indexes: normalizeStringArray(parsed.indexes, ['*']),
+      services: normalizeStringArray(parsed.services, ['*']),
+      envs: normalizeStringArray(parsed.envs, ['*']),
+      hosts: normalizeStringArray(parsed.hosts, ['*'])
     };
   } catch {
     return { ...DEFAULT_SCOPE };
@@ -47,10 +61,10 @@ export function parseScopeInput(input) {
   if (input && typeof input === 'object') {
     const scope = input;
     return {
-      indexes: Array.isArray(scope.indexes) && scope.indexes.length > 0 ? scope.indexes.map(String) : ['*'],
-      services: Array.isArray(scope.services) && scope.services.length > 0 ? scope.services.map(String) : ['*'],
-      envs: Array.isArray(scope.envs) && scope.envs.length > 0 ? scope.envs.map(String) : ['*'],
-      hosts: Array.isArray(scope.hosts) && scope.hosts.length > 0 ? scope.hosts.map(String) : ['*']
+      indexes: normalizeStringArray(scope.indexes, ['*']),
+      services: normalizeStringArray(scope.services, ['*']),
+      envs: normalizeStringArray(scope.envs, ['*']),
+      hosts: normalizeStringArray(scope.hosts, ['*'])
     };
   }
   return { ...DEFAULT_SCOPE };
@@ -58,22 +72,24 @@ export function parseScopeInput(input) {
 
 export function normalizeScope(scope) {
   return {
-    indexes: scope.indexes.length > 0 ? scope.indexes : ['*'],
-    services: scope.services.length > 0 ? scope.services : ['*'],
-    envs: scope.envs.length > 0 ? scope.envs : ['*'],
-    hosts: scope.hosts.length > 0 ? scope.hosts : ['*']
+    indexes: normalizeStringArray(scope?.indexes, ['*']),
+    services: normalizeStringArray(scope?.services, ['*']),
+    envs: normalizeStringArray(scope?.envs, ['*']),
+    hosts: normalizeStringArray(scope?.hosts, ['*'])
   };
 }
 
 export function globToRegExp(glob) {
-  const escaped = glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  const escaped = String(glob || '').replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
   return new RegExp(`^${escaped}$`, 'i');
 }
 
 export function matchesScopedValue(value, patterns) {
   if (patterns.length === 0 || patterns.includes('*')) return true;
   if (!value) return false;
-  for (const pattern of patterns) {
+  for (const rawPattern of patterns) {
+    const pattern = String(rawPattern || '').trim();
+    if (!pattern) continue;
     if (pattern === '*') return true;
     if (!pattern.includes('*') && pattern.toLowerCase() === value.toLowerCase()) return true;
     if (pattern.includes('*') && globToRegExp(pattern).test(value)) return true;
@@ -108,5 +124,5 @@ export function highestRole(roleIds) {
 }
 
 export function ensureRoleId(role) {
-  return role.trim().toLowerCase();
+  return String(role || '').trim().toLowerCase();
 }

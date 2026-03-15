@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { useAuth } from './AuthContext';
-
-const API_BASE = ((import.meta as { env?: Record<string, string> }).env?.VITE_QUERY_API_BASE || '').trim();
+import { API_BASE, API_BASE_MISSING_ERROR, API_PROXY_BASE } from './constants';
+import { EdgeDataLogo } from './components/EdgeDataLogo';
 
 export function AuthScreen() {
   const { login, loading: authLoading } = useAuth();
@@ -15,6 +15,21 @@ export function AuthScreen() {
   const [info, setInfo] = useState('');
   const [loading, setLoading] = useState(false);
   const [ssoLoading, setSsoLoading] = useState(false);
+
+  const startAccessBootstrap = () => {
+    setError('');
+    setInfo('');
+    if (!API_BASE) {
+      setError(API_BASE_MISSING_ERROR);
+      return;
+    }
+
+    setSsoLoading(true);
+    const returnToUrl = new URL(window.location.href);
+    returnToUrl.searchParams.set('access', '1');
+    const returnTo = returnToUrl.toString();
+    window.location.assign(`${API_BASE}/auth/access/start?return_to=${encodeURIComponent(returnTo)}`);
+  };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -31,26 +46,13 @@ export function AuthScreen() {
   };
 
   const handleSsoStart = () => {
-    setError('');
-    setInfo('');
-    if (!API_BASE) {
-      setError('Missing VITE_QUERY_API_BASE. Configure your deployed query-worker URL.');
-      return;
-    }
-
-    setSsoLoading(true);
-    const returnTo = window.location.href;
-    window.location.assign(`${API_BASE}/auth/access/start?return_to=${encodeURIComponent(returnTo)}`);
+    startAccessBootstrap();
   };
 
   const handleInviteAccept = async (e: FormEvent) => {
     e.preventDefault();
     setError('');
     setInfo('');
-    if (!API_BASE) {
-      setError('Missing VITE_QUERY_API_BASE. Configure your deployed query-worker URL.');
-      return;
-    }
     if (!inviteToken.trim()) {
       setError('Invite token is required.');
       return;
@@ -65,10 +67,13 @@ export function AuthScreen() {
     }
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE}/auth/invite/accept`, {
+      const payload = new URLSearchParams();
+      payload.set('token', inviteToken.trim());
+      payload.set('password', invitePassword);
+      const response = await fetch(`${API_PROXY_BASE}/auth/invite/accept`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: inviteToken.trim(), password: invitePassword }),
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: payload.toString(),
         credentials: 'include'
       });
       const body = await response.json() as { error?: string; email?: string };
@@ -99,8 +104,9 @@ export function AuthScreen() {
   return (
     <div className="auth-screen">
       <div className="auth-card">
-        <div className="auth-logo">EdgeData</div>
-        <p className="auth-subtitle">SSO-first sign in with local invite fallback</p>
+        <div className="auth-logo">
+          <EdgeDataLogo size={72} stacked />
+        </div>
 
         <div className="auth-mode-switch">
           <button

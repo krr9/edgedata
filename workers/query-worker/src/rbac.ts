@@ -127,7 +127,7 @@ export async function ensureRbacInitialized(env: Env): Promise<void> {
     for (const roleId of roleIds) {
       await env.DB.prepare(
         `INSERT OR IGNORE INTO roles (id, name, system_role, enabled, permissions_json, scope_json, created_at, updated_at)
-         VALUES (?, ?, ?, 1, ?, ?, ?, ?)`
+         VALUES (?, ?, 1, 1, ?, ?, ?, ?)`
       ).bind(
         roleId,
         roleId,

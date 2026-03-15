@@ -20,7 +20,7 @@ dataset = "log_metrics"
 
 [[env.production.services]]
 binding = "SYNTHETIC_SERVICE"
-service = "synthetic-worker"
+service = "synthetic-worker-prod"
 
 [[env.production.services]]
 binding = "ALERT_SERVICE"

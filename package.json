@@ -37,8 +37,9 @@
     "test:golden-path": "bash ./scripts/run-golden-activation.sh",
     "test:unit": "node --test workers/query-worker/test/*.test.mjs workers/synthetic-worker/test/*.test.mjs workers/ingest-worker/test/*.test.mjs workers/alert-worker/test/*.test.mjs workers/materialize-worker/test/*.test.mjs workers/shared/test/*.test.mjs",
     "test:load": "node ./scripts/load-test.mjs",
-    "test:access-config": "bash ./scripts/test-access-config.sh && bash ./scripts/check-access-config.sh",
+    "test:access-config": "bash ./scripts/test-access-config.sh && bash ./scripts/check-access-config.sh && bash ./scripts/test-production-bindings.sh && bash ./scripts/check-production-bindings.sh",
     "test:migrations": "bash ./scripts/check-migrations.sh",
+    "ops:check:synthetic-control": "bash ./scripts/check-synthetic-control-secrets.sh",
     "ops:reprocess": "node ./scripts/reprocess-raw.mjs"
   },
   "devDependencies": {

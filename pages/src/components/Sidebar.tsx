@@ -1,4 +1,5 @@
-import { ChevronLeft, ChevronRight, Database } from 'lucide-react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { EdgeDataLogo } from './EdgeDataLogo';
 import { renderNavIcon } from '../utils';
 import type { ViewMode } from '../types';
 
@@ -33,11 +34,7 @@ export function Sidebar({
     <aside className={`side-nav ${navExpanded ? 'expanded' : 'collapsed'}`} aria-label="Application navigation">
       <div className="side-nav-top">
         <a className="nav-brand nav-brand-link" href="/" aria-label="Go to home page">
-          <span className="nav-brand-mark" aria-hidden="true">
-            <Database size={14} strokeWidth={2.1} />
-          </span>
-          {navExpanded && <span className="nav-brand-text">EdgeData</span>}
-          {navExpanded && <span className="nav-brand-badge">Cloud</span>}
+          <EdgeDataLogo size={22} wordmark={navExpanded} />
         </a>
         <button
           type="button"

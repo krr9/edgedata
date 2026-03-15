@@ -10,13 +10,15 @@ Use this checklist for fresh deployments and design-partner onboarding.
 - [ ] `ACCESS_AUD` and `ACCESS_ISSUER` are configured for both workers.
 - [ ] At least one Access group mapping exists (`Settings -> Access Group Mapping`).
 - [ ] `AUTH_ENABLE_LOCAL_LOGIN` is set to your intended mode (`false` for strict SSO, `true` for fallback).
+- [ ] Team understands that Cloudflare Access owns OTP / verification-email delivery for SSO login, while EdgeData owns app invites, roles, and local-password fallback.
 
 ## 2) User Onboarding
 
 - [ ] First admin/superadmin can sign in.
 - [ ] Invite at least one additional operator user.
-- [ ] For local-password invite mode, invited user completes `Accept Invite` flow.
+- [ ] For local-password invite mode, admin shares the generated invite link manually and the invited user completes the link-based `Accept Invite` flow.
 - [ ] Pending invites can be listed/resend/revoked in `Settings -> Invite Queue`.
+- [ ] If you add automated invite email delivery later, the provider secret and verified sender domain are configured before rollout.
 
 ## 3) Data and Alert Activation
 

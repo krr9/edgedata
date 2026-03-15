@@ -419,6 +419,7 @@ Synthetic worker:
 Saved searches are owner-scoped (`created_by`) for non-admin users.
 
 Authentication is SSO-first (Cloudflare Access JWT) with optional local password login (`AUTH_ENABLE_LOCAL_LOGIN=true`).
+Cloudflare Access owns the authentication challenge itself, including email OTP / One-Time PIN delivery when that login method is enabled. EdgeData owns application invites, roles, and post-login authorization.
 
 ## Onboarding Checklist
 

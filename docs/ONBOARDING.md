@@ -453,6 +453,7 @@ In other words:
 - The external IdP proves who the user is
 - Cloudflare Access decides whether the user may reach EdgeData at all
 - EdgeData decides what the user may do after they get in
+- For email OTP / One-Time PIN flows, Cloudflare Access also controls whether the verification email is sent and delivered. EdgeData does not send or manage those emails.
 
 ### 9.4 Connect Your Identity Provider
 
@@ -897,8 +898,22 @@ Current behavior:
 For explicit per-user approval:
 
 1. Go to **Settings > Invite Queue**
-2. Enter email, select role, send invitation
-3. Invitee receives a link (or signs in via SSO) to activate their account
+2. Enter email, select role, create invitation
+3. Copy the generated invite link and send it to the user through your own email or chat tool
+4. Invitee opens the link (or signs in via SSO) to activate their account
+
+Notes:
+
+- EdgeData currently creates invite links but does not send invite emails on its own.
+- If an Access SSO user is authenticating with Cloudflare Access email OTP / One-Time PIN, Cloudflare Access owns that verification email step. Delivery behavior there is outside EdgeData's control and depends on Cloudflare Access login methods, policy, and mailbox deliverability.
+- If you later wire automated invite delivery through Resend, plan on supplying a Resend API key as a worker secret and using a verified sending domain.
+- Resend's default `resend.dev` sender is only for limited testing and cannot send real invites to arbitrary recipients until your domain is verified.
+- Resend domain verification requires DNS setup for SPF and DKIM, and verification can take time to propagate.
+
+Operational guidance:
+
+- If Cloudflare Access OTP delivery is unreliable, treat that as a Cloudflare Access / identity-provider issue rather than an EdgeData invite failure.
+- Use EdgeData's manual invite link and local-password flow as the fallback path when you need to unblock onboarding quickly.
 
 ### 15.3 Local Password Onboarding (Development/Break-Glass)
 

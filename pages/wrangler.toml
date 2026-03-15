@@ -1,2 +1,6 @@
 name = "edgedata-1fo"
 pages_build_output_dir = "dist"
+
+[[services]]
+binding = "QUERY_API"
+service = "query-worker-prod"

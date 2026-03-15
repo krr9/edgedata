@@ -3,12 +3,12 @@
 const INGEST_URL = process.env.INGEST_URL || '';
 const QUERY_URL = process.env.QUERY_URL || '';
 const ALERT_URL = process.env.ALERT_URL || '';
-const INGEST_SECRET = process.env.INGEST_SECRET || 'edgedata-test-secret';
+const INGEST_SECRET = process.env.INGEST_SECRET || '';
 const ALERT_RUN_SECRET = process.env.ALERT_RUN_SECRET || '';
 const QUERY_AUTH_TOKEN = process.env.QUERY_AUTH_TOKEN || '';
 
-if (!INGEST_URL || !QUERY_URL || !ALERT_URL) {
-  console.error('Missing required URLs. Set INGEST_URL, QUERY_URL, and ALERT_URL.');
+if (!INGEST_URL || !QUERY_URL || !ALERT_URL || !INGEST_SECRET) {
+  console.error('Missing required env vars. Set INGEST_URL, QUERY_URL, ALERT_URL, and INGEST_SECRET.');
   process.exit(1);
 }
 

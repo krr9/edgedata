@@ -3,6 +3,7 @@ import type { AdminInviteRow, AdminUserRow, GroupRoleMappingRow, OnboardingCheck
 import { formatDateTime, parseStringArray } from '../utils';
 
 const BILLING_NOTICE_DISMISSED_KEY = 'edgedata:billing-notice-dismissed';
+const LEGACY_HIDDEN_ROLE_IDS = new Set(['zeek_viewer']);
 
 export interface AdminPageProps {
   adminToast: string | null;
@@ -21,9 +22,9 @@ export interface AdminPageProps {
   setInviteEmail: (value: string) => void;
   inviteAuthMode: string;
   setInviteAuthMode: (value: string) => void;
-  inviteRoleIds: string;
-  setInviteRoleIds: (value: string) => void;
-  inviteTokenPreview: string | null;
+  inviteRoleIds: string[];
+  setInviteRoleIds: (value: string[]) => void;
+  inviteLinkPreview: string | null;
   newRoleId: string;
   setNewRoleId: (value: string) => void;
   newRoleName: string;
@@ -66,7 +67,7 @@ export function AdminPage({
   setInviteAuthMode,
   inviteRoleIds,
   setInviteRoleIds,
-  inviteTokenPreview,
+  inviteLinkPreview,
   newRoleId,
   setNewRoleId,
   newRoleName,
@@ -90,11 +91,24 @@ export function AdminPage({
   createMapping
 }: AdminPageProps) {
   const [showBillingNotice, setShowBillingNotice] = useState(false);
+  const [copiedInviteLink, setCopiedInviteLink] = useState(false);
+  const availableRoles = adminRoles.filter((role) => role.enabled !== 0 && !LEGACY_HIDDEN_ROLE_IDS.has(role.id));
+  const roleNameById = new Map(availableRoles.map((role) => [role.id, role.name]));
+  const [inviteRoleCandidate, setInviteRoleCandidate] = useState('');
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
     setShowBillingNotice(window.localStorage.getItem(BILLING_NOTICE_DISMISSED_KEY) !== '1');
   }, []);
+
+  useEffect(() => {
+    setCopiedInviteLink(false);
+  }, [inviteLinkPreview]);
+
+  useEffect(() => {
+    const nextCandidate = availableRoles.find((role) => !inviteRoleIds.includes(role.id))?.id || '';
+    setInviteRoleCandidate(nextCandidate);
+  }, [availableRoles, inviteRoleIds]);
 
   const acknowledgeBillingNotice = () => {
     if (typeof window !== 'undefined') {
@@ -103,11 +117,26 @@ export function AdminPage({
     setShowBillingNotice(false);
   };
 
+  const copyInviteLink = async () => {
+    if (!inviteLinkPreview || typeof navigator === 'undefined' || !navigator.clipboard?.writeText) return;
+    await navigator.clipboard.writeText(inviteLinkPreview);
+    setCopiedInviteLink(true);
+  };
+
+  const addInviteRole = () => {
+    if (!inviteRoleCandidate || inviteRoleIds.includes(inviteRoleCandidate)) return;
+    setInviteRoleIds([...inviteRoleIds, inviteRoleCandidate]);
+  };
+
+  const removeInviteRole = (roleId: string) => {
+    setInviteRoleIds(inviteRoleIds.filter((item) => item !== roleId));
+  };
+
   return (
     <div className="admin-view">
       <div className="admin-header">
         <h2>Administration</h2>
-        <span className="admin-subtitle">{adminUsers.length} user{adminUsers.length !== 1 ? 's' : ''} &middot; {adminRoles.length} role{adminRoles.length !== 1 ? 's' : ''}</span>
+        <span className="admin-subtitle">{adminUsers.length} user{adminUsers.length !== 1 ? 's' : ''} &middot; {availableRoles.length} role{availableRoles.length !== 1 ? 's' : ''}</span>
       </div>
 
       {adminToast && <div className="success-banner">{adminToast}</div>}
@@ -205,19 +234,71 @@ export function AdminPage({
               </div>
               <div className="admin-form-group">
                 <label>Roles</label>
-                <input
-                  type="text"
-                  value={inviteRoleIds}
-                  onChange={(event) => setInviteRoleIds(event.target.value)}
-                  placeholder="viewer, analyst"
-                />
+                <div className="role-pill-picker" role="group" aria-label="Invite roles">
+                  <div className="role-pill-list">
+                    {inviteRoleIds.map((roleId) => (
+                      <button
+                        key={roleId}
+                        type="button"
+                        className="role-pill"
+                        onClick={() => removeInviteRole(roleId)}
+                        aria-label={`Remove ${roleNameById.get(roleId) || roleId}`}
+                      >
+                        <span>{roleNameById.get(roleId) || roleId}</span>
+                        <span className="role-pill-dismiss" aria-hidden="true">x</span>
+                      </button>
+                    ))}
+                    {inviteRoleIds.length === 0 && (
+                      <div className="role-selector-empty">Select at least one role.</div>
+                    )}
+                  </div>
+                  <div className="role-pill-controls">
+                    <select
+                      value={inviteRoleCandidate}
+                      onChange={(event) => setInviteRoleCandidate(event.target.value)}
+                      disabled={availableRoles.every((role) => inviteRoleIds.includes(role.id))}
+                    >
+                      {availableRoles.filter((role) => !inviteRoleIds.includes(role.id)).length === 0 ? (
+                        <option value="">All available roles selected</option>
+                      ) : (
+                        <>
+                          <option value="">Add a role...</option>
+                          {availableRoles
+                            .filter((role) => !inviteRoleIds.includes(role.id))
+                            .map((role) => (
+                              <option key={role.id} value={role.id}>
+                                {role.name} ({role.id})
+                              </option>
+                            ))}
+                        </>
+                      )}
+                    </select>
+                    <button type="button" className="secondary" onClick={addInviteRole} disabled={!inviteRoleCandidate}>
+                      Add
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
+            <p className="invite-delivery-note">
+              Invite delivery is manual right now. Create the invite, then copy the generated link into email or chat.
+            </p>
             <button className="admin-submit" onClick={() => void createInvite()}>Create Invite</button>
-            {inviteTokenPreview && (
+            {inviteLinkPreview && (
               <div className="invite-token-box">
-                <strong>One-time invite token</strong>
-                <code>{inviteTokenPreview}</code>
+                <strong>Share this invite link</strong>
+                <span className="invite-token-help">
+                  Send the full link to the user so they can accept without copying a token. EdgeData does not send the email for you in this deployment.
+                </span>
+                <code>{inviteLinkPreview}</code>
+                <div className="invite-token-actions">
+                  <button type="button" className="secondary" onClick={() => void copyInviteLink()}>
+                    {copiedInviteLink ? 'Copied' : 'Copy Link'}
+                  </button>
+                  <a className="invite-link-open" href={inviteLinkPreview} target="_blank" rel="noreferrer">
+                    Open
+                  </a>
+                </div>
               </div>
             )}
           </div>
@@ -298,7 +379,7 @@ export function AdminPage({
                   type="text"
                   value={newRoleId}
                   onChange={(event) => setNewRoleId(event.target.value)}
-                  placeholder="e.g. zeek_viewer"
+                  placeholder="e.g. incident_commander"
                 />
               </div>
               <div className="admin-form-group">
@@ -307,7 +388,7 @@ export function AdminPage({
                   type="text"
                   value={newRoleName}
                   onChange={(event) => setNewRoleName(event.target.value)}
-                  placeholder="Zeek Viewer"
+                  placeholder="Incident Commander"
                 />
               </div>
             </div>

@@ -100,6 +100,7 @@ export const ASK_AI_INTENT_WORDS = new Set([
 ]);
 
 export const API_BASE = ((import.meta as { env?: Record<string, string> }).env?.VITE_QUERY_API_BASE || '').trim();
+export const API_PROXY_BASE = '/api';
 export const API_BASE_MISSING_ERROR = 'Missing VITE_QUERY_API_BASE. Configure your deployed query-worker URL.';
 export const STREAM_FLUSH_INTERVAL_MS = 250;
 export const QUERY_SUGGESTION_DEBOUNCE_MS = 120;

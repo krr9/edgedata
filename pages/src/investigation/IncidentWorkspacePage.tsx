@@ -4,10 +4,7 @@ import { SessionShareBar, type WorkspaceState } from './SessionShareBar';
 import { PivotChips } from './PivotChips';
 import { DemoScenarioPicker, type DemoScenarioSelection } from './DemoScenarioPicker';
 import type { InvestigationPivots, PivotKey } from './types';
-
-const API_BASE =
-  ((import.meta as { env?: Record<string, string> }).env?.VITE_QUERY_API_BASE || '').trim();
-const API_BASE_MISSING_ERROR = 'Missing VITE_QUERY_API_BASE. Configure your deployed query-worker URL.';
+import { API_PROXY_BASE } from '../constants';
 
 interface BootstrapPayload {
   scope: { index: string; service: string; env: string };
@@ -101,12 +98,9 @@ export function IncidentWorkspacePage({
 
   const apiFetch = useCallback(
     (path: string, init?: RequestInit) => {
-      if (!API_BASE) {
-        return Promise.reject(new Error(API_BASE_MISSING_ERROR));
-      }
       const headers = new Headers(init?.headers);
       if (apiToken) headers.set('Authorization', `Bearer ${apiToken}`);
-      return fetch(`${API_BASE}${path}`, { ...init, headers, credentials: init?.credentials ?? 'include' });
+      return fetch(`${API_PROXY_BASE}${path}`, { ...init, headers, credentials: init?.credentials ?? 'include' });
     },
     [apiToken]
   );

@@ -1,11 +1,34 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useAuth } from './AuthContext';
 import { API_BASE, API_BASE_MISSING_ERROR, API_PROXY_BASE } from './constants';
 import { EdgeDataLogo } from './components/EdgeDataLogo';
 
+const INVITE_TOKEN_PARAM = 'invite_token';
+
+function readInviteTokenFromLocation(): string {
+  if (typeof window === 'undefined') return '';
+  const url = new URL(window.location.href);
+  const hash = url.hash.startsWith('#') ? url.hash.slice(1) : url.hash;
+  const hashParams = new URLSearchParams(hash);
+  return hashParams.get(INVITE_TOKEN_PARAM)?.trim() || url.searchParams.get(INVITE_TOKEN_PARAM)?.trim() || '';
+}
+
+function clearInviteTokenFromLocation(): void {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  const hashParams = new URLSearchParams(url.hash.startsWith('#') ? url.hash.slice(1) : url.hash);
+  const hadHashToken = hashParams.has(INVITE_TOKEN_PARAM);
+  const hadSearchToken = url.searchParams.has(INVITE_TOKEN_PARAM);
+  if (!hadHashToken && !hadSearchToken) return;
+
+  hashParams.delete(INVITE_TOKEN_PARAM);
+  url.searchParams.delete(INVITE_TOKEN_PARAM);
+  url.hash = hashParams.toString() ? `#${hashParams.toString()}` : '';
+  window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+}
+
 export function AuthScreen() {
   const { login, loading: authLoading } = useAuth();
-  const [mode, setMode] = useState<'signin' | 'invite'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [inviteToken, setInviteToken] = useState('');
@@ -15,6 +38,16 @@ export function AuthScreen() {
   const [info, setInfo] = useState('');
   const [loading, setLoading] = useState(false);
   const [ssoLoading, setSsoLoading] = useState(false);
+
+  useEffect(() => {
+    const tokenFromUrl = readInviteTokenFromLocation();
+    if (!tokenFromUrl) return;
+    setInviteToken(tokenFromUrl);
+    setError('');
+    clearInviteTokenFromLocation();
+  }, []);
+
+  const isInviteFlow = !!inviteToken.trim();
 
   const startAccessBootstrap = () => {
     setError('');
@@ -54,7 +87,7 @@ export function AuthScreen() {
     setError('');
     setInfo('');
     if (!inviteToken.trim()) {
-      setError('Invite token is required.');
+      setError('Open the full invite link from your email to continue.');
       return;
     }
     if (invitePassword.length < 10) {
@@ -81,10 +114,10 @@ export function AuthScreen() {
         setError(body.error || 'Failed to accept invite');
         return;
       }
+      setEmail(body.email || '');
       setInviteToken('');
       setInvitePassword('');
       setInvitePasswordConfirm('');
-      setMode('signin');
       setInfo(`Invite accepted for ${body.email || 'user'}. Sign in to continue.`);
     } catch {
       setError('Network error');
@@ -108,35 +141,10 @@ export function AuthScreen() {
           <EdgeDataLogo size={72} stacked />
         </div>
 
-        <div className="auth-mode-switch">
-          <button
-            type="button"
-            className={mode === 'signin' ? 'active' : ''}
-            onClick={() => {
-              setMode('signin');
-              setError('');
-              setInfo('');
-            }}
-          >
-            Sign In
-          </button>
-          <button
-            type="button"
-            className={mode === 'invite' ? 'active' : ''}
-            onClick={() => {
-              setMode('invite');
-              setError('');
-              setInfo('');
-            }}
-          >
-            Accept Invite
-          </button>
-        </div>
-
         {info && <div className="auth-info">{info}</div>}
         {error && <div className="auth-error">{error}</div>}
 
-        {mode === 'signin' ? (
+        {!isInviteFlow ? (
           <form onSubmit={handleSubmit}>
             <button type="button" className="auth-secondary" disabled={ssoLoading || loading} onClick={handleSsoStart}>
               {ssoLoading ? 'Redirecting to Access...' : 'Continue with Cloudflare Access'}
@@ -172,16 +180,8 @@ export function AuthScreen() {
           </form>
         ) : (
           <form onSubmit={handleInviteAccept}>
-            <div className="auth-field">
-              <label htmlFor="auth-invite-token">Invite token</label>
-              <input
-                id="auth-invite-token"
-                type="text"
-                value={inviteToken}
-                onChange={(e) => setInviteToken(e.target.value)}
-                required
-                autoFocus
-              />
+            <div className="auth-invite-summary">
+              Invite link detected. Set your password to finish joining EdgeData.
             </div>
             <div className="auth-field">
               <label htmlFor="auth-invite-password">New password</label>
@@ -192,6 +192,7 @@ export function AuthScreen() {
                 onChange={(e) => setInvitePassword(e.target.value)}
                 required
                 minLength={10}
+                autoFocus
               />
             </div>
             <div className="auth-field">

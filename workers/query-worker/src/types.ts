@@ -623,7 +623,7 @@ export const BASE_CORS_HEADERS = {
   'vary': 'Origin'
 };
 
-export const PBKDF2_ITERATIONS = 600_000;
+export const PBKDF2_ITERATIONS = 100_000;
 export const SESSION_TTL_SECONDS = 12 * 60 * 60;
 export const DEFAULT_INVITE_TTL_HOURS = 48;
 export const DEFAULT_SCOPE: DataScope = { indexes: ['*'], services: ['*'], envs: ['*'], hosts: ['*'] };

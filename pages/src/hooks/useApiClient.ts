@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { API_BASE, API_BASE_MISSING_ERROR } from '../constants';
+import { API_PROXY_BASE } from '../constants';
 import type {
   AdminInviteRow,
   AdminUserRow,
@@ -58,9 +58,6 @@ export interface UseApiClientReturn {
 
 export function useApiClient(apiToken: string | null): UseApiClientReturn {
   const apiFetch = useCallback<ApiFetch>((path: string, init: RequestInit = {}) => {
-    if (!API_BASE) {
-      return Promise.reject(new Error(API_BASE_MISSING_ERROR));
-    }
     const headers = new Headers(init.headers || {});
     if (init.body && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json');
@@ -68,7 +65,7 @@ export function useApiClient(apiToken: string | null): UseApiClientReturn {
     if (apiToken) {
       headers.set('Authorization', `Bearer ${apiToken}`);
     }
-    return fetch(`${API_BASE}${path}`, { ...init, headers, credentials: init.credentials ?? 'include' });
+    return fetch(`${API_PROXY_BASE}${path}`, { ...init, headers, credentials: init.credentials ?? 'include' });
   }, [apiToken]);
 
   const fetchSearchSuggestions = useCallback(

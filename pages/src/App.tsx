@@ -2,6 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { SunMoon } from 'lucide-react';
 import { useAuth } from './AuthContext';
 import { AuthScreen } from './AuthScreen';
+import { EdgeDataLogo } from './components/EdgeDataLogo';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Sidebar } from './components/Sidebar';
 import { useApiClient } from './hooks/useApiClient';
@@ -91,6 +92,12 @@ function evictOldest<V>(map: Map<string, V>, maxSize: number): void {
     const next = iter.next();
     if (!next.done) map.delete(next.value);
   }
+}
+
+function buildLocalPasswordInviteLink(inviteToken: string): string {
+  if (!inviteToken || typeof window === 'undefined') return '';
+  const url = new URL(window.location.href);
+  return `${url.origin}${url.pathname}#invite_token=${encodeURIComponent(inviteToken)}`;
 }
 
 function LiveTailView({
@@ -600,9 +607,9 @@ function App() {
   const [adminToast, setAdminToast] = useState<string | null>(null);
 
   const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRoleIds, setInviteRoleIds] = useState('viewer');
+  const [inviteRoleIds, setInviteRoleIds] = useState<string[]>(['viewer']);
   const [inviteAuthMode, setInviteAuthMode] = useState<'access_sso' | 'local_password'>('access_sso');
-  const [inviteTokenPreview, setInviteTokenPreview] = useState('');
+  const [inviteLinkPreview, setInviteLinkPreview] = useState('');
 
   const [newRoleId, setNewRoleId] = useState('');
   const [newRoleName, setNewRoleName] = useState('');
@@ -2172,10 +2179,7 @@ function App() {
 
   const createInvite = useCallback(async () => {
     const email = inviteEmail.trim().toLowerCase();
-    const roleIds = inviteRoleIds
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
+    const roleIds = inviteRoleIds.map((item) => item.trim()).filter(Boolean);
     if (!email) {
       setAdminError('Invite email is required.');
       return;
@@ -2193,14 +2197,21 @@ function App() {
           role_ids: roleIds
         })
       });
-      const body = await response.json() as { error?: string; invite_token?: string };
+      const body = await response.json() as { error?: string; invite_token?: string; auth_mode?: 'access_sso' | 'local_password' };
       if (!response.ok || body.error) {
         setAdminError(body.error || 'Failed to create invite');
         return;
       }
-      setInviteTokenPreview(body.invite_token || '');
+      const createdAuthMode = body.auth_mode || inviteAuthMode;
+      setInviteLinkPreview(
+        createdAuthMode === 'local_password' ? buildLocalPasswordInviteLink(body.invite_token || '') : ''
+      );
       setInviteEmail('');
-      setAdminToast(`Invite created for ${email}.`);
+      setAdminToast(
+        createdAuthMode === 'local_password'
+          ? `Invite created for ${email}. Share the invite link.`
+          : `Invite created for ${email}. They can sign in with Cloudflare Access.`
+      );
       await loadAdminData();
     } catch (requestError) {
       setAdminError(String(requestError));
@@ -2213,13 +2224,20 @@ function App() {
         method: 'POST',
         body: JSON.stringify({ id: invite.id })
       });
-      const body = await response.json() as { error?: string; invite_token?: string };
+      const body = await response.json() as { error?: string; invite_token?: string; auth_mode?: 'access_sso' | 'local_password' };
       if (!response.ok || body.error) {
         setAdminError(body.error || 'Failed to resend invite');
         return;
       }
-      setInviteTokenPreview(body.invite_token || '');
-      setAdminToast(`Invite resent for ${invite.email}.`);
+      const resentAuthMode = body.auth_mode || invite.auth_mode;
+      setInviteLinkPreview(
+        resentAuthMode === 'local_password' ? buildLocalPasswordInviteLink(body.invite_token || '') : ''
+      );
+      setAdminToast(
+        resentAuthMode === 'local_password'
+          ? `Invite resent for ${invite.email}. Share the refreshed invite link.`
+          : `Invite resent for ${invite.email}. They can sign in with Cloudflare Access.`
+      );
       await loadAdminData();
     } catch (requestError) {
       setAdminError(String(requestError));
@@ -2683,7 +2701,7 @@ function App() {
         <div className="top-utility-bar">
           {!navExpanded && (
             <div className="main-panel-brand" aria-label="EdgeData brand">
-              EdgeData
+              <EdgeDataLogo size={22} />
             </div>
           )}
           <div className="theme-toggle-popover">
@@ -2928,7 +2946,7 @@ function App() {
             setInviteAuthMode={setInviteAuthMode}
             inviteRoleIds={inviteRoleIds}
             setInviteRoleIds={setInviteRoleIds}
-            inviteTokenPreview={inviteTokenPreview}
+            inviteLinkPreview={inviteLinkPreview}
             newRoleId={newRoleId}
             setNewRoleId={setNewRoleId}
             newRoleName={newRoleName}

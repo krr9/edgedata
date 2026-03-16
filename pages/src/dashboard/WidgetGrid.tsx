@@ -1,6 +1,18 @@
 import { WidthProvider, Responsive, type Layout, type Layouts } from 'react-grid-layout';
 import type { DashboardWidget } from './types';
 import { WidgetRenderer } from './WidgetRenderer';
+import { buildInvestigationHref } from '../utils';
+
+function extractScopeFromPpl(ppl: string): { index?: string; service?: string; env?: string } {
+  const scope: { index?: string; service?: string; env?: string } = {};
+  const indexMatch = ppl.match(/index="([^"]+)"/);
+  if (indexMatch) scope.index = indexMatch[1];
+  const serviceMatch = ppl.match(/service="([^"]+)"/);
+  if (serviceMatch) scope.service = serviceMatch[1];
+  const envMatch = ppl.match(/env="([^"]+)"/);
+  if (envMatch) scope.env = envMatch[1];
+  return scope;
+}
 
 const ResponsiveGridLayout = WidthProvider(Responsive);
 
@@ -84,6 +96,15 @@ export function WidgetGrid({
           <div className="widget-card-header">
             <h3>{widget.title}</h3>
             <div className="widget-card-actions">
+              <a
+                className="secondary widget-investigate-btn"
+                href={buildInvestigationHref({
+                  source: 'dashboard',
+                  sourceLabel: widget.title,
+                  ...extractScopeFromPpl(widget.query_text)
+                })}
+                aria-label="Investigate"
+              >Investigate</a>
               <button className="secondary" onClick={() => onRefreshWidget(widget.id)} aria-label="Refresh">Refresh</button>
               {editable && (
                 <>

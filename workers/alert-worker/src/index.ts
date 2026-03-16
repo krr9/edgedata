@@ -28,6 +28,7 @@ export interface Env {
   WEBHOOK_URL?: string;
   QUERY_WORKER_URL?: string;
   QUERY_WORKER_TOKEN?: string;
+  QUERY_SERVICE?: Fetcher;
 }
 
 interface AccessJwtHeader {
@@ -800,12 +801,20 @@ async function processScheduledSearch(
       headers.Authorization = `Bearer ${queryWorkerToken}`;
     }
 
-    const response = await fetch(queryWorkerSearchUrl, {
+    const requestInit = {
       method: 'POST',
       headers,
       body: JSON.stringify(queryRequest)
-    });
+    };
+    const response = env.QUERY_SERVICE
+      ? await env.QUERY_SERVICE.fetch(new Request(queryWorkerSearchUrl, requestInit))
+      : await fetch(queryWorkerSearchUrl, requestInit);
     if (response.ok) {
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        const snippet = (await response.text().catch(() => '')).slice(0, 200);
+        throw new Error(`Expected JSON from query worker but got content-type=${contentType} body=${snippet}`);
+      }
       const body = await response.json() as {
         result_type?: 'events' | 'table';
         results?: Record<string, unknown>[];

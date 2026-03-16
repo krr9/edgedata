@@ -20,6 +20,10 @@ bucket_name = "edgedata-raw"
 binding = "WAE"
 dataset = "log_metrics"
 
+[[env.production.services]]
+binding = "QUERY_SERVICE"
+service = "query-worker-prod"
+
 [env.production.vars]
 CF_ACCOUNT_ID = ""
 REQUIRE_ACCESS_JWT = "true"
@@ -46,6 +50,10 @@ bucket_name = "edgedata-raw"
 [[analytics_engine_datasets]]
 binding = "WAE"
 dataset = "log_metrics"
+
+[[services]]
+binding = "QUERY_SERVICE"
+service = "query-worker"
 
 [vars]
 CF_ACCOUNT_ID = ""

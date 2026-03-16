@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type {
   ScheduledSearchItem,
   ScheduledSearchResult,
@@ -67,6 +68,9 @@ export function ScheduledPage({
   setScheduledResults,
   setScheduledActiveRunBySearch
 }: ScheduledPageProps) {
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const pendingDelete = confirmDeleteId ? scheduledSearches.find(s => s.id === confirmDeleteId) : null;
+
   return (
     <div className="saved-view">
       {scheduledError && <div className="error-banner">{scheduledError}</div>}
@@ -78,14 +82,33 @@ export function ScheduledPage({
         </div>
 
         {showScheduleForm && (
-          <div className="card scheduled-form-card">
-            <input type="text" value={scheduleFormName} onChange={e => setScheduleFormName(e.target.value)} placeholder="Search name" />
-            <input type="text" value={scheduleFormPpl} onChange={e => setScheduleFormPpl(e.target.value)} placeholder="PPL query (e.g. search * | where level=&quot;error&quot; | stats count() by service)" />
-            <div className="scheduled-form-row">
-              <input type="text" value={scheduleFormCron} onChange={e => setScheduleFormCron(e.target.value)} placeholder="Cron (0 * * * *)" className="scheduled-form-cron" />
-              <input type="number" value={scheduleFormWindow} onChange={e => setScheduleFormWindow(Number(e.target.value) || 60)} placeholder="Window (min)" className="scheduled-form-window" />
+          <div className="scheduled-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowScheduleForm(false); }}>
+            <div className="scheduled-modal">
+              <div className="scheduled-modal-header">
+                <h3>New Scheduled Search</h3>
+                <button className="scheduled-modal-close" onClick={() => setShowScheduleForm(false)}>&times;</button>
+              </div>
+              <div className="scheduled-modal-body">
+                <label className="scheduled-field-label">Name</label>
+                <input type="text" value={scheduleFormName} onChange={e => setScheduleFormName(e.target.value)} placeholder="e.g. Error Rate Check" />
+                <label className="scheduled-field-label">PPL Query</label>
+                <input type="text" value={scheduleFormPpl} onChange={e => setScheduleFormPpl(e.target.value)} placeholder='search * | where level="error" | stats count() by service' />
+                <div className="scheduled-form-row">
+                  <div className="scheduled-field-group">
+                    <label className="scheduled-field-label">Cron Schedule</label>
+                    <input type="text" value={scheduleFormCron} onChange={e => setScheduleFormCron(e.target.value)} placeholder="*/30 * * * *" />
+                  </div>
+                  <div className="scheduled-field-group">
+                    <label className="scheduled-field-label">Window (minutes)</label>
+                    <input type="number" value={scheduleFormWindow} onChange={e => setScheduleFormWindow(Number(e.target.value) || 60)} placeholder="60" />
+                  </div>
+                </div>
+              </div>
+              <div className="scheduled-modal-footer">
+                <button className="secondary" onClick={() => setShowScheduleForm(false)}>Cancel</button>
+                <button onClick={() => void createScheduledSearch()}>Create</button>
+              </div>
             </div>
-            <button onClick={() => void createScheduledSearch()}>Create Scheduled Search</button>
           </div>
         )}
 
@@ -140,7 +163,7 @@ export function ScheduledPage({
                 >
                   {scheduledResults[ss.id] ? 'Hide Runs' : 'Results'}
                 </button>
-                <button className="danger" onClick={() => void deleteScheduledSearch(ss.id)}>Delete</button>
+                <button className="danger" onClick={() => setConfirmDeleteId(ss.id)}>Delete</button>
               </div>
             </div>
 
@@ -253,6 +276,26 @@ export function ScheduledPage({
           </div>
         ))}
       </div>
+
+      {pendingDelete && (
+        <div className="scheduled-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setConfirmDeleteId(null); }}>
+          <div className="scheduled-modal scheduled-modal-narrow">
+            <div className="scheduled-modal-header">
+              <h3>Delete Scheduled Search</h3>
+              <button className="scheduled-modal-close" onClick={() => setConfirmDeleteId(null)}>&times;</button>
+            </div>
+            <div className="scheduled-modal-body">
+              <p className="confirm-delete-text">
+                Are you sure you want to delete <strong>{pendingDelete.name}</strong>? This will also remove all run history. This action cannot be undone.
+              </p>
+            </div>
+            <div className="scheduled-modal-footer">
+              <button className="secondary" onClick={() => setConfirmDeleteId(null)}>Cancel</button>
+              <button className="danger" onClick={() => { void deleteScheduledSearch(pendingDelete.id); setConfirmDeleteId(null); }}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

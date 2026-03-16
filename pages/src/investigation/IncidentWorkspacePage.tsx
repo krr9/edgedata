@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { PivotChips } from './PivotChips';
+import { RelatedEventsPanel } from './RelatedEventsPanel';
 import { DemoScenarioPicker, type DemoScenarioSelection } from './DemoScenarioPicker';
-import type { InvestigationPivots, PivotKey } from './types';
+import type { InvestigationPivots, PivotKey, RelatedEvent } from './types';
+import { pivotsFromRelatedEvent, hasPivots } from './types';
 import { API_PROXY_BASE } from '../constants';
-import { formatDateTimeLocalValue } from '../utils';
+import { formatDateTimeLocalValue, type InvestigationContext } from '../utils';
 
 interface BootstrapPayload {
   scope: { index: string; service: string; env: string };
@@ -11,14 +13,17 @@ interface BootstrapPayload {
   pivot_chips: Array<{ key: string; value: string }>;
 }
 
-interface SavedWorkspace {
-  id: string;
-  name: string | null;
-  owner_user_id: string | null;
-  source_type: string | null;
-  scope_json: string;
-  created_at: string;
+interface SignalCount {
+  loading: boolean;
+  total: number | null;
+  label: string | null;
 }
+
+const SOURCE_LABELS: Record<string, string> = {
+  alert: 'Alert',
+  search: 'Log Event',
+  dashboard: 'Dashboard'
+};
 
 function escapePplValue(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -62,9 +67,22 @@ function buildTraceContextPpl(
   return `search * | where ${conditions.join(' and ')} | transaction trace_id maxspan=5m maxevents=200 | sort -ts | head 200`;
 }
 
+function defaultTimeRange(): { from: string; to: string } {
+  const to = new Date();
+  const from = new Date(to.getTime() - 6 * 60 * 60 * 1000);
+  return { from: from.toISOString(), to: to.toISOString() };
+}
+
+function formatCompact(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
 interface IncidentWorkspacePageProps {
   apiToken: string;
   sessionIdFromUrl: string | null;
+  initialContext?: InvestigationContext | null;
   onRunStarterQuery?: (selection: WorkspaceStarterSelection) => void;
 }
 
@@ -76,67 +94,51 @@ export interface WorkspaceStarterSelection {
   pivots: InvestigationPivots;
 }
 
-function defaultTimeRange(): { from: string; to: string } {
-  const to = new Date();
-  const from = new Date(to.getTime() - 6 * 60 * 60 * 1000);
-  return { from: from.toISOString(), to: to.toISOString() };
-}
-
-function parseScopeJson(json: string): { index: string; service: string; env: string } | null {
-  try {
-    const obj = JSON.parse(json);
-    if (obj && typeof obj === 'object') {
-      return {
-        index: String(obj.index || ''),
-        service: String(obj.service || ''),
-        env: String(obj.env || '')
-      };
-    }
-  } catch { /* ignore */ }
-  return null;
-}
-
-function formatRelativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  return `${days}d ago`;
-}
-
-type ViewMode = 'list' | 'editor';
-
 export function IncidentWorkspacePage({
   apiToken,
   sessionIdFromUrl,
+  initialContext,
   onRunStarterQuery
 }: IncidentWorkspacePageProps) {
-  const [mode, setMode] = useState<ViewMode>(sessionIdFromUrl ? 'editor' : 'list');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [savedList, setSavedList] = useState<SavedWorkspace[]>([]);
-  const [listLoading, setListLoading] = useState(false);
+  const initScope = initialContext
+    ? {
+        index: initialContext.index || 'otel-demo',
+        service: initialContext.service || 'frontend',
+        env: initialContext.env || 'demo'
+      }
+    : { index: 'otel-demo', service: 'frontend', env: 'demo' };
 
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [workspaceName, setWorkspaceName] = useState('');
-  const [scope, setScope] = useState({ index: 'otel-demo', service: 'frontend', env: 'demo' });
-  const [time, setTime] = useState<{ from: string; to: string }>(defaultTimeRange);
-  const [pivots, setPivots] = useState<InvestigationPivots>({});
+  const initTime = (initialContext?.time_from && initialContext?.time_to)
+    ? { from: initialContext.time_from, to: initialContext.time_to }
+    : defaultTimeRange();
+
+  const initPivots: InvestigationPivots = {};
+  if (initialContext?.trace_id) initPivots.trace_id = initialContext.trace_id;
+  if (initialContext?.request_id) initPivots.request_id = initialContext.request_id;
+  if (initialContext?.user_id) initPivots.user_id = initialContext.user_id;
+  if (initialContext?.msg_hash) initPivots.msg_hash = initialContext.msg_hash;
+
+  const [scope, setScope] = useState(initScope);
+  const [time, setTime] = useState(initTime);
+  const [pivots, setPivots] = useState<InvestigationPivots>(initPivots);
   const [starterQueries, setStarterQueries] = useState<BootstrapPayload['starter_queries']>([]);
+  const [signalCounts, setSignalCounts] = useState<Record<string, SignalCount>>({});
 
-  const [draftName, setDraftName] = useState('');
   const [draftIndex, setDraftIndex] = useState(scope.index);
   const [draftService, setDraftService] = useState(scope.service);
   const [draftEnv, setDraftEnv] = useState(scope.env);
   const [draftFrom, setDraftFrom] = useState(() => formatDateTimeLocalValue(new Date(time.from)));
   const [draftTo, setDraftTo] = useState(() => formatDateTimeLocalValue(new Date(time.to)));
+  const [scopeExpanded, setScopeExpanded] = useState(false);
 
   const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const [shareLink, setShareLink] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const sessionRestoredRef = useRef(false);
 
   const apiFetch = useCallback(
     (path: string, init?: RequestInit) => {
@@ -146,19 +148,6 @@ export function IncidentWorkspacePage({
     },
     [apiToken]
   );
-
-  const loadList = useCallback(async () => {
-    setListLoading(true);
-    try {
-      const res = await apiFetch('/investigations/sessions');
-      const body = (await res.json()) as { sessions?: SavedWorkspace[]; error?: string };
-      if (res.ok && body.sessions) {
-        setSavedList(body.sessions);
-      }
-    } catch { /* ignore */ } finally {
-      setListLoading(false);
-    }
-  }, [apiFetch]);
 
   const loadBootstrap = useCallback(
     async (
@@ -186,11 +175,41 @@ export function IncidentWorkspacePage({
         for (const c of body.pivot_chips || []) {
           if (c.key && c.value) chips[c.key as PivotKey] = c.value;
         }
-        setPivots(chips);
+        setPivots((prev) => ({ ...chips, ...prev }));
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Request failed');
       } finally {
         setLoading(false);
+      }
+    },
+    [apiFetch]
+  );
+
+  const loadSignalCount = useCallback(
+    async (query: { id: string; ppl: string }, t: { from: string; to: string }) => {
+      setSignalCounts((prev) => ({ ...prev, [query.id]: { loading: true, total: null, label: null } }));
+      try {
+        const response = await apiFetch('/search/summary', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ time: { from: t.from, to: t.to }, ppl: query.ppl, limit: 500, cursor: null })
+        });
+        const body = (await response.json()) as {
+          timeline?: Array<{ minute: string; count: number }>;
+          stats?: Record<string, unknown>;
+          error?: string;
+        };
+        if (response.ok && body.timeline) {
+          const total = body.timeline.reduce((s, p) => s + p.count, 0);
+          setSignalCounts((prev) => ({
+            ...prev,
+            [query.id]: { loading: false, total, label: formatCompact(total) }
+          }));
+        } else {
+          setSignalCounts((prev) => ({ ...prev, [query.id]: { loading: false, total: null, label: null } }));
+        }
+      } catch {
+        setSignalCounts((prev) => ({ ...prev, [query.id]: { loading: false, total: null, label: null } }));
       }
     },
     [apiFetch]
@@ -202,43 +221,32 @@ export function IncidentWorkspacePage({
       setError(null);
       try {
         const res = await apiFetch(`/investigations/session/${id}`);
-        const body = (await res.json()) as {
-          id?: string;
-          name?: string | null;
-          scope_json?: string;
-          state_json?: string;
-          error?: string;
-        };
+        const body = (await res.json()) as { scope_json?: string; state_json?: string; error?: string };
         if (!res.ok || body.error) {
-          setError(body.error || 'Failed to load workspace');
+          setError(body.error || 'Failed to load session');
           return;
         }
-        setActiveSessionId(id);
-        setWorkspaceName(body.name || '');
-        setDraftName(body.name || '');
-
-        const loadedScope = body.scope_json ? parseScopeJson(body.scope_json) : null;
-        const s = loadedScope || { index: 'otel-demo', service: 'frontend', env: 'demo' };
+        let s = { index: 'otel-demo', service: 'frontend', env: 'demo' };
+        if (body.scope_json) {
+          try { const parsed = JSON.parse(body.scope_json); s = { index: parsed.index || s.index, service: parsed.service || s.service, env: parsed.env || s.env }; } catch { /* ignore */ }
+        }
         setScope(s);
         setDraftIndex(s.index);
         setDraftService(s.service);
         setDraftEnv(s.env);
-
-        let loadedTime: { from: string; to: string } | null = null;
-        let loadedPivots: InvestigationPivots = {};
+        let t = defaultTimeRange();
+        let p: InvestigationPivots = {};
         if (body.state_json) {
           try {
             const state = JSON.parse(body.state_json);
-            if (state.time) loadedTime = state.time;
-            if (state.pivots) loadedPivots = state.pivots;
+            if (state.time) t = state.time;
+            if (state.pivots) p = state.pivots;
           } catch { /* ignore */ }
         }
-        const t = loadedTime || defaultTimeRange();
         setTime(t);
         setDraftFrom(formatDateTimeLocalValue(new Date(t.from)));
         setDraftTo(formatDateTimeLocalValue(new Date(t.to)));
-        setPivots(loadedPivots);
-        setMode('editor');
+        setPivots(p);
         void loadBootstrap(s, t);
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Request failed');
@@ -250,35 +258,32 @@ export function IncidentWorkspacePage({
   );
 
   useEffect(() => {
+    if (sessionRestoredRef.current) return;
+    sessionRestoredRef.current = true;
     if (sessionIdFromUrl) {
       void loadSession(sessionIdFromUrl);
     } else {
-      void loadList().then(() => {
-        void loadBootstrap();
-      });
+      void loadBootstrap(initScope, initTime);
     }
-  }, [sessionIdFromUrl]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleNew = useCallback(() => {
-    setActiveSessionId(null);
-    setWorkspaceName('');
-    setDraftName('');
-    const s = { index: 'otel-demo', service: 'frontend', env: 'demo' };
-    const t = defaultTimeRange();
-    setScope(s);
-    setTime(t);
-    setDraftIndex(s.index);
-    setDraftService(s.service);
-    setDraftEnv(s.env);
-    setDraftFrom(formatDateTimeLocalValue(new Date(t.from)));
-    setDraftTo(formatDateTimeLocalValue(new Date(t.to)));
-    setPivots({});
-    setStarterQueries([]);
-    setError(null);
-    setSaveError(null);
-    setMode('editor');
-    void loadBootstrap(s, t);
-  }, [loadBootstrap]);
+  useEffect(() => {
+    if (starterQueries.length === 0) return;
+    for (const q of starterQueries) {
+      void loadSignalCount(q, time);
+    }
+  }, [starterQueries, time.from, time.to]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    setDraftIndex(scope.index);
+    setDraftService(scope.service);
+    setDraftEnv(scope.env);
+  }, [scope.index, scope.service, scope.env]);
+
+  useEffect(() => {
+    setDraftFrom(formatDateTimeLocalValue(new Date(time.from)));
+    setDraftTo(formatDateTimeLocalValue(new Date(time.to)));
+  }, [time.from, time.to]);
 
   const handleApplyScope = useCallback(() => {
     const nextScope = {
@@ -286,78 +291,12 @@ export function IncidentWorkspacePage({
       service: draftService.trim() || 'frontend',
       env: draftEnv.trim() || 'demo'
     };
-    const nextTime = {
-      from: new Date(draftFrom).toISOString(),
-      to: new Date(draftTo).toISOString()
-    };
+    const nextTime = { from: new Date(draftFrom).toISOString(), to: new Date(draftTo).toISOString() };
     setScope(nextScope);
     setTime(nextTime);
-    setWorkspaceName(draftName);
+    setSignalCounts({});
     void loadBootstrap(nextScope, nextTime);
-  }, [draftIndex, draftService, draftEnv, draftFrom, draftTo, draftName, loadBootstrap]);
-
-  const handleSave = useCallback(async () => {
-    setSaving(true);
-    setSaveError(null);
-    const payload = {
-      name: draftName.trim() || null,
-      scope: scope,
-      state: { scope, time, pivots },
-      source_type: 'workspace'
-    };
-    try {
-      if (activeSessionId) {
-        const res = await apiFetch(`/investigations/session/${activeSessionId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        const body = (await res.json()) as { error?: string };
-        if (!res.ok || body.error) {
-          setSaveError(body.error || 'Failed to update');
-          return;
-        }
-        setWorkspaceName(draftName.trim());
-      } else {
-        const res = await apiFetch('/investigations/session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        const body = (await res.json()) as { id?: string; error?: string };
-        if (!res.ok || body.error) {
-          setSaveError(body.error || 'Failed to save');
-          return;
-        }
-        if (body.id) {
-          setActiveSessionId(body.id);
-          setWorkspaceName(draftName.trim());
-        }
-      }
-    } catch (e) {
-      setSaveError(e instanceof Error ? e.message : 'Request failed');
-    } finally {
-      setSaving(false);
-    }
-  }, [apiFetch, activeSessionId, draftName, scope, time, pivots]);
-
-  const handleDelete = useCallback(async (id: string) => {
-    try {
-      await apiFetch(`/investigations/session/${id}`, { method: 'DELETE' });
-      setSavedList((prev) => prev.filter((s) => s.id !== id));
-      if (activeSessionId === id) {
-        setActiveSessionId(null);
-        setMode('list');
-      }
-    } catch { /* ignore */ }
-  }, [apiFetch, activeSessionId]);
-
-  const handleBack = useCallback(() => {
-    setMode('list');
-    setError(null);
-    setSaveError(null);
-    void loadList();
-  }, [loadList]);
+  }, [draftIndex, draftService, draftEnv, draftFrom, draftTo, loadBootstrap]);
 
   const handlePivotClick = useCallback((key: PivotKey) => {
     setPivots((prev) => {
@@ -367,12 +306,20 @@ export function IncidentWorkspacePage({
     });
   }, []);
 
+  const handleSelectRelatedEvent = useCallback((ev: RelatedEvent) => {
+    const newPivots = pivotsFromRelatedEvent(ev);
+    setPivots(newPivots);
+    setSignalCounts({});
+    void loadBootstrap(scope, time);
+  }, [loadBootstrap, scope, time]);
+
   const handleSelectScenario = useCallback(
     (selection: DemoScenarioSelection) => {
       setScope(selection.scope);
       setTime(selection.time);
       setPivots(selection.pivots);
       setStarterQueries(selection.starterQueries);
+      setSignalCounts({});
       setDraftIndex(selection.scope.index);
       setDraftService(selection.scope.service);
       setDraftEnv(selection.scope.env);
@@ -382,214 +329,231 @@ export function IncidentWorkspacePage({
     []
   );
 
-  // ── List view ──────────────────────────────────────────
-  if (mode === 'list') {
+  const handleSaveShare = useCallback(async () => {
+    setSaving(true);
+    setShareLink(null);
+    try {
+      const res = await apiFetch('/investigations/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: initialContext?.sourceLabel || null,
+          scope,
+          state: { scope, time, pivots },
+          source_type: 'workspace'
+        })
+      });
+      const body = (await res.json()) as { id?: string; error?: string };
+      if (res.ok && body.id) {
+        setShareLink(`${window.location.origin}${window.location.pathname}?session=${body.id}`);
+      }
+    } catch { /* ignore */ } finally {
+      setSaving(false);
+    }
+  }, [apiFetch, scope, time, pivots, initialContext?.sourceLabel]);
+
+  const handleCopy = useCallback(() => {
+    if (!shareLink) return;
+    void navigator.clipboard.writeText(shareLink).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }, [shareLink]);
+
+  const sourceTag = initialContext?.source ? SOURCE_LABELS[initialContext.source] || initialContext.source : null;
+  const sourceLabel = initialContext?.sourceLabel || null;
+
+  if (loading) {
     return (
       <div className="workspace-view">
-        <div className="workspace-list-header">
-          <h2>Workspaces</h2>
-          <button type="button" className="primary" onClick={handleNew}>
-            New Workspace
-          </button>
-        </div>
-        {listLoading && <div className="workspace-loading app-loading">Loading…</div>}
-        {!listLoading && (
-          <ul className="workspace-saved-list">
-            <li className="workspace-saved-item workspace-default-item card">
-              <div className="workspace-saved-info">
-                <strong>Default Workspace</strong>
-                <span className="workspace-saved-scope">otel-demo / frontend / demo</span>
-              </div>
-              <div className="workspace-saved-actions">
-                <button type="button" className="secondary" onClick={handleNew}>
-                  Open
-                </button>
-              </div>
-            </li>
-            {savedList.map((ws) => {
-              const wsScope = parseScopeJson(ws.scope_json);
-              return (
-                <li key={ws.id} className="workspace-saved-item card">
-                  <div className="workspace-saved-info">
-                    <strong>{ws.name || 'Untitled workspace'}</strong>
-                    {wsScope && (
-                      <span className="workspace-saved-scope">
-                        {wsScope.index} / {wsScope.service} / {wsScope.env}
-                      </span>
-                    )}
-                    <span className="workspace-saved-time">{formatRelativeTime(ws.created_at)}</span>
-                  </div>
-                  <div className="workspace-saved-actions">
-                    <button type="button" className="secondary" onClick={() => void loadSession(ws.id)}>
-                      Open
-                    </button>
-                    <button
-                      type="button"
-                      className="workspace-delete-btn"
-                      onClick={() => void handleDelete(ws.id)}
-                      title="Delete workspace"
-                    >
-                      &times;
-                    </button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
+        <div className="workspace-loading app-loading">Loading investigation…</div>
       </div>
     );
   }
 
-  // ── Editor view ────────────────────────────────────────
   return (
     <div className="workspace-view">
       {error && <div className="error-banner">{error}</div>}
 
-      <div className="workspace-editor-header">
-        <button type="button" className="secondary workspace-back-btn" onClick={handleBack}>
-          &larr; All Workspaces
-        </button>
-        <div className="workspace-editor-title">
-          <input
-            type="text"
-            className="workspace-name-input"
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
-            placeholder="Untitled workspace"
-          />
-          {activeSessionId && <span className="workspace-saved-badge">Saved</span>}
+      {/* ── Context bar ───────────────────────────────────── */}
+      <div className="workspace-context-bar">
+        <div className="workspace-context-left">
+          {sourceTag && (
+            <span className="workspace-source-tag">{sourceTag}</span>
+          )}
+          {sourceLabel && (
+            <span className="workspace-source-label">{sourceLabel}</span>
+          )}
+          {!sourceTag && !sourceLabel && (
+            <span className="workspace-source-label">Investigation</span>
+          )}
+          <span className="workspace-scope-badge">
+            {scope.index} / {scope.service} / {scope.env}
+          </span>
         </div>
-        <div className="workspace-editor-actions">
+        <div className="workspace-context-right">
           <button
             type="button"
-            className="primary"
-            onClick={handleSave}
+            className="secondary workspace-scope-edit-btn"
+            onClick={() => setScopeExpanded((o) => !o)}
+          >
+            {scopeExpanded ? 'Close' : 'Edit Scope'}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={handleSaveShare}
             disabled={saving}
           >
-            {saving ? 'Saving…' : activeSessionId ? 'Save' : 'Create'}
+            {saving ? 'Saving…' : 'Save & Share'}
           </button>
-          {saveError && <span className="workspace-save-error">{saveError}</span>}
+          {shareLink && (
+            <div className="workspace-share-link">
+              <input readOnly value={shareLink} className="workspace-share-input" />
+              <button className="secondary" onClick={handleCopy}>
+                {copied ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
-      <DemoScenarioPicker apiFetch={apiFetch} onSelectScenario={handleSelectScenario} />
-
-      <div className="workspace-scope-editor card">
-        <h3>Scope</h3>
-        <div className="workspace-scope-fields">
-          <div className="workspace-scope-row">
-            <label>
-              Index
-              <input type="text" value={draftIndex} onChange={(e) => setDraftIndex(e.target.value)} placeholder="otel-demo" />
-            </label>
-            <label>
-              Service
-              <input type="text" value={draftService} onChange={(e) => setDraftService(e.target.value)} placeholder="frontend" />
-            </label>
-            <label>
-              Environment
-              <input type="text" value={draftEnv} onChange={(e) => setDraftEnv(e.target.value)} placeholder="demo" />
-            </label>
-          </div>
-          <div className="workspace-scope-row">
-            <label>
-              From
-              <input type="datetime-local" value={draftFrom} onChange={(e) => setDraftFrom(e.target.value)} />
-            </label>
-            <label>
-              To
-              <input type="datetime-local" value={draftTo} onChange={(e) => setDraftTo(e.target.value)} />
-            </label>
-            <div className="workspace-scope-actions">
-              <button type="button" className="secondary" onClick={handleApplyScope} disabled={loading}>
-                {loading ? 'Loading…' : 'Apply'}
-              </button>
+      {/* ── Scope editor (collapsible) ────────────────────── */}
+      {scopeExpanded && (
+        <div className="workspace-scope-editor card">
+          <div className="workspace-scope-fields">
+            <div className="workspace-scope-row">
+              <label>
+                Index
+                <input type="text" value={draftIndex} onChange={(e) => setDraftIndex(e.target.value)} placeholder="otel-demo" />
+              </label>
+              <label>
+                Service
+                <input type="text" value={draftService} onChange={(e) => setDraftService(e.target.value)} placeholder="frontend" />
+              </label>
+              <label>
+                Environment
+                <input type="text" value={draftEnv} onChange={(e) => setDraftEnv(e.target.value)} placeholder="demo" />
+              </label>
+            </div>
+            <div className="workspace-scope-row">
+              <label>
+                From
+                <input type="datetime-local" value={draftFrom} onChange={(e) => setDraftFrom(e.target.value)} />
+              </label>
+              <label>
+                To
+                <input type="datetime-local" value={draftTo} onChange={(e) => setDraftTo(e.target.value)} />
+              </label>
+              <div className="workspace-scope-actions">
+                <button type="button" className="primary" onClick={handleApplyScope}>
+                  Apply
+                </button>
+              </div>
             </div>
           </div>
         </div>
-      </div>
+      )}
 
-      <div className="workspace-content">
-        <div className="workspace-top-signals card">
-          <h3>Top Signals</h3>
-          {starterQueries.length === 0 && !loading && (
-            <p className="empty-card">Apply a scope to generate starter queries.</p>
-          )}
-          <ul className="workspace-starter-list">
-            {starterQueries.map((q) => {
-              const handleOpen = () => {
-                if (!onRunStarterQuery) return;
-                onRunStarterQuery({ title: q.title, ppl: q.ppl, scope, time, pivots });
-              };
-              return (
-                <li
-                  key={q.id}
-                  className={onRunStarterQuery ? 'interactive' : ''}
-                  role={onRunStarterQuery ? 'button' : undefined}
-                  tabIndex={onRunStarterQuery ? 0 : undefined}
-                  onClick={onRunStarterQuery ? handleOpen : undefined}
-                  onKeyDown={
-                    onRunStarterQuery
-                      ? (event) => {
-                          if (event.key === 'Enter' || event.key === ' ') {
-                            event.preventDefault();
-                            handleOpen();
-                          }
-                        }
-                      : undefined
-                  }
-                >
-                  <strong>{q.title}</strong>
-                  <code className="workspace-ppl">{q.ppl}</code>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
+      <DemoScenarioPicker apiFetch={apiFetch} onSelectScenario={handleSelectScenario} />
 
-        {Object.keys(pivots).length > 0 && (
-          <>
-            <PivotChips pivots={pivots} onPivotClick={handlePivotClick} />
-            {onRunStarterQuery && (
-              <div className="workspace-pivot-actions">
+      {/* ── Pivot chips ───────────────────────────────────── */}
+      {hasPivots(pivots) && (
+        <div className="workspace-pivots-section">
+          <PivotChips pivots={pivots} onPivotClick={handlePivotClick} />
+          {onRunStarterQuery && (
+            <div className="workspace-pivot-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => {
+                  onRunStarterQuery({
+                    title: 'Pivot context',
+                    ppl: buildScopedPpl(scope, pivots),
+                    scope,
+                    time,
+                    pivots
+                  });
+                }}
+              >
+                Open pivots in Search
+              </button>
+              {pivots.trace_id && (
                 <button
                   type="button"
                   className="secondary"
                   onClick={() => {
                     onRunStarterQuery({
-                      title: 'Pivot context',
-                      ppl: buildScopedPpl(scope, pivots),
+                      title: 'Trace context',
+                      ppl: buildTraceContextPpl(scope, pivots.trace_id as string),
                       scope,
                       time,
                       pivots
                     });
                   }}
                 >
-                  Open pivots in Search
+                  Trace Context
                 </button>
-                {pivots.trace_id && (
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => {
-                      onRunStarterQuery({
-                        title: 'Trace context',
-                        ppl: buildTraceContextPpl(scope, pivots.trace_id as string),
-                        scope,
-                        time,
-                        pivots
-                      });
-                    }}
-                  >
-                    Open trace context
-                  </button>
-                )}
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Top Signals with inline counts ────────────────── */}
+      <div className="workspace-signals-grid">
+        {starterQueries.map((q) => {
+          const count = signalCounts[q.id];
+          const handleOpen = () => {
+            if (!onRunStarterQuery) return;
+            onRunStarterQuery({ title: q.title, ppl: q.ppl, scope, time, pivots });
+          };
+          return (
+            <div
+              key={q.id}
+              className={`workspace-signal-card card${onRunStarterQuery ? ' interactive' : ''}`}
+              role={onRunStarterQuery ? 'button' : undefined}
+              tabIndex={onRunStarterQuery ? 0 : undefined}
+              onClick={onRunStarterQuery ? handleOpen : undefined}
+              onKeyDown={
+                onRunStarterQuery
+                  ? (event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        handleOpen();
+                      }
+                    }
+                  : undefined
+              }
+            >
+              <div className="workspace-signal-header">
+                <strong>{q.title}</strong>
+                <span className="workspace-signal-count">
+                  {count?.loading ? '…' : count?.label ?? '—'}
+                </span>
               </div>
-            )}
-          </>
-        )}
+              <span className="workspace-signal-desc">{SIGNAL_DESCRIPTIONS[q.id] || 'Open in Search'}</span>
+            </div>
+          );
+        })}
       </div>
+
+      {/* ── Related Events ────────────────────────────────── */}
+      {hasPivots(pivots) && (
+        <RelatedEventsPanel
+          apiFetch={apiFetch}
+          scope={scope}
+          time={time}
+          pivots={pivots}
+          onSelectRelatedEvent={handleSelectRelatedEvent}
+        />
+      )}
     </div>
   );
 }
+
+const SIGNAL_DESCRIPTIONS: Record<string, string> = {
+  errors: 'Recent error-level events in scope',
+  latency: 'Average duration by host',
+  volume: 'Event volume over time'
+};

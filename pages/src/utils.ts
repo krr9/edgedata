@@ -581,17 +581,52 @@ export function parseAlertParamsConfig(raw: string): AlertParamsConfig {
   }
 }
 
+export interface InvestigationContext {
+  source?: string;
+  sourceLabel?: string;
+  index?: string;
+  service?: string;
+  env?: string;
+  trace_id?: string;
+  request_id?: string;
+  user_id?: string;
+  msg_hash?: string;
+  time_from?: string;
+  time_to?: string;
+}
+
+export function buildInvestigationHref(ctx: InvestigationContext): string {
+  const query = new URLSearchParams();
+  query.set('view', 'workspace');
+  for (const [k, v] of Object.entries(ctx)) {
+    if (v) query.set(k, v);
+  }
+  return `?${query.toString()}`;
+}
+
+export function parseInvestigationUrlParams(loc: Pick<Location, 'search'>): InvestigationContext | null {
+  const params = new URLSearchParams(loc.search);
+  if (params.get('view') !== 'workspace') return null;
+  const ctx: InvestigationContext = {};
+  let hasContext = false;
+  for (const key of ['source', 'sourceLabel', 'index', 'service', 'env', 'trace_id', 'request_id', 'user_id', 'msg_hash', 'time_from', 'time_to'] as const) {
+    const v = params.get(key)?.trim();
+    if (v) { ctx[key] = v; hasContext = true; }
+  }
+  return hasContext ? ctx : null;
+}
+
 export function buildAlertWorkspaceHref(alert: AlertDefinition): string | null {
   const params = parseAlertParamsConfig(alert.params_json);
   const service = String(params.service || '').trim();
   if (!service) return null;
-  const query = new URLSearchParams();
-  query.set('view', 'workspace');
-  query.set('source', 'alert');
-  query.set('service', service);
-  if (params.index) query.set('index', params.index);
-  if (params.env) query.set('env', params.env);
-  return `?${query.toString()}`;
+  return buildInvestigationHref({
+    source: 'alert',
+    sourceLabel: alert.name,
+    service,
+    index: params.index,
+    env: params.env
+  });
 }
 
 export function formatTimeCompact(ts: string): string {

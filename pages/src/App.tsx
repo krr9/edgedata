@@ -34,6 +34,7 @@ import {
   buildAskAiPlan,
   buildAlertDeepQuery,
   buildDefaultAlertDeepLink,
+  buildInvestigationHref,
   buildLocalFallbackSuggestions,
   buildTraceContextPplFromEvent,
   extractHighlightTerms,
@@ -47,6 +48,7 @@ import {
   modeLabel,
   parseAlertNotifyConfig,
   parseErrorPayload,
+  parseInvestigationUrlParams,
   parseViewMode,
   prettyJsonOrNull,
   readLevelCount,
@@ -633,11 +635,16 @@ function App() {
     return new URLSearchParams(window.location.search).get('session')?.trim() || null;
   }, []);
 
+  const investigationContext = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    return parseInvestigationUrlParams(window.location);
+  }, []);
+
   useEffect(() => {
-    if (sessionIdFromUrl && user) {
+    if ((sessionIdFromUrl || investigationContext) && user) {
       setView('workspace');
     }
-  }, [sessionIdFromUrl, user]);
+  }, [sessionIdFromUrl, investigationContext, user]);
 
   const canOpenAdmin = user?.role === 'admin' || user?.role === 'superadmin';
   const navItems = useMemo<Array<{ key: ViewMode; label: string }>>(() => {
@@ -2516,6 +2523,21 @@ function App() {
     void runSearch({ append: false, cursor: null, queryOverride: nextQuery });
   }, [runSearch, setAddressableView]);
 
+  const investigateEvent = useCallback((event: LogEvent) => {
+    const href = buildInvestigationHref({
+      source: 'search',
+      sourceLabel: event.message ? event.message.slice(0, 60) : undefined,
+      index: event.index || undefined,
+      service: event.service || undefined,
+      env: event.env || undefined,
+      trace_id: event.trace_id || undefined,
+      request_id: event.request_id || undefined,
+      user_id: event.user_id || undefined,
+      msg_hash: event.msg_hash || undefined
+    });
+    window.location.href = href;
+  }, []);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const syncViewFromLocation = () => {
@@ -2763,6 +2785,7 @@ function App() {
           <IncidentWorkspacePage
             apiToken={apiToken}
             sessionIdFromUrl={sessionIdFromUrl}
+            initialContext={investigationContext}
             onRunStarterQuery={runWorkspaceStarterQuery}
           />
         )}
@@ -3068,6 +3091,7 @@ function App() {
               </div>
 
               <div className="pivot-row">
+                <button className="investigate-btn" onClick={() => investigateEvent(selectedEvent)} aria-label="Open in Incident Workspace">Investigate</button>
                 <button onClick={() => runPivot(`index=${selectedEvent.index || 'default'}`)} aria-label="Pivot by index">Pivot Index</button>
                 {selectedEvent.trace_id && <button onClick={() => runPivot(`trace_id=${selectedEvent.trace_id}`)} aria-label="Pivot by trace_id">Pivot Trace</button>}
                 {selectedEvent.trace_id && <button onClick={() => openTraceContextFromEvent(selectedEvent)}>Trace Context</button>}

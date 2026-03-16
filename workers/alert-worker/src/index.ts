@@ -772,7 +772,9 @@ async function processScheduledSearch(
   const now = new Date(startedAtMs);
   const timeTo = now.toISOString();
   const timeFrom = new Date(now.getTime() - search.time_window_minutes * 60 * 1000).toISOString();
-  const queryWorkerSearchUrl = resolveQueryWorkerSearchUrl(env.QUERY_WORKER_URL);
+  const queryWorkerSearchUrl = env.QUERY_SERVICE
+    ? 'https://internal/search'
+    : resolveQueryWorkerSearchUrl(env.QUERY_WORKER_URL);
   const resultId = crypto.randomUUID();
   const actions = safeJsonParse<ScheduledSearchAction[]>(search.actions_json, []);
   const retainDays = asPositiveInt(actions.find((action) => action.retain_days)?.retain_days, 30);

@@ -1710,16 +1710,25 @@ function App() {
       const response = await apiFetch(`/scheduled-searches/${searchId}/runs/${runId}`);
       const body = await response.json() as ScheduledSearchRunDetail | { error?: string };
       if (!response.ok || ('error' in body && body.error)) {
-        throw new Error(('error' in body && body.error) ? body.error : 'Failed to load run detail');
+        throw new Error(('error' in body && body.error) ? body.error : `Failed to load run detail (${response.status})`);
       }
       setScheduledRunDetails((prev) => ({ ...prev, [runId]: body as ScheduledSearchRunDetail }));
       setScheduledActiveRunBySearch((prev) => ({ ...prev, [searchId]: runId }));
     } catch (err) {
+      console.error('[loadScheduledRunDetail]', err);
+      const existingResult = scheduledResults[searchId]?.find((r) => r.id === runId);
+      if (existingResult) {
+        setScheduledRunDetails((prev) => ({
+          ...prev,
+          [runId]: { ...existingResult, preview: [], query_request: {}, artifact: null } as ScheduledSearchRunDetail
+        }));
+        setScheduledActiveRunBySearch((prev) => ({ ...prev, [searchId]: runId }));
+      }
       setScheduledError(String(err));
     } finally {
       setScheduledRunLoading((prev) => ({ ...prev, [runId]: false }));
     }
-  }, [apiFetch]);
+  }, [apiFetch, scheduledResults]);
 
   const loadScheduledRunResults = useCallback(async (searchId: string, runId: string) => {
     setScheduledRunLoading((prev) => ({ ...prev, [runId]: true }));

@@ -38,6 +38,77 @@ export interface ScheduledPageProps {
   setScheduledActiveRunBySearch: React.Dispatch<React.SetStateAction<Record<string, string>>>;
 }
 
+function RunDetailModal({ detail, runPayload, onClose }: {
+  detail: ScheduledSearchRunDetail;
+  runPayload: ScheduledSearchRunResultsPayload | undefined;
+  onClose: () => void;
+}) {
+  const rows = runPayload?.results || detail.preview || [];
+  const columnKeys = rows.length > 0 ? Object.keys(rows[0]).slice(0, 8) : [];
+
+  return (
+    <div className="scheduled-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="scheduled-modal scheduled-modal-wide">
+        <div className="scheduled-modal-header">
+          <h3>{detail.summary?.headline || 'Run detail'}</h3>
+          <button className="scheduled-modal-close" onClick={onClose}>&times;</button>
+        </div>
+        <div className="scheduled-modal-body">
+          <div className="scheduled-run-detail-meta">
+            <span className={`scheduled-run-status status-${detail.status === 'success' ? 'success' : 'error'}`}>
+              {detail.status}
+            </span>
+            <span>{formatDateTime(detail.run_at)}</span>
+            <span>{detail.result_count} results</span>
+            {detail.trigger_type && <span>{detail.trigger_type}</span>}
+            {detail.requested_by && <span>{detail.requested_by}</span>}
+          </div>
+          <div className="scheduled-run-subrow">
+            <span>Window: {formatDateTime(detail.time_from)} to {formatDateTime(detail.time_to)}</span>
+            {runPayload?.partial && <span className="scheduled-run-badge-partial">Preview only</span>}
+          </div>
+          {detail.artifact && (
+            <div className="scheduled-run-artifact-meta">
+              Artifact expires {formatDateTime(detail.artifact.expires_at)}
+            </div>
+          )}
+          {detail.error_message && <div className="scheduled-run-error">{detail.error_message}</div>}
+          {rows.length === 0 ? (
+            <p className="scheduled-runs-empty">No rows captured for this run.</p>
+          ) : (
+            <div className="scheduled-run-preview">
+              <table>
+                <thead>
+                  <tr>
+                    {columnKeys.map((key) => (
+                      <th key={key}>{key}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.slice(0, 50).map((row, rowIndex) => (
+                    <tr key={rowIndex}>
+                      {columnKeys.map((key) => (
+                        <td key={`${rowIndex}-${key}`}>{String(row[key] ?? '')}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {rows.length > 50 && (
+                <p className="scheduled-runs-empty">{rows.length - 50} more rows not shown</p>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="scheduled-modal-footer">
+          <button className="secondary" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ScheduledPage({
   scheduledError,
   scheduledLoading,
@@ -69,7 +140,10 @@ export function ScheduledPage({
   setScheduledActiveRunBySearch
 }: ScheduledPageProps) {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [viewRunModal, setViewRunModal] = useState<{ searchId: string; runId: string } | null>(null);
   const pendingDelete = confirmDeleteId ? scheduledSearches.find(s => s.id === confirmDeleteId) : null;
+  const modalDetail = viewRunModal ? scheduledRunDetails[viewRunModal.runId] : undefined;
+  const modalPayload = viewRunModal ? scheduledRunResults[viewRunModal.runId] : undefined;
 
   return (
     <div className="saved-view">
@@ -198,6 +272,7 @@ export function ScheduledPage({
                           className="secondary"
                           disabled={scheduledRunLoading[r.id]}
                           onClick={() => {
+                            setViewRunModal({ searchId: ss.id, runId: r.id });
                             void Promise.all([
                               loadScheduledRunDetail(ss.id, r.id),
                               loadScheduledRunResults(ss.id, r.id)
@@ -211,71 +286,33 @@ export function ScheduledPage({
                   ))}
                 </div>
 
-                {scheduledActiveRunBySearch[ss.id] && scheduledRunDetails[scheduledActiveRunBySearch[ss.id]] && (
-                  <div className="scheduled-run-detail">
-                    {(() => {
-                      const activeRunId = scheduledActiveRunBySearch[ss.id];
-                      const detail = scheduledRunDetails[activeRunId];
-                      const runPayload = scheduledRunResults[activeRunId];
-                      const rows = runPayload?.results || detail.preview || [];
-                      const columnKeys = rows.length > 0 ? Object.keys(rows[0]).slice(0, 6) : [];
-                      return (
-                        <>
-                          <div className="scheduled-run-detail-header">
-                            <div>
-                              <strong>{detail.summary?.headline || 'Run detail'}</strong>
-                              <div className="scheduled-run-subrow">
-                                <span>{formatDateTime(detail.run_at)}</span>
-                                <span>{detail.status}</span>
-                                <span>{detail.result_count} results</span>
-                              </div>
-                            </div>
-                            {detail.artifact && (
-                              <span className="scheduled-run-artifact-meta">
-                                Artifact expires {formatDateTime(detail.artifact.expires_at)}
-                              </span>
-                            )}
-                          </div>
-                          <div className="scheduled-run-subrow">
-                            <span>Window: {formatDateTime(detail.time_from)} to {formatDateTime(detail.time_to)}</span>
-                            {runPayload?.partial && <span>Preview only</span>}
-                            {detail.query_request?.time && <span>On-demand result view ready</span>}
-                          </div>
-                          {detail.error_message && <div className="scheduled-run-error">{detail.error_message}</div>}
-                          {rows.length === 0 ? (
-                            <p className="scheduled-runs-empty">No rows captured for this run.</p>
-                          ) : (
-                            <div className="scheduled-run-preview">
-                              <table>
-                                <thead>
-                                  <tr>
-                                    {columnKeys.map((key) => (
-                                      <th key={key}>{key}</th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {rows.slice(0, 10).map((row, rowIndex) => (
-                                    <tr key={`${activeRunId}-${rowIndex}`}>
-                                      {columnKeys.map((key) => (
-                                        <td key={`${activeRunId}-${rowIndex}-${key}`}>{String(row[key] ?? '')}</td>
-                                      ))}
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-                        </>
-                      );
-                    })()}
-                  </div>
-                )}
               </div>
             )}
           </div>
         ))}
       </div>
+
+      {viewRunModal && (
+        modalDetail ? (
+          <RunDetailModal
+            detail={modalDetail}
+            runPayload={modalPayload}
+            onClose={() => setViewRunModal(null)}
+          />
+        ) : (
+          <div className="scheduled-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setViewRunModal(null); }}>
+            <div className="scheduled-modal scheduled-modal-narrow">
+              <div className="scheduled-modal-header">
+                <h3>Loading run...</h3>
+                <button className="scheduled-modal-close" onClick={() => setViewRunModal(null)}>&times;</button>
+              </div>
+              <div className="scheduled-modal-body">
+                <p className="empty-card">Fetching run details...</p>
+              </div>
+            </div>
+          </div>
+        )
+      )}
 
       {pendingDelete && (
         <div className="scheduled-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setConfirmDeleteId(null); }}>

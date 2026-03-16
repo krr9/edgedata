@@ -468,6 +468,25 @@ export default {
       }
     }
 
+    if (url.pathname === '/investigations/sessions' && request.method === 'GET') {
+      try {
+        assertPermission(auth, 'search.read');
+        const principal = auth.email || auth.principal;
+        const isAdmin = auth.role === 'admin' || auth.role === 'superadmin';
+        const rows = isAdmin
+          ? await env.DB.prepare(
+              'SELECT id, name, owner_user_id, source_type, scope_json, created_at FROM investigation_sessions ORDER BY created_at DESC LIMIT 100'
+            ).all<{ id: string; name: string | null; owner_user_id: string | null; source_type: string | null; scope_json: string; created_at: string }>()
+          : await env.DB.prepare(
+              'SELECT id, name, owner_user_id, source_type, scope_json, created_at FROM investigation_sessions WHERE owner_user_id = ? ORDER BY created_at DESC LIMIT 100'
+            ).bind(principal).all<{ id: string; name: string | null; owner_user_id: string | null; source_type: string | null; scope_json: string; created_at: string }>();
+        return jsonResponse({ sessions: rows.results || [] }, 200, requestCorsHeaders);
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders);
+      }
+    }
+
     if (url.pathname === '/investigations/session' && request.method === 'POST') {
       try {
         assertPermission(auth, 'search.read');
@@ -481,6 +500,7 @@ export default {
         const principal = auth.email || auth.principal;
         const recordInput = {
           id,
+          name: validation.name ?? null,
           owner_user_id: principal,
           source_type: validation.source_type,
           scope_json: validation.scope_json,
@@ -493,11 +513,12 @@ export default {
           return jsonResponse({ error: built.error }, 400, requestCorsHeaders);
         }
         await env.DB.prepare(
-          `INSERT INTO investigation_sessions (id, owner_user_id, source_type, scope_json, state_json, created_at, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO investigation_sessions (id, name, owner_user_id, source_type, scope_json, state_json, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
           .bind(
             built.id,
+            built.name ?? null,
             built.owner_user_id ?? null,
             built.source_type ?? null,
             built.scope_json,
@@ -506,7 +527,7 @@ export default {
             built.expires_at ?? null
           )
           .run();
-        return jsonResponse({ id: built.id, created_at: built.created_at }, 201, requestCorsHeaders);
+        return jsonResponse({ id: built.id, name: built.name ?? null, created_at: built.created_at }, 201, requestCorsHeaders);
       } catch (error) {
         await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
         return errorResponse(error, requestCorsHeaders);
@@ -514,6 +535,7 @@ export default {
     }
 
     const sessionMatch = url.pathname.match(/^\/investigations\/session\/([^/]+)$/);
+
     if (sessionMatch && request.method === 'GET') {
       try {
         assertPermission(auth, 'search.read');
@@ -522,11 +544,12 @@ export default {
           return jsonResponse({ error: 'Session id required' }, 400, requestCorsHeaders);
         }
         const row = await env.DB.prepare(
-          'SELECT id, owner_user_id, source_type, scope_json, state_json, created_at, expires_at FROM investigation_sessions WHERE id = ?'
+          'SELECT id, name, owner_user_id, source_type, scope_json, state_json, created_at, expires_at FROM investigation_sessions WHERE id = ?'
         )
           .bind(sessionId)
           .first<{
             id: string;
+            name: string | null;
             owner_user_id: string | null;
             source_type: string | null;
             scope_json: string;
@@ -542,19 +565,74 @@ export default {
         if (!canAccessInvestigationSession(row.owner_user_id, principal, isAdmin)) {
           throw new Error('Forbidden');
         }
-        return jsonResponse(
-          {
-            id: row.id,
-            owner_user_id: row.owner_user_id,
-            source_type: row.source_type,
-            scope_json: row.scope_json,
-            state_json: row.state_json,
-            created_at: row.created_at,
-            expires_at: row.expires_at
-          },
-          200,
-          requestCorsHeaders
-        );
+        return jsonResponse(row, 200, requestCorsHeaders);
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders);
+      }
+    }
+
+    if (sessionMatch && request.method === 'PUT') {
+      try {
+        assertPermission(auth, 'search.read');
+        const sessionId = sessionMatch[1];
+        if (!sessionId) {
+          return jsonResponse({ error: 'Session id required' }, 400, requestCorsHeaders);
+        }
+        const existing = await env.DB.prepare(
+          'SELECT owner_user_id FROM investigation_sessions WHERE id = ?'
+        ).bind(sessionId).first<{ owner_user_id: string | null }>();
+        if (!existing) {
+          return jsonResponse({ error: 'Session not found' }, 404, requestCorsHeaders);
+        }
+        const principal = auth.email || auth.principal;
+        const isAdmin = auth.role === 'admin' || auth.role === 'superadmin';
+        if (!canAccessInvestigationSession(existing.owner_user_id, principal, isAdmin)) {
+          throw new Error('Forbidden');
+        }
+        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+        const validation = validateSessionSaveRequest(body);
+        if (!validation.ok) {
+          return jsonResponse({ error: validation.error }, 400, requestCorsHeaders);
+        }
+        await env.DB.prepare(
+          `UPDATE investigation_sessions SET name = ?, scope_json = ?, state_json = ?, source_type = ? WHERE id = ?`
+        )
+          .bind(
+            validation.name ?? null,
+            validation.scope_json,
+            validation.state_json,
+            validation.source_type ?? null,
+            sessionId
+          )
+          .run();
+        return jsonResponse({ id: sessionId, updated: true }, 200, requestCorsHeaders);
+      } catch (error) {
+        await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
+        return errorResponse(error, requestCorsHeaders);
+      }
+    }
+
+    if (sessionMatch && request.method === 'DELETE') {
+      try {
+        assertPermission(auth, 'search.read');
+        const sessionId = sessionMatch[1];
+        if (!sessionId) {
+          return jsonResponse({ error: 'Session id required' }, 400, requestCorsHeaders);
+        }
+        const existing = await env.DB.prepare(
+          'SELECT owner_user_id FROM investigation_sessions WHERE id = ?'
+        ).bind(sessionId).first<{ owner_user_id: string | null }>();
+        if (!existing) {
+          return jsonResponse({ error: 'Session not found' }, 404, requestCorsHeaders);
+        }
+        const principal = auth.email || auth.principal;
+        const isAdmin = auth.role === 'admin' || auth.role === 'superadmin';
+        if (!canAccessInvestigationSession(existing.owner_user_id, principal, isAdmin)) {
+          throw new Error('Forbidden');
+        }
+        await env.DB.prepare('DELETE FROM investigation_sessions WHERE id = ?').bind(sessionId).run();
+        return jsonResponse({ id: sessionId, deleted: true }, 200, requestCorsHeaders);
       } catch (error) {
         await writeOpsMetric(env, 'query_errors_total', 1).catch(() => undefined);
         return errorResponse(error, requestCorsHeaders);

@@ -32,6 +32,7 @@
     "d1:migrate:rbac": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/005_auth_rbac.sql",
     "d1:migrate:workflows": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/006_operational_workflows.sql",
     "d1:migrate:dash-widgets": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/007_dashboard_widget_model.sql",
+    "d1:migrate:investigation-sessions": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/011_investigation_sessions.sql",
     "d1:migrate:performance": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/013_performance_policies_and_materializations.sql",
     "test:prd": "bash ./scripts/run-prd-smoke-tests.sh",
     "test:golden-path": "bash ./scripts/run-golden-activation.sh",

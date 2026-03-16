@@ -311,6 +311,7 @@ CREATE INDEX IF NOT EXISTS idx_materialization_runs_entity
 -- Investigation sessions for investigation acceleration pack
 CREATE TABLE IF NOT EXISTS investigation_sessions (
   id TEXT PRIMARY KEY,
+  name TEXT,
   owner_user_id TEXT,
   source_type TEXT,
   scope_json TEXT NOT NULL,

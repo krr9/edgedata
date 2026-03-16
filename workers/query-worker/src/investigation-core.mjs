@@ -31,7 +31,7 @@ function validateScopeValue(value, fieldName) {
 }
 
 const ALLOWED_SESSION_KEYS = new Set([
-  'id', 'owner_user_id', 'source_type', 'scope_json', 'state_json', 'created_at', 'expires_at'
+  'id', 'name', 'owner_user_id', 'source_type', 'scope_json', 'state_json', 'created_at', 'expires_at'
 ]);
 
 function parseTimeWindow(fromIso, toIso, maxHours) {
@@ -353,6 +353,13 @@ export function validateSessionSaveRequest(body) {
   }
 
   const result = { ok: true, scope_json: scopeJson, state_json: stateJson };
+  if (b.name !== undefined && b.name !== null) {
+    const name = String(b.name).trim();
+    if (name.length > 200) {
+      return { ok: false, error: 'name must be 200 characters or fewer' };
+    }
+    result.name = name || null;
+  }
   if (b.source_type !== undefined && b.source_type !== null) {
     result.source_type = String(b.source_type);
   }
@@ -427,6 +434,7 @@ export function buildSessionRecord(input) {
   record.scope_json = scopeStr;
   record.state_json = stateStr;
   record.created_at = String(createdAt).trim();
+  record.name = obj.name !== undefined ? (obj.name === null ? null : String(obj.name)) : undefined;
   record.owner_user_id = obj.owner_user_id !== undefined ? String(obj.owner_user_id) : undefined;
   record.source_type = obj.source_type !== undefined ? String(obj.source_type) : undefined;
   record.expires_at = obj.expires_at === null ? null : (obj.expires_at !== undefined ? String(obj.expires_at) : undefined);

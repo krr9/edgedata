@@ -337,8 +337,8 @@ export function AlertsPage({
               <pre>{JSON.stringify(alertPayloadPreview, null, 2)}</pre>
             </div>
           </div>
-          <div className="alert-actions">
-            <button className="secondary" onClick={() => void createAlert()}>Create Alert</button>
+          <div className="alert-form-actions">
+            <button onClick={() => void createAlert()}>Create Alert</button>
             <button className="secondary" disabled={starterPackApplying} onClick={() => void applyStarterAlertPack()}>
               {starterPackApplying ? 'Applying...' : 'Apply Starter Pack'}
             </button>
@@ -370,15 +370,15 @@ export function AlertsPage({
                   <div className="alert-name">{alert.name}</div>
                   <div className="alert-meta">
                     <span>{alert.type}</span>
-                    <span>template:{alert.query_template}</span>
+                    <span>{alert.query_template}</span>
                     <span>every {alert.schedule_seconds}s</span>
-                    <span>{alert.enabled ? 'enabled' : 'disabled'}</span>
-                    {notify.severity && <span>severity:{notify.severity}</span>}
-                    {params.window_minutes && <span>window:{params.window_minutes}m</span>}
-                    {params.token && <span>token:{params.token}</span>}
-                    {params.service && <span>service:{params.service}</span>}
-                    {params.env && <span>env:{params.env}</span>}
-                    {params.index && <span>index:{params.index}</span>}
+                    <span className={alert.enabled ? '' : 'alert-status-disabled'}>{alert.enabled ? 'enabled' : 'disabled'}</span>
+                    {notify.severity && <span className={`alert-severity-${notify.severity}`}>{notify.severity}</span>}
+                    {params.window_minutes && <span>{params.window_minutes}m window</span>}
+                    {params.token && <span>token: {params.token}</span>}
+                    {params.service && <span>{params.service}</span>}
+                    {params.env && <span>{params.env}</span>}
+                    {params.index && <span>{params.index}</span>}
                   </div>
                   <div className="alert-governance">
                     {notify.owner_team && <span className="alert-governance-pill ok">team:{notify.owner_team}</span>}
@@ -394,7 +394,7 @@ export function AlertsPage({
                     <a className="secondary alert-link-btn" href={workspaceHref}>Investigate</a>
                   )}
                   {notify.deep_link && (
-                    <a className="secondary alert-link-btn" href={notify.deep_link} target="_blank" rel="noreferrer">Open Deep Link</a>
+                    <a className="secondary alert-link-btn" href={notify.deep_link}>Search</a>
                   )}
                   {notify.runbook_url && (
                     <a className="secondary alert-link-btn" href={notify.runbook_url} target="_blank" rel="noreferrer">Runbook</a>

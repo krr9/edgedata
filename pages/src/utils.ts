@@ -540,7 +540,7 @@ export function buildDefaultAlertDeepLink(query: string): string {
   if (typeof window === 'undefined') return '';
   const base = window.location.origin.replace(/\/+$/, '');
   if (!base || !query.trim()) return '';
-  return `${base}/?view=search&query=${encodeURIComponent(query)}`;
+  return `${base}/?${TAB_QUERY_PARAM}=search&query=${encodeURIComponent(query)}`;
 }
 
 export function parseAlertNotifyConfig(raw: string): AlertNotifyConfig {

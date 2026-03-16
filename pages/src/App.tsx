@@ -415,7 +415,11 @@ function App() {
   });
 
   const [queryInputMode, setQueryInputMode] = useState<QueryInputMode>('search');
-  const [query, setQuery] = useState('search * | where index="otel-demo" | sort -ts | head 200');
+  const [query, setQuery] = useState(() => {
+    if (typeof window === 'undefined') return 'search * | where index="otel-demo" | sort -ts | head 200';
+    const urlQuery = new URLSearchParams(window.location.search).get('query')?.trim();
+    return urlQuery || 'search * | where index="otel-demo" | sort -ts | head 200';
+  });
   const [queryFocused, setQueryFocused] = useState(false);
   const [querySuggestions, setQuerySuggestions] = useState<QuerySuggestionItem[]>([]);
   const [querySuggestionsOpen, setQuerySuggestionsOpen] = useState(false);
@@ -632,6 +636,11 @@ function App() {
   const sessionIdFromUrl = useMemo(() => {
     if (typeof window === 'undefined') return null;
     return new URLSearchParams(window.location.search).get('session')?.trim() || null;
+  }, []);
+
+  const deeplinkQuery = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    return new URLSearchParams(window.location.search).get('query')?.trim() || null;
   }, []);
 
   const investigationContext = useMemo(() => {
@@ -2591,6 +2600,14 @@ function App() {
     setActiveIndex(-1);
     void runSearch({ append: false, cursor: null, pivotOverrides: nextPivots });
   }, [cancelOngoingSearch, loading, runSearch, streaming]);
+
+  const deeplinkSearchFiredRef = useRef(false);
+  useEffect(() => {
+    if (deeplinkSearchFiredRef.current || !deeplinkQuery || !user) return;
+    deeplinkSearchFiredRef.current = true;
+    setView('search');
+    void runSearch({ append: false, cursor: null });
+  }, [deeplinkQuery, user, runSearch]);
 
   useEffect(() => {
     cancelOngoingSearch();

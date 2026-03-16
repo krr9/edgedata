@@ -364,6 +364,51 @@
   border-bottom-color: #2d4668;
 }
 
+[data-theme='dark'] .admin-kicker {
+  color: #8fc0ff;
+}
+
+[data-theme='dark'] .admin-header-pill {
+  background: #14263d;
+  border-color: #315172;
+  color: #c4d8f3;
+}
+
+[data-theme='dark'] .admin-tabs-shell {
+  background: #101f33;
+  border-color: #2a415f;
+}
+
+[data-theme='dark'] .admin-tab-button {
+  border-color: #243c5a;
+  color: #9bb3d1;
+}
+
+[data-theme='dark'] .admin-tab-button:hover {
+  background: #14263d;
+  color: #f2f7ff;
+}
+
+[data-theme='dark'] .admin-tab-button.active {
+  background: linear-gradient(180deg, #162b44 0%, #19314e 100%);
+  color: #f2f7ff;
+}
+
+[data-theme='dark'] .admin-tab-badge {
+  background: #1d3b61;
+  color: #b9d8ff;
+}
+
+[data-theme='dark'] .admin-summary-card {
+  background: linear-gradient(180deg, #101f33 0%, #13263d 100%);
+  border-color: #2a415f;
+}
+
+[data-theme='dark'] .admin-status-list div {
+  background: #14263d;
+  border-color: #2f4b6d;
+}
+
 [data-theme='dark'] .section-icon.invite { background: #1b3554; color: #8ab8ff; }
 [data-theme='dark'] .section-icon.role { background: #352b51; color: #ccb7ff; }
 [data-theme='dark'] .section-icon.mapping { background: #1f3b32; color: #92e2b8; }
@@ -382,6 +427,16 @@
   background: #0f2136;
   border-color: #355577;
   color: #93bfff;
+}
+
+[data-theme='dark'] .invite-link-open {
+  background: #1b3554;
+  border-color: #426997;
+  color: #b9d7ff;
+}
+
+[data-theme='dark'] .invite-link-open:hover {
+  background: #224166;
 }
 
 [data-theme='dark'] .table-wrap {
@@ -606,7 +661,10 @@ body {
 }
 
 .main-panel-brand {
+  --ed-logo-accent: var(--primary);
   margin-right: auto;
+  display: inline-flex;
+  align-items: center;
   color: var(--text);
   padding: 2px 2px 2px 0;
 }
@@ -733,23 +791,29 @@ body {
   z-index: 1;
   pointer-events: auto;
   border-radius: 999px;
-  padding: 6px 10px 6px 6px;
+  padding: 7px 12px 7px 7px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(140, 179, 224, 0.2);
 }
 
 .nav-brand-link .ed-logo {
-  gap: 9px;
+  gap: 10px;
 }
 
 .nav-brand-link .ed-logo-wordmark {
-  font-size: 18px;
+  font-size: 20px;
 }
 
 .nav-brand-link .ed-logo-badge {
   color: #b8d8ff;
   border-color: rgba(124, 168, 214, 0.38);
   background: rgba(255, 255, 255, 0.04);
+}
+
+.side-nav.collapsed .nav-brand-link {
+  padding: 2px;
+  background: transparent;
+  border: none;
 }
 
 .side-nav-tabs {
@@ -2660,9 +2724,26 @@ button.danger {
 
 .admin-header {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
   margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.admin-header-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.admin-kicker {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--primary);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .admin-header h2 {
@@ -2675,7 +2756,160 @@ button.danger {
 .admin-header .admin-subtitle {
   font-size: 13px;
   color: var(--muted);
+  max-width: 720px;
+  line-height: 1.5;
+}
+
+.admin-header-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-header-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid #d7e5f7;
+  background: #f7fbff;
+  color: #365274;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.admin-tabs-shell {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 1px 1px rgba(13, 37, 72, 0.03), 0 10px 24px rgba(13, 37, 72, 0.04);
+  overflow: hidden;
+}
+
+.admin-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.admin-tab-button {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 16px 18px;
+  background: transparent;
+  border: none;
+  border-right: 1px solid #e7eef9;
+  text-align: left;
+  color: var(--muted);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.admin-tab-button:last-child {
+  border-right: none;
+}
+
+.admin-tab-button:hover {
+  background: #f7fbff;
+  color: var(--text);
+}
+
+.admin-tab-button.active {
+  background: linear-gradient(180deg, #f7fbff 0%, #eff5ff 100%);
+  color: var(--text);
+}
+
+.admin-tab-topline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.admin-tab-label {
+  font-size: 14px;
+  font-weight: 700;
+  color: inherit;
+}
+
+.admin-tab-badge {
   margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #e9f2ff;
+  color: #1e52a0;
+  white-space: nowrap;
+}
+
+.admin-tab-caption {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.admin-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.admin-panel-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.admin-panel-intro h3 {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.admin-panel-intro p {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.admin-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.admin-summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid #dce8f7;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  box-shadow: 0 1px 1px rgba(13, 37, 72, 0.02), 0 8px 18px rgba(13, 37, 72, 0.04);
+}
+
+.admin-summary-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.admin-summary-value {
+  font-size: 28px;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  color: var(--text);
+}
+
+.admin-summary-detail {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
 }
 
 .billing-notice {
@@ -2738,6 +2972,16 @@ button.danger {
   border-radius: 12px;
   box-shadow: 0 1px 1px rgba(13, 37, 72, 0.03), 0 10px 24px rgba(13, 37, 72, 0.04);
   padding: 18px;
+}
+
+.admin-card-copy {
+  margin-bottom: 12px;
+}
+
+.admin-card-copy p {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
 }
 
 .admin-card .admin-section-title {
@@ -2830,6 +3074,22 @@ button.danger {
 
 .admin-card button.admin-submit:hover {
   background: var(--primary-700);
+}
+
+.admin-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-action-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.admin-action-list button {
+  justify-content: center;
 }
 
 .invite-token-box {
@@ -3119,6 +3379,37 @@ button.danger {
 .onboarding-check-copy span {
   font-size: 12px;
   color: var(--muted);
+}
+
+.admin-status-list {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-status-list div {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #dce8f7;
+  background: #f8fbff;
+}
+
+.admin-status-list dt {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.admin-status-list dd {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text);
+  text-align: right;
 }
 
 .admin-inline-form {
@@ -3818,6 +4109,14 @@ button.danger {
     overflow: visible;
     padding-right: 0;
   }
+
+  .admin-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .admin-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 900px) {
@@ -3924,8 +4223,40 @@ button.danger {
     align-self: flex-start;
   }
 
+  .admin-header-stats {
+    width: 100%;
+  }
+
+  .admin-tabs {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-tab-button {
+    border-right: none;
+    border-bottom: 1px solid #e7eef9;
+  }
+
+  .admin-tab-button:last-child {
+    border-bottom: none;
+  }
+
+  .admin-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
   .admin-form-row.cols-2 {
     grid-template-columns: 1fr;
+  }
+
+  .admin-action-row,
+  .role-pill-controls,
+  .admin-status-list div {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .admin-status-list dd {
+    text-align: left;
   }
 
   .alert-row {
@@ -4302,11 +4633,7 @@ button.danger {
 }
 
 .main-panel-brand .ed-logo-wordmark {
-  font-size: 16px;
-}
-
-.main-panel-brand .ed-logo-mark {
-  filter: drop-shadow(0 10px 16px rgba(12, 58, 112, 0.18));
+  font-size: 24px;
 }
 
 .auth-subtitle {

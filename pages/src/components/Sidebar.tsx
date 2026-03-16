@@ -34,7 +34,7 @@ export function Sidebar({
     <aside className={`side-nav ${navExpanded ? 'expanded' : 'collapsed'}`} aria-label="Application navigation">
       <div className="side-nav-top">
         <a className="nav-brand nav-brand-link" href="/" aria-label="Go to home page">
-          <EdgeDataLogo size={22} wordmark={navExpanded} />
+          <EdgeDataLogo size={28} wordmark={navExpanded} />
         </a>
         <button
           type="button"

@@ -2,7 +2,6 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { SunMoon } from 'lucide-react';
 import { useAuth } from './AuthContext';
 import { AuthScreen } from './AuthScreen';
-import { EdgeDataLogo } from './components/EdgeDataLogo';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Sidebar } from './components/Sidebar';
 import { useApiClient } from './hooks/useApiClient';
@@ -2732,7 +2731,10 @@ function App() {
         <div className="top-utility-bar">
           {!navExpanded && (
             <div className="main-panel-brand" aria-label="EdgeData brand">
-              <EdgeDataLogo size={22} />
+              <span className="ed-logo-wordmark">
+                <span className="ed-logo-wordmark-edge">Edge</span>
+                <span className="ed-logo-wordmark-data">Data</span>
+              </span>
             </div>
           )}
           <div className="theme-toggle-popover">

@@ -13,19 +13,23 @@ export async function fetchSyntheticControl(
   init: RequestInit = {}
 ): Promise<Response> {
   if (!env.SYNTHETIC_SERVICE) {
-    throw new Error('Synthetic control is not configured (missing SYNTHETIC_SERVICE binding)');
+    throw new Error('Missing SYNTHETIC_SERVICE binding – deploy synthetic-worker and add the service binding to query-worker wrangler.toml');
   }
   if (!env.SYNTHETIC_RUN_SECRET) {
-    throw new Error('Synthetic control is not configured (missing SYNTHETIC_RUN_SECRET secret)');
+    throw new Error('Missing SYNTHETIC_RUN_SECRET – run: wrangler secret put SYNTHETIC_RUN_SECRET --config workers/query-worker/wrangler.toml');
   }
   const headers = new Headers(init.headers || {});
   headers.set('Authorization', `Bearer ${env.SYNTHETIC_RUN_SECRET}`);
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
-  return env.SYNTHETIC_SERVICE.fetch(
-    new Request(`https://internal${path}`, { ...init, headers })
-  );
+  try {
+    return await env.SYNTHETIC_SERVICE.fetch(
+      new Request(`https://internal${path}`, { ...init, headers })
+    );
+  } catch (err) {
+    throw new Error(`Cannot reach synthetic-worker via service binding: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 export async function fetchAlertControl(
@@ -34,19 +38,23 @@ export async function fetchAlertControl(
   init: RequestInit = {}
 ): Promise<Response> {
   if (!env.ALERT_SERVICE) {
-    throw new Error('Alert control is not configured (missing ALERT_SERVICE binding)');
+    throw new Error('Missing ALERT_SERVICE binding – deploy alert-worker and add the service binding to query-worker wrangler.toml');
   }
   if (!env.ALERT_RUN_SECRET) {
-    throw new Error('Alert control is not configured (missing ALERT_RUN_SECRET secret)');
+    throw new Error('Missing ALERT_RUN_SECRET – run: wrangler secret put ALERT_RUN_SECRET --config workers/query-worker/wrangler.toml');
   }
   const headers = new Headers(init.headers || {});
   headers.set('Authorization', `Bearer ${env.ALERT_RUN_SECRET}`);
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
-  return env.ALERT_SERVICE.fetch(
-    new Request(`https://internal${path}`, { ...init, headers })
-  );
+  try {
+    return await env.ALERT_SERVICE.fetch(
+      new Request(`https://internal${path}`, { ...init, headers })
+    );
+  } catch (err) {
+    throw new Error(`Cannot reach alert-worker via service binding: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 export async function handleSyntheticIngestAdmin(
@@ -66,7 +74,7 @@ export async function handleSyntheticIngestAdmin(
     const runBody = await runResponse.json() as Record<string, unknown>;
     if (!runResponse.ok || runBody.error) {
       return jsonResponse(
-        { error: String(runBody.error || `Synthetic run failed (${runResponse.status})`) },
+        { error: String(runBody.error || runBody.reason || `Synthetic run failed (${runResponse.status})`), run: runBody },
         runResponse.status >= 400 ? runResponse.status : 500,
         requestCorsHeaders
       );
@@ -82,7 +90,7 @@ export async function handleSyntheticIngestAdmin(
     const body = await response.json() as Record<string, unknown>;
     if (!response.ok || body.error) {
       return jsonResponse(
-        { error: String(body.error || `Synthetic control request failed (${response.status})`) },
+        { error: String(body.error || body.reason || `Synthetic control request failed (${response.status})`) },
         response.status >= 400 ? response.status : 500,
         requestCorsHeaders
       );
@@ -103,7 +111,7 @@ export async function handleSyntheticIngestAdmin(
     const controlBody = await controlResponse.json() as Record<string, unknown>;
     if (!controlResponse.ok || controlBody.error) {
       return jsonResponse(
-        { error: String(controlBody.error || `Synthetic control update failed (${controlResponse.status})`) },
+        { error: String(controlBody.error || controlBody.reason || `Synthetic control update failed (${controlResponse.status})`) },
         controlResponse.status >= 400 ? controlResponse.status : 500,
         requestCorsHeaders
       );
@@ -117,8 +125,9 @@ export async function handleSyntheticIngestAdmin(
       if (!runResponse.ok || runBody.error) {
         return jsonResponse(
           {
-            error: String(runBody.error || `Synthetic run failed (${runResponse.status})`),
-            control: controlBody
+            error: String(runBody.error || runBody.reason || `Synthetic run failed (${runResponse.status})`),
+            control: controlBody,
+            run: runBody
           },
           runResponse.status >= 400 ? runResponse.status : 500,
           requestCorsHeaders

@@ -9,7 +9,7 @@ name = "materialize-worker-prod"
 
 [[env.production.d1_databases]]
 binding = "DB"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "61273132-a0db-4835-a80d-524e77d9d8b4"
 database_name = "edgedata-db"
 
 [[env.production.services]]
@@ -21,7 +21,7 @@ QUERY_WORKER_URL = ""
 
 [[d1_databases]]
 binding = "DB"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "61273132-a0db-4835-a80d-524e77d9d8b4"
 database_name = "edgedata-db"
 
 [[services]]

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { EventTimeline } from './EventTimeline';
 import { PivotChips } from './PivotChips';
 import { RelatedEventsPanel } from './RelatedEventsPanel';
 import { DemoScenarioPicker, type DemoScenarioSelection } from './DemoScenarioPicker';
@@ -313,6 +314,11 @@ export function IncidentWorkspacePage({
     void loadBootstrap(scope, time);
   }, [loadBootstrap, scope, time]);
 
+  const handleTimelinePivot = useCallback((newPivots: InvestigationPivots) => {
+    setPivots(newPivots);
+    setSignalCounts({});
+  }, []);
+
   const handleSelectScenario = useCallback(
     (selection: DemoScenarioSelection) => {
       setScope(selection.scope);
@@ -498,6 +504,17 @@ export function IncidentWorkspacePage({
             </div>
           )}
         </div>
+      )}
+
+      {/* ── Event Timeline ─────────────────────────────────── */}
+      {hasPivots(pivots) && (
+        <EventTimeline
+          apiFetch={apiFetch}
+          scope={scope}
+          time={time}
+          pivots={pivots}
+          onPivotEvent={handleTimelinePivot}
+        />
       )}
 
       {/* ── Top Signals with inline counts ────────────────── */}

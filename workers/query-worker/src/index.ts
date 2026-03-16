@@ -459,7 +459,33 @@ export default {
         const pivotTokens = Array.isArray(body.pivot_tokens) ? body.pivot_tokens : [];
         const maxCandidates =
           body.max_candidates != null ? Math.min(Number(body.max_candidates), 100) : 100;
-        const candidates: Array<Record<string, unknown>> = [];
+
+        const scope = body.scope as { index?: string; service?: string; env?: string } | undefined;
+        const time = body.time as { from: string; to: string };
+        const conditions: string[] = [];
+        if (scope?.index && scope.index !== '*') conditions.push(`index="${scope.index}"`);
+        if (scope?.service && scope.service !== '*') conditions.push(`service="${scope.service}"`);
+        if (scope?.env && scope.env !== '*') conditions.push(`env="${scope.env}"`);
+        const pivotConditions: string[] = [];
+        if (pivots.trace_id) pivotConditions.push(`trace_id="${pivots.trace_id}"`);
+        if (pivots.request_id) pivotConditions.push(`request_id="${pivots.request_id}"`);
+        if (pivots.user_id) pivotConditions.push(`user_id="${pivots.user_id}"`);
+        if (pivots.msg_hash) pivotConditions.push(`msg_hash="${pivots.msg_hash}"`);
+        const allConditions = [...conditions, ...(pivotConditions.length > 0 ? [pivotConditions.join(' or ')] : [])];
+        const ppl = allConditions.length > 0
+          ? `search * | where ${allConditions.join(' and ')} | sort -ts | head ${maxCandidates}`
+          : `search * | sort -ts | head ${maxCandidates}`;
+
+        let candidates: Array<Record<string, unknown>> = [];
+        try {
+          const searchResult = await performPplSearch({ time, ppl, limit: maxCandidates, cursor: null }, env, auth);
+          if (searchResult.results) {
+            candidates = searchResult.results as Array<Record<string, unknown>>;
+          }
+        } catch {
+          // fall through with empty candidates
+        }
+
         const ranked = rankRelatedEvents(pivots, pivotTokens, candidates, { maxCandidates });
         return jsonResponse({ related_events: ranked }, 200, requestCorsHeaders);
       } catch (error) {

@@ -35,5 +35,13 @@ export async function onRequest(context) {
 
   const upstreamRequest = new Request(buildUpstreamUrl(request.url), init);
 
-  return env.QUERY_API.fetch(upstreamRequest);
+  try {
+    return await env.QUERY_API.fetch(upstreamRequest);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return new Response(
+      JSON.stringify({ error: `Upstream query-worker error: ${message}` }),
+      { status: 502, headers: { 'content-type': 'application/json' } }
+    );
+  }
 }

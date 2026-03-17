@@ -10,16 +10,6 @@ EdgeData is a Cloudflare-operations control layer, not a replacement for Cloudfl
 - Optimize for MTTR reduction, explainable investigations, and repeatable incident response.
 - Keep storage/query backend choices implementation-level and swappable.
 
-## Evidence Pack
-
-Launch-readiness proof artifacts are tracked in [`docs/evidence`](docs/evidence/README.md):
-
-- Benchmark scorecard: [`docs/evidence/benchmark-scorecard-2026-03-09.md`](docs/evidence/benchmark-scorecard-2026-03-09.md)
-- Design-partner outcomes tracker: [`docs/evidence/design-partner-outcomes.md`](docs/evidence/design-partner-outcomes.md)
-- Case-study artifact: [`docs/evidence/case-study-synthetic-alert-to-investigation.md`](docs/evidence/case-study-synthetic-alert-to-investigation.md)
-
-Current design-partner status: `pending` (tracked in `docs/evidence/design-partner-outcomes.md`).
-
 ## Components
 
 - `workers/ingest-worker`: pluggable ingest framework that accepts batched log events (EdgeData JSON, OTLP/HTTP JSON logs, NDJSON), authenticates (Bearer or HMAC), normalizes payloads, writes raw NDJSON to R2, then asynchronously writes WAE metrics and token index shards.

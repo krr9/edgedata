@@ -1139,18 +1139,33 @@ body {
   color: var(--muted);
 }
 
-/* ── Dashboard investigate link ──────────────── */
+/* ── Dashboard investigate button ────────────── */
 .widget-investigate-btn {
-  text-decoration: none;
-  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: 0 10px 22px rgba(29, 78, 216, 0.22);
+}
+
+.widget-investigate-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 28px rgba(29, 78, 216, 0.28);
+}
+
+[data-theme='dark'] .widget-investigate-btn {
+  box-shadow: 0 12px 26px rgba(6, 26, 54, 0.45);
+}
+
+[data-theme='dark'] .widget-investigate-btn:hover {
+  box-shadow: 0 16px 32px rgba(6, 26, 54, 0.52);
 }
 
 /* ── Event inspector investigate button ──────── */
 .investigate-btn {
   background: var(--primary) !important;
   color: #fff !important;
+  border: 1px solid var(--primary) !important;
   border-color: var(--primary) !important;
   font-weight: 600;
+  transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease;
 }
 
 /* ── Event Timeline ──────────────────────────── */

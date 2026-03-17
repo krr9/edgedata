@@ -91,38 +91,45 @@ export function WidgetGrid({
         onLayoutChange(next);
       }}
     >
-      {widgets.map((widget) => (
-        <div key={widget.id} className="widget-card">
-          <div className="widget-card-header">
-            <h3>{widget.title}</h3>
-            <div className="widget-card-actions">
-              <a
-                className="secondary widget-investigate-btn"
-                href={buildInvestigationHref({
-                  source: 'dashboard',
-                  sourceLabel: widget.title,
-                  ...extractScopeFromPpl(widget.query_text)
-                })}
-                aria-label="Investigate"
-              >Investigate</a>
-              <button className="secondary" onClick={() => onRefreshWidget(widget.id)} aria-label="Refresh">Refresh</button>
-              {editable && (
-                <>
-                  <button className="secondary" onClick={() => onEditWidget(widget.id)} aria-label="Edit">Edit</button>
-                  <button className="secondary" onClick={() => onDuplicateWidget(widget.id)} aria-label="Duplicate">Duplicate</button>
-                  <button className="danger" onClick={() => onDeleteWidget(widget.id)} aria-label="Delete">Delete</button>
-                </>
-              )}
+      {widgets.map((widget) => {
+        const investigationHref = buildInvestigationHref({
+          source: 'dashboard',
+          sourceLabel: widget.title,
+          ...extractScopeFromPpl(widget.query_text)
+        });
+
+        return (
+          <div key={widget.id} className="widget-card">
+            <div className="widget-card-header">
+              <h3>{widget.title}</h3>
+              <div className="widget-card-actions">
+                <button
+                  type="button"
+                  className="investigate-btn widget-investigate-btn"
+                  onClick={() => window.location.assign(investigationHref)}
+                  aria-label="Investigate in workspace"
+                >
+                  Investigate
+                </button>
+                <button className="secondary" onClick={() => onRefreshWidget(widget.id)} aria-label="Refresh">Refresh</button>
+                {editable && (
+                  <>
+                    <button className="secondary" onClick={() => onEditWidget(widget.id)} aria-label="Edit">Edit</button>
+                    <button className="secondary" onClick={() => onDuplicateWidget(widget.id)} aria-label="Duplicate">Duplicate</button>
+                    <button className="danger" onClick={() => onDeleteWidget(widget.id)} aria-label="Delete">Delete</button>
+                  </>
+                )}
+              </div>
             </div>
+            <WidgetRenderer
+              widget={widget}
+              data={widgetData[widget.id] || []}
+              loading={Boolean(widgetLoading[widget.id])}
+              error={widgetErrors[widget.id] || null}
+            />
           </div>
-          <WidgetRenderer
-            widget={widget}
-            data={widgetData[widget.id] || []}
-            loading={Boolean(widgetLoading[widget.id])}
-            error={widgetErrors[widget.id] || null}
-          />
-        </div>
-      ))}
+        );
+      })}
     </ResponsiveGridLayout>
   );
 }

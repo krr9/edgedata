@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>EdgeData | Cloudflare-native log search and investigation workflows</title>
+    <meta
+      name="description"
+      content="EdgeData is a Cloudflare-native operations control center for log search, dashboards, alerts, and investigations."
+    />
+    <meta name="theme-color" content="#08111d" />
+    <meta property="og:title" content="EdgeData | Cloudflare-native log search and investigation workflows" />
+    <meta
+      property="og:description"
+      content="Deep search, operator-first alerting, and clear incident workflows for teams running on Cloudflare."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://edgedata.dev" />
+    <meta property="og:image" content="https://edgedata.dev/assets/edgedata-mark.svg" />
+    <link rel="canonical" href="https://edgedata.dev" />
+    <link rel="icon" type="image/svg+xml" href="./assets/edgedata-mark.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="site-shell">
+      <div class="noise noise-left" aria-hidden="true"></div>
+      <div class="noise noise-right" aria-hidden="true"></div>
+
+      <header class="site-header">
+        <a class="brand" href="#top" aria-label="EdgeData home">
+          <img src="./assets/edgedata-logo.svg" alt="EdgeData" />
+        </a>
+        <nav class="site-nav" aria-label="Primary">
+          <a href="#platform">Platform</a>
+          <a href="#screens">Features</a>
+          <a href="#deploy-model">Deployment Model</a>
+          <a class="nav-cta" href="https://tally.so/r/J90L97" target="_blank" rel="noreferrer">Give feedback</a>
+        </nav>
+      </header>
+
+      <main id="top">
+        <section class="hero">
+          <div class="hero-copy">
+            <div class="eyebrow">Cloudflare operations control center</div>
+            <h1>Deep search, dashboards, alerts, and investigations in one operator-first surface.</h1>
+            <p class="hero-text">
+              EdgeData is built for teams that already run on Cloudflare and want a focused way to move from signal to
+              root cause without stitching together half a dozen tools during an incident.
+            </p>
+            <div class="hero-actions">
+              <a class="button button-primary" href="#screens">See product screens</a>
+              <a class="button button-secondary" href="https://tally.so/r/J90L97" target="_blank" rel="noreferrer">Share feedback</a>
+            </div>
+            <p class="hero-note">
+              Single-tenant deployment model on Cloudflare Pages, Workers, D1, R2, and Analytics Engine.
+            </p>
+          </div>
+
+          <div class="hero-card">
+            <div class="terminal-bar">
+              <span></span>
+              <span></span>
+              <span></span>
+              <strong>incident-explorer.ppl</strong>
+            </div>
+            <div class="terminal-body">
+              <code>search "origin timeout" | where service="checkout-api" and env="prod"</code>
+              <code class="accent">timechart span=5m count() by level</code>
+              <div class="signal-grid">
+                <div class="signal-panel">
+                  <span>Live signal</span>
+                  <strong>5xx spike detected</strong>
+                  <p>checkout-api · prod · last 15m</p>
+                </div>
+                <div class="signal-panel">
+                  <span>Pivot trail</span>
+                  <strong>trace_id, request_id, msg_hash</strong>
+                  <p>Bounded phrase scan ready</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="pill-band">
+          <span>Cloudflare-native runtime and storage</span>
+          <span>Object-backed event and token indexes</span>
+          <span>PPL as the investigation language</span>
+          <span>Alert-to-investigation workflow design</span>
+          <span>Predictable guardrails on expensive queries</span>
+        </section>
+
+        <section class="section" id="platform">
+          <div class="section-heading">
+            <span class="eyebrow">Platform</span>
+            <h2>Built for on-call, platform, and security-adjacent teams that need incident clarity fast.</h2>
+            <p>
+              EdgeData keeps the operational path tight: collect edge and app signals, summarize them clearly, alert with
+              context, and pivot into the exact event trail that explains what changed.
+            </p>
+          </div>
+
+          <div class="feature-grid">
+            <article class="feature-card">
+              <h3>Deep search that stays explainable</h3>
+              <p>Move between token search, phrase scans, filters, and pivots without losing the investigation trail.</p>
+            </article>
+            <article class="feature-card">
+              <h3>PPL as the search language of choice</h3>
+              <p>Use a readable pipeline language for investigations so searches, filters, stats, and pivots stay transparent to operators.</p>
+            </article>
+            <article class="feature-card">
+              <h3>Dashboards that drive action</h3>
+              <p>Expose error spikes, latency regressions, hotspots, and service fanout in a view built for operators.</p>
+            </article>
+            <article class="feature-card">
+              <h3>Alert workflows with context</h3>
+              <p>Keep thresholds, schedules, runbook metadata, and deep-link conventions attached to each operational alert.</p>
+            </article>
+            <article class="feature-card">
+              <h3>Single-tenant by design</h3>
+              <p>Deploy into your own Cloudflare account so data control, security boundaries, and spend stay local.</p>
+            </article>
+          </div>
+          <p class="platform-note">
+            EdgeData uses PPL because incident response benefits from a query language that is expressive enough for real investigations
+            but still readable when alerts, dashboards, and saved searches need to be shared across a team.
+          </p>
+        </section>
+
+        <section class="section" id="screens">
+          <div class="section-heading">
+            <span class="eyebrow">Features</span>
+            <h2>Operational capabilities built for fast investigation.</h2>
+            <p>
+              EdgeData brings together operational dashboards, PPL-powered log search, alert definition workflows, rich
+              event inspection, and workspace administration as one connected investigation surface.
+            </p>
+          </div>
+
+          <div class="gallery">
+            <figure class="shot shot-wide">
+              <img src="./assets/screens/dashboards.png" alt="EdgeData dashboards view with service volume, error, and hotspot panels." />
+              <figcaption>
+                <strong>Dashboards</strong>
+                <span>Track event volume, error rates, slow requests, host hotspots, and service mix in one command-center view.</span>
+              </figcaption>
+            </figure>
+
+            <figure class="shot shot-wide">
+              <img src="./assets/screens/log_explorer.png" alt="EdgeData log explorer with activity timeline, filters, and event results." />
+              <figcaption>
+                <strong>Log explorer</strong>
+                <span>Search recent activity with PPL, structured filters, facets, timelines, and keyboard-friendly event review.</span>
+              </figcaption>
+            </figure>
+
+            <figure class="shot shot-wide">
+              <img src="./assets/screens/alerts.png" alt="EdgeData alert definitions view with templates, thresholds, and notification channels." />
+              <figcaption>
+                <strong>Alert workflows</strong>
+                <span>Define thresholds, owners, runbooks, windows, and notification routes without leaving the operational context.</span>
+              </figcaption>
+            </figure>
+
+            <figure class="shot shot-tall">
+              <img src="./assets/screens/event_detail.png" alt="EdgeData event detail panel with core fields and structured attributes." />
+              <figcaption>
+                <strong>Event detail</strong>
+                <span>Inspect trace IDs, status, host, user, and raw attributes to understand the exact incident payload.</span>
+              </figcaption>
+            </figure>
+
+            <figure class="shot shot-wide">
+              <img src="./assets/screens/admin.png" alt="EdgeData administration screen with access, invites, operations, and audit log sections." />
+              <figcaption>
+                <strong>Administration</strong>
+                <span>Manage access, invites, operational controls, and audit history from a single workspace control plane.</span>
+              </figcaption>
+            </figure>
+          </div>
+        </section>
+
+        <section class="section" id="deploy-model">
+          <div class="section-heading">
+            <span class="eyebrow">Deployment Model</span>
+            <h2>Cloudflare-native by design, from ingest to investigation.</h2>
+            <p>
+              EdgeData is built around the Cloudflare stack so teams can ingest logs, search with PPL, define alerts, and
+              investigate incidents using primitives that already fit how their edge and application infrastructure runs.
+            </p>
+          </div>
+
+          <div class="deploy-grid">
+            <div class="deploy-card">
+              <strong>Ingest and search</strong>
+              <p>Workers handle ingestion and query execution while object-backed indexes keep deep search durable and explainable.</p>
+            </div>
+            <div class="deploy-card">
+              <strong>Stateful operations</strong>
+              <p>D1 stores saved searches, alerts, preferences, and operational state so teams can move from detection to action quickly.</p>
+            </div>
+            <div class="deploy-card">
+              <strong>Analytics and retention</strong>
+              <p>R2 and Analytics Engine support recent visibility, raw retention, and drilldown paths without turning EdgeData into a generic analytics project.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="section" id="feedback">
+          <div class="feedback-card">
+            <div class="section-heading">
+              <span class="eyebrow">Feedback</span>
+              <h2>Tell us what feels compelling, confusing, or missing.</h2>
+              <p>
+                EdgeData is actively evolving, and we&apos;re looking for blunt product feedback from engineers, operators,
+                and teams running on Cloudflare. The form is short and goes straight to our team.
+              </p>
+            </div>
+
+            <div class="feedback-actions">
+              <a class="button button-primary" href="https://tally.so/r/J90L97" target="_blank" rel="noreferrer">
+                Open feedback form
+              </a>
+              <p class="feedback-note">2-minute form. Great for early feedback, feature requests, and design-partner interest.</p>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <img src="./assets/edgedata-logo.svg" alt="EdgeData" />
+        <p>Cloudflare-native log search and investigation workflows built for faster incident response.</p>
+      </footer>
+    </div>
+  </body>
+</html>

@@ -46,45 +46,35 @@
 
       <main id="top">
         <section class="hero">
-          <div class="hero-copy">
-            <div class="eyebrow">Cloudflare operations control center</div>
-            <h1>Deep search, dashboards, alerts, and investigations in one operator-first surface.</h1>
-            <p class="hero-text">
-              EdgeData is built for teams that already run on Cloudflare and want a focused way to move from signal to
-              root cause without stitching together half a dozen tools during an incident.
-            </p>
-            <div class="hero-actions">
-              <a class="button button-primary" href="#screens">See product screens</a>
-              <a class="button button-secondary" href="https://tally.so/r/J90L97" target="_blank" rel="noreferrer">Share feedback</a>
-            </div>
-            <p class="hero-note">
-              Single-tenant deployment model on Cloudflare Pages, Workers, D1, R2, and Analytics Engine.
-            </p>
-          </div>
+          <figure class="hero-shot">
+            <img src="./assets/screens/log_explorer.png" alt="EdgeData log explorer with search bar, timeline, and event stream." />
+          </figure>
 
-          <div class="hero-card">
-            <div class="terminal-bar">
-              <span></span>
-              <span></span>
-              <span></span>
-              <strong>incident-explorer.ppl</strong>
-            </div>
-            <div class="terminal-body">
-              <code>search "origin timeout" | where service="checkout-api" and env="prod"</code>
-              <code class="accent">timechart span=5m count() by level</code>
-              <div class="signal-grid">
-                <div class="signal-panel">
-                  <span>Live signal</span>
-                  <strong>5xx spike detected</strong>
-                  <p>checkout-api · prod · last 15m</p>
-                </div>
-                <div class="signal-panel">
-                  <span>Pivot trail</span>
-                  <strong>trace_id, request_id, msg_hash</strong>
-                  <p>Bounded phrase scan ready</p>
-                </div>
+          <div class="hero-content">
+            <div class="hero-copy">
+              <div class="eyebrow">Cloudflare operations control center</div>
+              <h1>Deep search, dashboards, and alert workflows for Cloudflare operators.</h1>
+              <p class="hero-text">
+                EdgeData keeps the path from signal to root cause tight, with product screens up front and investigation steps that stay
+                readable under pressure.
+              </p>
+              <div class="hero-actions">
+                <a class="button button-primary" href="#screens">See product screens</a>
+                <a class="button button-secondary" href="https://tally.so/r/J90L97" target="_blank" rel="noreferrer">Share feedback</a>
               </div>
+              <p class="hero-note">
+                Single-tenant deployment on Cloudflare Pages, Workers, D1, R2, and Analytics Engine.
+              </p>
             </div>
+
+            <aside class="hero-highlights" aria-label="Key product highlights">
+              <span class="eyebrow">Why it clicks</span>
+              <ul>
+                <li>PPL search, filters, and pivots stay in one incident workflow.</li>
+                <li>Dashboards and alerts link directly into drilldown-ready event trails.</li>
+                <li>Your team deploys it inside your own Cloudflare account.</li>
+              </ul>
+            </aside>
           </div>
         </section>
 

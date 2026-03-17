@@ -128,7 +128,13 @@ npm run deploy:all:d1
 Production note:
 
 - `deploy:all:d1` now auto-injects `QUERY_WORKER_URL` for `alert-worker`.
-- For production deploys (`-- --env production`), set one of these first:
+- The quickest first deploy uses the top-level worker names above.
+- For `env.production`, deploy `query-worker` first, copy its exact published URL, then set one of these before deploying the rest:
+
+```bash
+D1_DATABASE_ID=<d1-database-uuid> \
+npm run deploy:query:d1 -- --env production
+```
 
 ```bash
 export QUERY_WORKER_URL="https://<query-worker-prod>.<subdomain>.workers.dev"
@@ -163,6 +169,7 @@ export VITE_QUERY_API_BASE="$QUERY_URL"
 
 - If SSO is enabled, `VITE_QUERY_API_BASE` must be the exact Access-protected query API origin the browser uses for Access bootstrap and live tail.
 - `npm run deploy:pages` now fails fast when `VITE_QUERY_API_BASE` is missing or still set to the legacy `query-worker.rvkishore.workers.dev` default.
+- Ensure [`pages/wrangler.toml`](/Users/kishore/code/edgedata/pages/wrangler.toml) `name` matches an existing Pages project in your account. Create it first with `npx wrangler pages project create <project-name>` if needed.
 
 How to discover D1 database ID on first deployment:
 
@@ -181,6 +188,12 @@ Run unit tests for query parser/planner internals:
 
 ```bash
 npm run test:unit
+```
+
+Validate schema.sql vs migration consistency:
+
+```bash
+npm run test:migrations
 ```
 
 Validate Access audience/group pinning in Wrangler configs:
@@ -211,18 +224,30 @@ Apply reprocessing writes with `--apply`.
 
 ## Database
 
-Apply schema:
+Fresh deployment (applies the consolidated schema baseline plus the starter/data migrations that remain safe on top of it):
 
 ```bash
-npm run d1:migrate
-npm run d1:migrate:authz
-npm run d1:migrate:users
-npm run d1:migrate:ratelimits
-npm run d1:migrate:rbac
-npm run d1:migrate:performance
+npm run d1:migrate:fresh
 ```
 
-Schema file: `schema.sql`
+Notes:
+
+- `schema.sql` already includes the schema changes from migrations `002` through `007`, `011`, `013`, `014`, and `017`.
+- If you run raw `wrangler d1 execute` commands, remember Wrangler reads the root [`wrangler.toml`](/Users/kishore/code/edgedata/wrangler.toml). Either update its `database_id` or use the helper scripts that inject `D1_DATABASE_ID`.
+
+Incremental upgrade path (for older existing databases, apply the full chain exactly once and in order):
+
+```bash
+npm run d1:migrate:upgrade
+```
+
+Validate schema vs migrations consistency:
+
+```bash
+npm run test:migrations
+```
+
+Schema file: `schema.sql` (consolidated baseline kept in sync with all migrations)
 
 ## Required Secrets/Vars
 

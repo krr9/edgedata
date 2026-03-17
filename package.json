@@ -26,6 +26,8 @@
     "demo:zeek": "node examples/zeek-demo.mjs",
     "d1:create": "wrangler d1 create edgedata-db",
     "d1:migrate": "wrangler d1 execute edgedata-db --file=./schema.sql",
+    "d1:migrate:fresh": "bash ./scripts/apply-d1-migrations.sh fresh",
+    "d1:migrate:upgrade": "bash ./scripts/apply-d1-migrations.sh upgrade",
     "d1:migrate:authz": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/002_authz_ownership.sql",
     "d1:migrate:users": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/003_auth_users.sql",
     "d1:migrate:ratelimits": "wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/004_rate_limits.sql",

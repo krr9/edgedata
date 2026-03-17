@@ -49,6 +49,16 @@ EdgeData is single-tenant: one deployment per Cloudflare account. Your data neve
 
 ## 2. Prerequisites
 
+### 2.0 Before You Deploy
+
+Complete these items before you start the actual worker and Pages deployment steps:
+
+- Create the Cloudflare API token in [2.3 API Token](#23-api-token).
+- Log in with Wrangler in [2.4 Local Tooling](#24-local-tooling).
+- Create the D1 database in [3.2 Create a D1 Database](#32-create-a-d1-database).
+- Export `D1_DATABASE_ID` from the D1 create output before running any `deploy:*:d1` or migration helper command.
+- Plan to set `CF_API_TOKEN` as a Wrangler secret on `query-worker` and `alert-worker` in section 8 before verifying dashboards, alerts, or WAE-backed queries.
+
 ### 2.1 Cloudflare Account Requirements
 
 You need a Cloudflare account on a **Workers Paid** plan (or higher). The Free plan is insufficient because EdgeData requires:
@@ -68,7 +78,7 @@ In the Cloudflare dashboard, confirm or enable:
 1. **Workers & Pages** — enabled by default on paid plans
 2. **R2 Object Storage** — go to **R2** in the sidebar and accept terms if prompted
 3. **D1 Databases** — go to **Workers & Pages > D1** and verify access
-4. **Workers Analytics Engine** — available under **Workers & Pages > Analytics Engine**; no explicit opt-in needed on paid plans
+4. **Workers Analytics Engine** — available under **Workers & Pages > Analytics Engine**; some fresh accounts still require an explicit dashboard enablement step before deploys succeed
 5. **Cloudflare Access** (if using SSO) — go to **Zero Trust > Access** and connect your IdP
 
 ### 2.3 API Token
@@ -154,7 +164,7 @@ export D1_DATABASE_ID="a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 
 ### 3.3 Enable Workers Analytics Engine
 
-Navigate to **Workers & Pages > Analytics Engine** in the dashboard. The `log_metrics` dataset is created automatically when the ingest worker first writes to it. No manual dataset creation is needed.
+Navigate to **Workers & Pages > Analytics Engine** in the dashboard. If Cloudflare shows an enable or accept-terms flow for your account, complete it before deploying workers. The `log_metrics` dataset is still created automatically when the ingest worker first writes to it, so no manual dataset creation is needed after Analytics Engine is enabled for the account.
 
 ---
 
@@ -226,30 +236,26 @@ cd ../..
 
 ## 6. Run Database Migrations
 
-Apply the base schema and all incremental migrations to your D1 database. Run these in order:
+For a fresh Cloudflare account, use the consolidated schema baseline plus the post-schema starter/data migrations that are still safe on top of the current schema snapshot:
 
 ```bash
-# Base schema (creates all core tables)
-wrangler d1 execute edgedata-db --remote --file=./schema.sql
-
-# Incremental migrations
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/002_authz_ownership.sql
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/003_auth_users.sql
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/004_rate_limits.sql
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/005_auth_rbac.sql
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/006_operational_workflows.sql
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/007_dashboard_widget_model.sql
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/008_otel_saved_scheduled_showcase.sql
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/009_otel_dashboard_jazz_up.sql
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/010_runtime_synthetic_ingest_control.sql
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/011_investigation_sessions.sql
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/012_shorten_otel_overview_copy.sql
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/013_performance_policies_and_materializations.sql
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/014_scheduled_search_run_artifacts.sql
-wrangler d1 execute edgedata-db --remote --file=./deploy/migrations/015_role_id_index.sql
+npm run d1:migrate:fresh
 ```
 
-Verify with:
+This helper uses the root `wrangler.toml` plus `D1_DATABASE_ID` and avoids the duplicate-column errors you hit when replaying older schema migrations on top of the current `schema.sql` snapshot.
+
+Important:
+
+- After `schema.sql`, do not re-run migrations `002` through `007`, `011`, `013`, `014`, or `017`. Those schema changes are already folded into the current baseline.
+- If you are upgrading an older existing database instead of bootstrapping a fresh one, run the full ordered chain instead:
+
+```bash
+npm run d1:migrate:upgrade
+```
+
+- If you prefer raw `wrangler d1 execute` commands, remember that Wrangler reads the root [`wrangler.toml`](/Users/kishore/code/edgedata/wrangler.toml). Either update its `database_id` first or keep using the helper scripts above.
+
+Verify the schema snapshot and migration metadata stay aligned:
 
 ```bash
 npm run test:migrations
@@ -261,12 +267,28 @@ npm run test:migrations
 
 ### 7.1 First Deploy (All Workers)
 
-The deploy wrapper script injects the D1 database ID into each worker's config at deploy time:
+The deploy wrapper script injects the D1 database ID into each worker's config at deploy time.
+
+For the quickest onboarding path, deploy the top-level worker names first:
 
 ```bash
 export D1_DATABASE_ID="<your-d1-database-uuid>"
 npm run deploy:all:d1
 ```
+
+If you want the `env.production` worker names, use a staged production deploy so you can capture the query-worker production URL before deploying the workers that depend on it:
+
+```bash
+export D1_DATABASE_ID="<your-d1-database-uuid>"
+npm run deploy:query:d1 -- --env production
+
+# Copy the exact URL printed by Wrangler for query-worker-prod.
+export QUERY_WORKER_URL="https://query-worker-prod.<subdomain>.workers.dev"
+
+npm run deploy:all:d1 -- --env production
+```
+
+Wrangler will warn that multiple environments are defined. That is expected in this repo. Without `--env production`, Wrangler deploys the top-level worker names (`query-worker`, `ingest-worker`, and so on).
 
 This deploys all five workers:
 - `ingest-worker` — log ingestion API
@@ -307,10 +329,11 @@ D1_DATABASE_ID="<uuid>" npm run deploy:all:d1:dry-run
 
 ### 7.4 Single Worker Redeploy
 
-After updating a single worker:
+After updating a single worker, redeploy it to the same environment you originally chose:
 
 ```bash
 D1_DATABASE_ID="<uuid>" npm run deploy:query:d1
+D1_DATABASE_ID="<uuid>" npm run deploy:query:d1 -- --env production
 ```
 
 ---
@@ -318,6 +341,8 @@ D1_DATABASE_ID="<uuid>" npm run deploy:query:d1
 ## 8. Configure Secrets
 
 Secrets are set per worker using `wrangler secret put`. They are encrypted at rest and never committed to the repository.
+
+If you deployed with `--env production`, add `--env production` to each `wrangler secret put` command below so the secret lands in the same worker environment you deployed.
 
 ### 8.1 Ingest Worker Secrets
 
@@ -501,7 +526,7 @@ Important:
 Create a second Access Application for the UI:
 
 1. Same flow as above
-2. **Application domain:** your Pages URL (e.g., `edgedata-1fo.pages.dev` or custom domain)
+2. **Application domain:** your actual Pages hostname (for example `your-project.pages.dev`, `your-project-your-account.pages.dev`, or your custom domain)
 3. Use the same policy/groups
 4. Both applications should share the same audience tag, or configure separate audiences
 
@@ -522,7 +547,7 @@ ACCESS_VIEWER_GROUPS = "edgedata-viewers"
 ACCESS_ADMIN_EMAILS = "your-admin@example.com"
 AUTH_BOOTSTRAP_SUPERADMIN_EMAIL = "your-admin@example.com"
 AUTH_ENABLE_LOCAL_LOGIN = "true"
-CORS_ORIGINS = "https://edgedata-1fo.pages.dev,https://*.edgedata-1fo.pages.dev"
+CORS_ORIGINS = "https://<your-pages-host>,https://*.<your-pages-host>"
 ```
 
 Set the same Access variables on the alert worker:
@@ -542,9 +567,13 @@ After editing `wrangler.toml` vars, redeploy the affected workers:
 ```bash
 D1_DATABASE_ID="<uuid>" npm run deploy:query:d1
 D1_DATABASE_ID="<uuid>" npm run deploy:alert:d1
+D1_DATABASE_ID="<uuid>" npm run deploy:query:d1 -- --env production
+D1_DATABASE_ID="<uuid>" npm run deploy:alert:d1 -- --env production
 ```
 
-### 9.6 Skip Access (Local-Only or Development Mode)
+Replace `<your-pages-host>` with the exact hostname Wrangler prints after your Pages deploy, then keep the wildcard preview entry if you want preview deployments to work with credentialed browser requests.
+
+### 9.9 Skip Access (Local-Only or Development Mode)
 
 If you are evaluating EdgeData without SSO, set:
 
@@ -560,7 +589,21 @@ And use email/password login via the bootstrap superadmin account. This is not r
 
 ## 10. Deploy the UI (Pages)
 
-### 10.1 Set the Query API Base URL
+### 10.1 Create or Update the Pages Project
+
+Set the Pages project name in [`pages/wrangler.toml`](/Users/kishore/code/edgedata/pages/wrangler.toml) before your first deploy:
+
+```toml
+name = "<your-pages-project-name>"
+```
+
+If the project does not already exist in your Cloudflare account, create it once:
+
+```bash
+npx wrangler pages project create <your-pages-project-name>
+```
+
+### 10.2 Set the Query API Base URL
 
 The Pages app must know where to call the query API:
 
@@ -570,7 +613,7 @@ export VITE_QUERY_API_BASE="https://query-worker.<subdomain>.workers.dev"
 
 If using Cloudflare Access SSO, this must be the exact Access-protected origin.
 
-### 10.2 Build and Deploy
+### 10.3 Build and Deploy
 
 ```bash
 npm run deploy:pages
@@ -578,21 +621,21 @@ npm run deploy:pages
 
 This command validates `VITE_QUERY_API_BASE`, builds the React app, and deploys to Cloudflare Pages. The deploy script will fail if `VITE_QUERY_API_BASE` is missing.
 
-### 10.3 Note the Pages URL
+### 10.4 Note the Pages URL
 
 After deployment:
 
 ```
-Published to https://edgedata-1fo.pages.dev
+Published to https://<actual-pages-url>
 ```
 
-This is the URL your team will use to access EdgeData.
+Copy the exact hostname Wrangler prints. Depending on your account and deployment type, it may be the production hostname, an account-scoped hostname, or a preview URL with a deployment hash. Use that exact host when you set `CORS_ORIGINS`.
 
-### 10.4 Custom Domain (Optional)
+### 10.5 Custom Domain (Optional)
 
 To serve EdgeData on your own domain:
 
-1. Go to **Workers & Pages > edgedata-1fo > Custom Domains**
+1. Go to **Workers & Pages > <your-pages-project-name> > Custom Domains**
 2. Add your domain (e.g., `logs.yourcompany.com`)
 3. Cloudflare handles SSL automatically
 4. Update `CORS_ORIGINS` on the query worker to include the custom domain

@@ -69,9 +69,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-perl -pe 's/REPLACE_WITH_D1_DATABASE_ID/$ENV{D1_DATABASE_ID}/g' "$CONFIG_PATH" >"$TMP_CONFIG"
+perl -pe 's/^(\s*database_id\s*=\s*")[^"]*(".*)$/$1$ENV{D1_DATABASE_ID}$2/' "$CONFIG_PATH" >"$TMP_CONFIG"
 
 if rg -q "REPLACE_WITH_D1_DATABASE_ID" "$TMP_CONFIG"; then
+  echo "Failed to inject D1_DATABASE_ID into temporary config."
+  exit 1
+fi
+
+if ! rg -q "database_id\\s*=\\s*\"${D1_DATABASE_ID}\"" "$TMP_CONFIG"; then
   echo "Failed to inject D1_DATABASE_ID into temporary config."
   exit 1
 fi

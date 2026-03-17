@@ -132,7 +132,14 @@ a {
 }
 
 .hero-copy {
-  max-width: 46rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(18rem, 0.95fr);
+  gap: 2rem;
+  align-items: start;
+}
+
+.hero-support {
+  padding-top: 1.95rem;
 }
 
 .eyebrow {
@@ -154,9 +161,9 @@ h3,
 }
 
 .hero h1 {
-  max-width: 10.5ch;
+  max-width: 12.5ch;
   margin: 0.7rem 0 0;
-  font-size: clamp(2.2rem, 3.6vw, 3.45rem);
+  font-size: clamp(2rem, 3.2vw, 3rem);
   line-height: 1;
   letter-spacing: -0.06em;
 }
@@ -173,8 +180,8 @@ h3,
 }
 
 .hero-text {
-  max-width: 34rem;
-  margin-top: 0.85rem;
+  max-width: 30rem;
+  margin-top: 0;
   font-size: 0.98rem;
 }
 
@@ -446,9 +453,14 @@ h3,
     align-items: flex-start;
   }
 
+  .hero-copy,
   .feature-grid,
   .deploy-grid {
     grid-template-columns: 1fr;
+  }
+
+  .hero-support {
+    padding-top: 0;
   }
 
   .site-footer p {

@@ -2,6 +2,7 @@
   "name": "edgedata",
   "version": "1.0.0",
   "description": "Edge-Native Log Search & SIEM-lite (Cloudflare-Only)",
+  "license": "Apache-2.0",
   "scripts": {
     "deploy:ingest": "cd workers/ingest-worker && wrangler deploy",
     "deploy:query": "cd workers/query-worker && wrangler deploy",

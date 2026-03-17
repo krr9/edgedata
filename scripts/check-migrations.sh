@@ -43,7 +43,7 @@ extract_table_block() {
 
 check_schema_table() {
   local table_name="$1"
-  if rg -n "^CREATE TABLE IF NOT EXISTS ${table_name} \\(" "$SCHEMA_FILE" >/dev/null 2>&1; then
+  if grep -qE "^CREATE TABLE IF NOT EXISTS ${table_name} " "$SCHEMA_FILE" 2>/dev/null; then
     echo "OK:   schema.sql -> table ${table_name} present"
   else
     echo "FAIL: schema.sql -> missing table ${table_name}"
@@ -62,7 +62,7 @@ check_schema_column() {
     return
   fi
 
-  if printf '%s\n' "$block" | rg -n "^[[:space:]]*${column_name}[[:space:]]+" >/dev/null 2>&1; then
+  if printf '%s\n' "$block" | grep -qE "^[[:space:]]*${column_name}[[:space:]]+" 2>/dev/null; then
     echo "OK:   schema.sql -> ${table_name}.${column_name} present"
   else
     echo "FAIL: schema.sql -> missing column ${table_name}.${column_name}"
@@ -72,7 +72,7 @@ check_schema_column() {
 
 check_schema_index() {
   local index_name="$1"
-  if rg -n "^CREATE INDEX IF NOT EXISTS ${index_name}[[:space:]]*$|^CREATE INDEX IF NOT EXISTS ${index_name}[[:space:]]+ON" "$SCHEMA_FILE" >/dev/null 2>&1; then
+  if grep -qE "^CREATE INDEX IF NOT EXISTS ${index_name}([[:space:]]*$|[[:space:]]+ON)" "$SCHEMA_FILE" 2>/dev/null; then
     echo "OK:   schema.sql -> index ${index_name} present"
   else
     echo "FAIL: schema.sql -> missing index ${index_name}"

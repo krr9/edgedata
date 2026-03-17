@@ -118,7 +118,16 @@ D1_DATABASE_ID=<d1-database-uuid> \
 npm run deploy:all:d1:dry-run
 ```
 
-Deploy workers (first deployment or updates):
+Deploy workers for a brand-new account:
+
+```bash
+D1_DATABASE_ID=<d1-database-uuid> \
+npm run deploy:all:d1:fresh
+```
+
+Bootstrap mode deploys each worker once without service bindings, then redeploys the full graph after the dependent workers exist.
+
+Deploy workers for normal updates after the first bootstrap:
 
 ```bash
 D1_DATABASE_ID=<d1-database-uuid> \
@@ -129,17 +138,11 @@ Production note:
 
 - `deploy:all:d1` now auto-injects `QUERY_WORKER_URL` for `alert-worker`.
 - The quickest first deploy uses the top-level worker names above.
-- For `env.production`, deploy `query-worker` first, copy its exact published URL, then set one of these before deploying the rest:
+- For `env.production`, use the same bootstrap flow with `--env production`:
 
 ```bash
 D1_DATABASE_ID=<d1-database-uuid> \
-npm run deploy:query:d1 -- --env production
-```
-
-```bash
-export QUERY_WORKER_URL="https://<query-worker-prod>.<subdomain>.workers.dev"
-# or reuse QUERY_URL only if it is already the query-worker-prod URL
-export QUERY_URL="https://<query-worker-prod>.<subdomain>.workers.dev"
+npm run deploy:all:d1:fresh -- --env production
 ```
 
 Single-worker deploy examples:
@@ -378,12 +381,27 @@ Query worker:
 - `POST /search`
 - `POST /search/stream` (NDJSON streaming: `meta`, `event`/`row`, `progress`, `final`, `error`)
 - `POST /search/summary`
+- `POST /search/suggestions` (PPL autocomplete suggestions)
 - `POST /investigations/bootstrap`
 - `POST /investigations/related-events`
 - `POST /investigations/session`
+- `GET /investigations/sessions` (list sessions for current user)
 - `GET /investigations/session/:id`
+- `PUT /investigations/session/:id`
+- `DELETE /investigations/session/:id`
 - `GET /investigations/demo-scenarios`
 - `POST /dashboards/query`
+- `GET /dashboards`
+- `POST /dashboards`
+- `PUT /dashboards/:id`
+- `DELETE /dashboards/:id`
+- `PUT /dashboards/:id/layout`
+- `GET /dashboards/:id/panels`
+- `POST /dashboards/:id/panels`
+- `PUT /dashboards/:id/panels/:panelId`
+- `DELETE /dashboards/:id/panels/:panelId`
+- `POST /dashboards/widgets/query` (single widget query)
+- `POST /dashboards/widgets/query-batch` (batch widget query)
 - `GET /users`
 - `PATCH /users/:id`
 - `GET /roles`
@@ -399,6 +417,20 @@ Query worker:
 - `POST /saved-searches`
 - `PUT /saved-searches/:id`
 - `DELETE /saved-searches/:id`
+- `GET /scheduled-searches`
+- `POST /scheduled-searches`
+- `PUT /scheduled-searches/:id`
+- `DELETE /scheduled-searches/:id`
+- `GET /scheduled-searches/:id/results`
+- `POST /scheduled-searches/:id/run` (manual trigger)
+- `GET /scheduled-searches/:id/runs/:runId`
+- `GET /scheduled-searches/:id/runs/:runId/results`
+- `GET /lookup-tables`
+- `POST /lookup-tables`
+- `GET /lookup-tables/:id`
+- `PUT /lookup-tables/:id`
+- `DELETE /lookup-tables/:id`
+- `PATCH /lookup-tables/:id/rows`
 - `GET /alerts`
 - `GET /alerts/starter-pack`
 - `POST /alerts`
@@ -419,6 +451,12 @@ Examples:
 
 - `search timeout postgres | where index="default" and service="payments" and env="prod" and status>=500 | sort -ts | head 200`
 - `search error | where env="demo" | stats count() by service, level | sort -count`
+
+Materialize worker:
+
+- `GET /health`
+- `POST /run` (manual materialization trigger; requires `MATERIALIZE_RUN_SECRET` bearer token)
+- Cron trigger (cadence configured in wrangler.toml)
 
 Alert worker:
 

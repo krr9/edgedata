@@ -39,6 +39,7 @@ Use this checklist for fresh deployments and design-partner onboarding.
 
 ```bash
 npm run test:unit
+npm run test:migrations
 npm run test:access-config
 npm -C pages run build
 ```

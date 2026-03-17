@@ -2,6 +2,8 @@
 
 Edge-native log search and SIEM-lite on Cloudflare Workers, R2, WAE, D1, and Pages.
 
+Website: [edgedata.dev](https://edgedata.dev)
+
 ## Product Positioning
 
 EdgeData is a Cloudflare-operations control layer, not a replacement for Cloudflare-native analytics.
@@ -9,6 +11,8 @@ EdgeData is a Cloudflare-operations control layer, not a replacement for Cloudfl
 - Differentiate on operator workflows: alert -> context -> investigation -> runbook.
 - Optimize for MTTR reduction, explainable investigations, and repeatable incident response.
 - Keep storage/query backend choices implementation-level and swappable.
+
+![EdgeData dashboard overview](/Users/kishore/code/edgedata/marketing-site/assets/screens/dashboards.png)
 
 ## Components
 

@@ -5,6 +5,8 @@
 
 **Billing disclaimer:** EdgeData is deployed into your Cloudflare account. You are responsible for reviewing, understanding, and paying any Cloudflare charges your deployment incurs, including charges related to Workers, R2, D1, Workers Analytics Engine, Durable Objects, Access, Pages, and any other enabled Cloudflare services.
 
+This guide is for fresh deployments. For updates after launch, use the release workflow in [`docs/RELEASING.md`](/Users/kishore/code/edgedata/docs/RELEASING.md).
+
 ---
 
 ## Table of Contents

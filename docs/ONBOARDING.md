@@ -271,23 +271,24 @@ npm run test:migrations
 
 The deploy wrapper script injects the D1 database ID into each worker's config at deploy time.
 
-For the quickest onboarding path, deploy the top-level worker names first:
+For a brand-new Cloudflare account, use the bootstrap deploy once so the worker graph can come up before service bindings are enforced:
 
 ```bash
 export D1_DATABASE_ID="<your-d1-database-uuid>"
+npm run deploy:all:d1:fresh
+```
+
+Bootstrap mode deploys each worker once without service bindings, captures the published worker URLs needed for fallback vars, and then redeploys the full bound graph. After that first successful bootstrap, normal updates can use:
+
+```bash
 npm run deploy:all:d1
 ```
 
-If you want the `env.production` worker names, use a staged production deploy so you can capture the query-worker production URL before deploying the workers that depend on it:
+If you want the `env.production` worker names, use the same bootstrap flow with `--env production`:
 
 ```bash
 export D1_DATABASE_ID="<your-d1-database-uuid>"
-npm run deploy:query:d1 -- --env production
-
-# Copy the exact URL printed by Wrangler for query-worker-prod.
-export QUERY_WORKER_URL="https://query-worker-prod.<subdomain>.workers.dev"
-
-npm run deploy:all:d1 -- --env production
+npm run deploy:all:d1:fresh -- --env production
 ```
 
 Wrangler will warn that multiple environments are defined. That is expected in this repo. Without `--env production`, Wrangler deploys the top-level worker names (`query-worker`, `ingest-worker`, and so on).

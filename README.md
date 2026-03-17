@@ -78,37 +78,17 @@ Build Pages:
 npm -C pages run build
 ```
 
-Run the public Zeek demo (downloads Zeek baseline logs from the Zeek GitHub repository, ingests, then runs search/dashboard/alert showcase calls):
+For demoable data on a fresh stack, use the built-in synthetic worker and OTel-focused starter assets documented in the
+`Synthetic Data Seeder` section below. For a full activation walkthrough against a deployed stack, run:
 
 ```bash
-INGEST_URL=<ingest-worker-url> \
 QUERY_URL=<query-worker-url> \
 ALERT_URL=<alert-worker-url> \
-INGEST_SECRET=<secret> \
-npm run demo:zeek
-```
-
-If `ALERT_RUN_SECRET` is configured on `alert-worker`, set it before running the demo script:
-
-```bash
-INGEST_URL=<ingest-worker-url> \
-QUERY_URL=<query-worker-url> \
-ALERT_URL=<alert-worker-url> \
-INGEST_SECRET=<secret> \
-ALERT_RUN_SECRET=<secret> \
-npm run demo:zeek
-```
-
-If query authentication is enabled, include a query bearer token:
-
-```bash
-INGEST_URL=<ingest-worker-url> \
-QUERY_URL=<query-worker-url> \
-ALERT_URL=<alert-worker-url> \
-INGEST_SECRET=<secret> \
-QUERY_AUTH_TOKEN=<token> \
-ALERT_RUN_SECRET=<secret> \
-npm run demo:zeek
+DEEP_LINK_BASE=<pages-url> \
+RUNBOOK_BASE_URL=<runbook-base-url> \
+ALERT_RUN_SECRET=<alert-run-secret> \
+EMAIL=<admin-email> PASSWORD=<admin-password> \
+npm run test:golden-path
 ```
 
 Dry-run Worker bundles:
@@ -220,7 +200,7 @@ Run raw-to-index reprocessing (dry-run by default):
 ```bash
 INGEST_URL=<ingest-worker-url> \
 REPROCESS_SECRET=<secret> \
-npm run ops:reprocess -- --from 2026-02-16 --to 2026-02-18 --service zeek-conn --env demo
+npm run ops:reprocess -- --from 2026-02-16 --to 2026-02-18 --service checkoutservice --env demo
 ```
 
 Apply reprocessing writes with `--apply`.

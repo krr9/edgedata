@@ -12,7 +12,7 @@ EdgeData is a Cloudflare-operations control layer, not a replacement for Cloudfl
 - Optimize for MTTR reduction, explainable investigations, and repeatable incident response.
 - Keep storage/query backend choices implementation-level and swappable.
 
-![EdgeData dashboard overview](/Users/kishore/code/edgedata/marketing-site/assets/screens/dashboards.png)
+![EdgeData dashboard overview](marketing-site/assets/screens/dashboards.png)
 
 ## Components
 

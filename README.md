@@ -410,7 +410,7 @@ Query worker:
 - `GET /tail` (WebSocket upgrade; real-time log streaming with per-session filters)
 - `GET /tail/stats` (active tail session count and ring buffer size)
 
-Search APIs are now PPL-first:
+Search APIs are PPL-only:
 
 - `POST /search` expects `{ time: { from, to }, ppl, limit?, cursor? }`
 - `POST /search/stream` expects `{ time: { from, to }, ppl, limit?, cursor? }` and returns NDJSON chunks

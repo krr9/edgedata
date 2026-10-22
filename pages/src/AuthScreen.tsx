@@ -138,8 +138,10 @@ export function AuthScreen() {
     <div className="auth-screen">
       <div className="auth-card">
         <div className="auth-logo">
-          <EdgeDataLogo size={72} stacked />
+          <EdgeDataLogo size={40} />
         </div>
+        <h1 className="auth-heading">{isInviteFlow ? 'Join your workspace' : 'Welcome back'}</h1>
+        <p className="auth-subtitle">{isInviteFlow ? 'Set up your account to get started.' : 'Sign in to your EdgeData workspace.'}</p>
 
         {info && <div className="auth-info">{info}</div>}
         {error && <div className="auth-error">{error}</div>}
@@ -156,6 +158,7 @@ export function AuthScreen() {
               <input
                 id="auth-email"
                 type="email"
+                autoComplete="username"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
@@ -168,6 +171,7 @@ export function AuthScreen() {
               <input
                 id="auth-password"
                 type="password"
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
@@ -188,6 +192,7 @@ export function AuthScreen() {
               <input
                 id="auth-invite-password"
                 type="password"
+                autoComplete="new-password"
                 value={invitePassword}
                 onChange={(e) => setInvitePassword(e.target.value)}
                 required
@@ -200,6 +205,7 @@ export function AuthScreen() {
               <input
                 id="auth-invite-password-confirm"
                 type="password"
+                autoComplete="new-password"
                 value={invitePasswordConfirm}
                 onChange={(e) => setInvitePasswordConfirm(e.target.value)}
                 required

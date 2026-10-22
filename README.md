@@ -23,6 +23,8 @@ EdgeData is a Cloudflare-operations control layer, not a replacement for Cloudfl
 - `workers/synthetic-worker`: cron-based synthetic data producer that posts small demo batches to ingest for always-on searchable data.
 - `pages`: React UI for log explorer, dashboards, incident workspace investigations, alerts management, saved searches, and live tail real-time log streaming, including event inspector syntax highlighting and field-count side panels.
 
+The UI supports light, dark, and system themes, responsive layouts, and collapsible navigation. Press `Ctrl+K` (or `⌘K`) to focus log search; use `j`/`k` to move through results, `Enter` to inspect an event, and `Esc` to close the inspector. These shortcuts are inactive while typing in form fields.
+
 ## Data Layout
 
 Raw events:

@@ -1,3 +1,4 @@
+import { Search } from 'lucide-react';
 import type { RefObject } from 'react';
 import { PivotChips } from '../investigation/PivotChips';
 import { RelatedEventsPanel } from '../investigation/RelatedEventsPanel';
@@ -242,6 +243,7 @@ export function SearchPage(props: SearchPageProps) {
             <label>Time Range</label>
             <div className="time-inputs">
               <input
+                aria-label="Time range start"
                 type="datetime-local"
                 value={timeFrom}
                 onChange={(event) => {
@@ -251,6 +253,7 @@ export function SearchPage(props: SearchPageProps) {
               />
               <span>to</span>
               <input
+                aria-label="Time range end"
                 type="datetime-local"
                 value={timeTo}
                 onChange={(event) => {
@@ -276,6 +279,7 @@ export function SearchPage(props: SearchPageProps) {
             <button
               type="button"
               className="secondary"
+              aria-expanded={showAdvancedFilters}
               onClick={() => setShowAdvancedFilters((value) => !value)}
             >
               {showAdvancedFilters ? 'Hide Filters' : `Advanced Filters${activeAdvancedFilterCount > 0 ? ` (${activeAdvancedFilterCount})` : ''}`}
@@ -312,7 +316,7 @@ export function SearchPage(props: SearchPageProps) {
           </div>
         )}
 
-        <div className="query-mode-toggle" role="tablist" aria-label="Search input mode">
+        <div className="query-mode-toggle" role="group" aria-label="Search input mode">
           <button
             type="button"
             className={queryInputMode === 'search' ? 'active' : ''}
@@ -341,6 +345,7 @@ export function SearchPage(props: SearchPageProps) {
           <div className="query-input-wrapper" ref={queryTypeaheadRef}>
             <input
               ref={searchInputRef}
+              aria-label={queryInputMode === 'ask_ai' ? 'Describe your question' : 'Search query'}
               type="text"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
@@ -581,6 +586,14 @@ export function SearchPage(props: SearchPageProps) {
         </div>
       )}
 
+      {!hasCompletedSearch && !loading && !error && !hasPivots(investigationPivots) ? (
+        <section className="search-welcome card">
+          <span className="search-welcome-icon" aria-hidden="true"><Search size={24} /></span>
+          <h2>Start with a search</h2>
+          <p>Choose a time range and run a query to explore your events. Use the query assistant to turn a question into a search you can review.</p>
+          <span className="search-welcome-hint">Tip: press <kbd>Ctrl / ⌘ K</kbd> to jump to the query input.</span>
+        </section>
+      ) : (<>
       <div className="level-strip">
         <div className="pill error">Error {levelTotals.error}</div>
         <div className="pill warn">Warn {levelTotals.warn}</div>
@@ -938,6 +951,7 @@ export function SearchPage(props: SearchPageProps) {
           </section>
         </div>
       )}
+      </>)}
     </div>
   );
 }

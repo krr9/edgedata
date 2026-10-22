@@ -41,6 +41,7 @@ export function Sidebar({
           className="side-nav-toggle"
           onClick={() => setNavExpanded((value) => !value)}
           aria-label={navExpanded ? 'Collapse navigation' : 'Expand navigation'}
+          aria-expanded={navExpanded}
           data-tooltip={navExpanded ? 'Collapse navigation' : 'Expand navigation'}
           {...getTooltipHandlers(navExpanded ? 'Collapse navigation' : 'Expand navigation')}
         >
@@ -48,13 +49,16 @@ export function Sidebar({
         </button>
       </div>
 
-      <div className="side-nav-tabs" role="tablist" aria-label="Primary">
+      <nav className="side-nav-tabs" aria-label="Primary">
+        <span className="nav-section-label" aria-hidden="true">Workspace</span>
         {navItems.map((item) => (
           <button
             key={item.key}
             type="button"
             className={`side-nav-tab ${view === item.key ? 'active' : ''}`}
             onClick={() => setAddressableView(item.key)}
+            aria-label={item.label}
+            aria-current={view === item.key ? 'page' : undefined}
             data-tooltip={item.label}
             {...getTooltipHandlers(item.label)}
           >
@@ -62,6 +66,10 @@ export function Sidebar({
             {navExpanded && <span className="side-nav-tab-label">{item.label}</span>}
           </button>
         ))}
+      </nav>
+      <div className="side-nav-footer nav-workspace-note">
+        <span className="nav-workspace-mark" aria-hidden="true">E</span>
+        {navExpanded && <div><strong>Your workspace</strong><span>Edge-native observability</span></div>}
       </div>
     </aside>
   );

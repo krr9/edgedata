@@ -85,6 +85,18 @@ const DashboardPage = lazy(async () => {
   return { default: mod.DashboardPage };
 });
 
+const VIEW_DESCRIPTIONS = {
+  operations: 'Stay on top of incidents, source health, and recent changes.',
+  search: 'Explore your logs. Find the signal behind every event.',
+  dashboard: 'Monitor the metrics that matter to your services.',
+  alerts: 'Detect issues early and keep your team informed.',
+  saved: 'Pick up where you left off with reusable searches.',
+  scheduled: 'Automate recurring searches and review their results.',
+  livetail: 'Follow incoming events as they happen.',
+  workspace: 'Connect the evidence and work through an incident.',
+  admin: 'Manage your workspace, access, and configuration.'
+};
+
 function evictOldest<V>(map: Map<string, V>, maxSize: number): void {
   if (map.size <= maxSize) return;
   const toDelete = map.size - maxSize;
@@ -406,7 +418,7 @@ function DashTable({ data }: { data: DashboardRow[] }) {
 function App() {
   const [themePreference, setThemePreference] = useState<ThemePreference>(() => readStoredThemePreference());
   const [systemPrefersDark, setSystemPrefersDark] = useState(() => readSystemPrefersDark());
-  const [navExpanded, setNavExpanded] = useState(false);
+  const [navExpanded, setNavExpanded] = useState(() => typeof window !== 'undefined' && window.innerWidth >= 1024);
   const [sidebarTooltip, setSidebarTooltip] = useState<{ label: string; x: number; y: number } | null>(null);
   const [explorerPanelHeight, setExplorerPanelHeight] = useState<number | null>(null);
   const [view, setView] = useState<ViewMode>(() => {
@@ -2725,6 +2737,7 @@ function App() {
   return (
     <ErrorBoundary>
       <div className="app">
+        <a className="skip-link" href="#main-content">Skip to content</a>
         <Sidebar
         navExpanded={navExpanded}
         setNavExpanded={setNavExpanded}
@@ -2744,16 +2757,13 @@ function App() {
         </div>
       )}
 
-      <main className={`main ${hasScrollableResultsPanel ? 'main-search-scroll-lock' : ''}`}>
-        <div className="top-utility-bar">
-          {!navExpanded && (
-            <div className="main-panel-brand" aria-label="EdgeData brand">
-              <span className="ed-logo-wordmark">
-                <span className="ed-logo-wordmark-edge">Edge</span>
-                <span className="ed-logo-wordmark-data">Data</span>
-              </span>
-            </div>
-          )}
+      <main id="main-content" tabIndex={-1} className={`main ${hasScrollableResultsPanel ? 'main-search-scroll-lock' : ''}`}>
+        <header className="top-utility-bar">
+          <div className="page-heading">
+            <span className="page-eyebrow">Workspace <span aria-hidden="true">/</span> {navItems.find((item) => item.key === view)?.label}</span>
+            <h1>{navItems.find((item) => item.key === view)?.label}</h1>
+            <p>{VIEW_DESCRIPTIONS[view]}</p>
+          </div>
           <div className="theme-toggle-popover">
             <button
               type="button"
@@ -2807,7 +2817,7 @@ function App() {
           <button type="button" className="nav-logout" onClick={logout} aria-label="Sign out" title="Sign out">
             <span className="side-nav-tab-icon" aria-hidden="true">{renderNavIcon('signout')}</span>
           </button>
-        </div>
+        </header>
         {view === 'livetail' && <LiveTailView apiBase={API_BASE} apiToken={apiToken || null} onSelectEvent={setSelectedEvent} />}
         {view === 'workspace' && (
           <IncidentWorkspacePage
